@@ -1,0 +1,48 @@
+# --- Build artifacts ---
+/target/
+**/target/
+/dist/
+**/dist/
+build/
+
+# --- Rust ---
+# (Cargo.lock is kept: these are binaries/apps)
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.bak
+*.bak2
+*.bak_*
+
+# --- Node ---
+node_modules/
+
+# --- Terraform ---
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+crash.log
+
+# --- Secrets / local config ---
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+# real agent config (keep the .exemplo)
+agent.conf
+**/staging/agent.conf
+
+# --- Archives ---
+*.zip
+
+# --- OS / editors ---
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
