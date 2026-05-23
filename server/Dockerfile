@@ -14,7 +14,8 @@
 # =============================================================================
 
 # ----- Stage 1: dependências (cache-friendly) --------------------------------
-FROM python:3.11-slim-bookworm AS deps
+#FROM python:3.11-slim-bookworm AS deps
+FROM public.ecr.aws/docker/library/python:3.11-slim-bookworm AS deps
 
 # Hardening básico do build env
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -30,7 +31,8 @@ RUN pip install --user --no-cache-dir -r requirements.txt
 
 
 # ----- Stage 2: imagem final, sem build deps ---------------------------------
-FROM python:3.11-slim-bookworm AS runtime
+#FROM python:3.11-slim-bookworm AS runtime
+FROM public.ecr.aws/docker/library/python:3.11-slim-bookworm AS runtime
 
 ARG VERSION=dev
 ARG BUILD_DATE

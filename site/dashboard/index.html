@@ -130,8 +130,8 @@
     <label>Tenant</label>
     <input id="loginTenant" placeholder="acme-corp">
     <div style="height:10px"></div>
-    <label>Token Admin</label>
-    <input id="loginToken" type="password" placeholder="admin token">
+    <label>Token de acesso</label>
+    <input id="loginToken" type="password" placeholder="token do painel ou token de admin">
     <div style="height:18px"></div>
     <button class="primary" style="width:100%" onclick="doLogin()">Entrar</button>
   </div>
@@ -175,7 +175,7 @@
       <div class="card span-3"><h3>Aderência</h3><div class="stat" id="kpiAdh">—<small>%</small></div></div>
       <div class="card span-8">
         <h3>Tempo ativo por colaborador</h3>
-        <canvas id="chartUsers" height="120"></canvas>
+        <div style="height: 260px"><canvas id="chartUsers"></canvas></div>
       </div>
       <div class="card span-4">
         <h3>Top aplicações</h3>
@@ -422,7 +422,7 @@ async function selectUser(uid) {
   state.selectedUser = uid;
   document.getElementById('userDetailName').textContent = uid;
   try {
-    const s = await api(`/v1/users/${encodeURIComponent(uid)}/summary?days=30`);
+    const s = await api(`/v1/users/${encodeURIComponent(uid)}/summary?tenant=${encodeURIComponent(state.tenant)}&days=30`);
     const total = (s.active_seconds||0)+(s.afk_seconds||0);
     const adh = total>0 ? Math.round((s.active_seconds||0)/total*100) : 0;
     document.getElementById('userDetail').innerHTML = `

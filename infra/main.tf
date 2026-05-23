@@ -351,6 +351,10 @@ resource "aws_iam_role" "codebuild" {
   })
 }
 
+# NOTA: as permissões abaixo foram ajustadas para incluir s3:ListBucket e
+# ecr:GetDownloadUrlForLayer — permissões que se mostraram necessárias para o
+# build da imagem no primeiro deploy real (maio/2026). Com esta versão, um
+# novo deploy do zero funciona sem nenhum ajuste manual de IAM.
 resource "aws_iam_role_policy" "codebuild" {
   name = "codebuild-permissions"
   role = aws_iam_role.codebuild.id
@@ -364,10 +368,13 @@ resource "aws_iam_role_policy" "codebuild" {
         Resource = "*"
       },
       {
-        Sid      = "ReadSource"
-        Effect   = "Allow"
-        Action   = ["s3:GetObject", "s3:GetObjectVersion"]
-        Resource = "arn:aws:s3:::${local.deploy_bucket}/*"
+        Sid    = "ReadSource"
+        Effect = "Allow"
+        Action = ["s3:GetObject", "s3:GetObjectVersion", "s3:ListBucket"]
+        Resource = [
+          "arn:aws:s3:::${local.deploy_bucket}",
+          "arn:aws:s3:::${local.deploy_bucket}/*"
+        ]
       },
       {
         Sid      = "EcrAuth"
@@ -380,6 +387,7 @@ resource "aws_iam_role_policy" "codebuild" {
         Effect = "Allow"
         Action = [
           "ecr:BatchCheckLayerAvailability",
+          "ecr:GetDownloadUrlForLayer",
           "ecr:InitiateLayerUpload",
           "ecr:UploadLayerPart",
           "ecr:CompleteLayerUpload",

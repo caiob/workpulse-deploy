@@ -292,6 +292,33 @@
     font-family: var(--mono); font-size: 10.5px; color: var(--text-muted);
     text-align: center; letter-spacing: 0.04em;
   }
+
+  /* Formulario de criar empresa */
+  .new-company-grid {
+    display: grid; grid-template-columns: repeat(5, 1fr);
+    gap: 10px; align-items: end;
+  }
+  @media (max-width: 1100px) {
+    .new-company-grid { grid-template-columns: 1fr 1fr; }
+  }
+  .fld-label {
+    display: block; font-size: 10px; color: var(--text-muted);
+    font-family: var(--mono); text-transform: uppercase;
+    letter-spacing: 0.06em; margin-bottom: 4px;
+  }
+  .fld {
+    width: 100%; background: var(--code-bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px 10px; font-size: 13px; font-family: var(--sans);
+  }
+  .fld:focus { outline: 2px solid var(--primary); }
+  button.primary-btn {
+    background: linear-gradient(135deg, var(--primary), #4d6dff);
+    color: #fff; border: 0; padding: 9px 18px; border-radius: 7px;
+    cursor: pointer; font-weight: 600; font-size: 12px;
+    font-family: var(--mono); letter-spacing: 0.04em; text-transform: uppercase;
+  }
+  button.primary-btn:hover { filter: brightness(1.1); }
 </style>
 </head>
 <body>
@@ -425,6 +452,52 @@
     <h1 class="page-title">Tenants</h1>
     <p class="page-sub">Todas as empresas registradas na instância. Cada linha representa uma empresa cliente isolada.</p>
 
+    <div class="card" style="margin-bottom: 16px">
+      <div class="h3-row"><h3 class="inline">Criar empresa (emitir licença)</h3></div>
+      <div class="new-company-grid">
+        <div>
+          <label class="fld-label">ID da empresa</label>
+          <input id="ncId" class="fld" placeholder="ex: acme">
+        </div>
+        <div>
+          <label class="fld-label">Nome</label>
+          <input id="ncName" class="fld" placeholder="ex: ACME Ltda">
+        </div>
+        <div>
+          <label class="fld-label">Plano</label>
+          <select id="ncPlan" class="fld">
+            <option value="starter">starter</option>
+            <option value="business" selected>business</option>
+            <option value="enterprise">enterprise</option>
+          </select>
+        </div>
+        <div>
+          <label class="fld-label">Licenças (seats)</label>
+          <input id="ncSeats" class="fld" type="number" value="10" min="1">
+        </div>
+        <div>
+          <label class="fld-label">Validade (dias)</label>
+          <input id="ncDays" class="fld" type="number" value="365" min="1">
+        </div>
+      </div>
+      <div style="margin-top: 12px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap">
+        <button class="primary-btn" onclick="createCompany()">Criar empresa</button>
+        <span class="mono" style="color: var(--text-muted); font-size: 11px">A empresa é criada junto com a primeira licença.</span>
+      </div>
+      <div id="ncResult" class="hide" style="margin-top: 14px; padding: 14px; background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px">
+        <div class="mono" id="ncResTitle" style="font-size: 11px; color: var(--accent); margin-bottom: 10px">EMPRESA CRIADA</div>
+        <div id="ncLicBlock">
+          <div class="mono" style="font-size: 10px; color: var(--text-muted); margin-bottom: 4px">LICENÇA DO AGENTE — vai nos instaladores (MSI / .deb)</div>
+          <textarea id="ncLicKey" readonly rows="2" style="width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px; font-family: var(--mono); font-size: 11.5px; resize: vertical"></textarea>
+          <button class="ghost" style="margin: 8px 0 14px" onclick="copyLicKey()">copiar licença</button>
+        </div>
+        <div class="mono" style="font-size: 10px; color: var(--text-muted); margin-bottom: 4px">ACESSO AO PAINEL DO CLIENTE — o cliente usa para entrar em workforce.html</div>
+        <div class="mono" style="font-size: 12px; color: var(--text); margin-bottom: 6px">Tenant: <span id="ncResTenant" style="color: var(--primary)"></span></div>
+        <textarea id="ncDashToken" readonly rows="2" style="width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px; font-family: var(--mono); font-size: 11.5px; resize: vertical"></textarea>
+        <button class="ghost" style="margin-top: 8px" onclick="copyDashToken()">copiar token do painel</button>
+      </div>
+    </div>
+
     <div class="toolbar">
       <label>Buscar</label>
       <input id="tenantFilter" oninput="renderTenants()" placeholder="id ou nome">
@@ -445,6 +518,7 @@
             <th>ID</th><th>Nome</th><th>Plano</th><th>Status</th>
             <th class="num">Usuários</th><th class="num">Devices</th>
             <th class="num">Licenças</th><th>Criado em</th><th>Última atividade</th>
+            <th>Acesso ao painel</th>
           </tr>
         </thead>
         <tbody></tbody>
@@ -801,7 +875,72 @@ function renderTenants() {
       <td class="num">${fmtNum(t.active_licenses)}</td>
       <td>${fmtDate(t.created_at)}</td>
       <td>${relTime(t.last_activity)}</td>
-    </tr>`).join('') : `<tr><td colspan="9" class="empty">Nenhum tenant encontrado.</td></tr>`;
+      <td><button class="ghost" onclick="genTenantAccess('${t.id}')">gerar acesso</button></td>
+    </tr>`).join('') : `<tr><td colspan="10" class="empty">Nenhum tenant encontrado.</td></tr>`;
+}
+
+// ---------- Criar empresa ----------
+async function createCompany() {
+  const id    = document.getElementById('ncId').value.trim();
+  const name  = document.getElementById('ncName').value.trim();
+  const plan  = document.getElementById('ncPlan').value;
+  const seats = parseInt(document.getElementById('ncSeats').value, 10) || 1;
+  const days  = parseInt(document.getElementById('ncDays').value, 10) || 365;
+  if (!id || !name) { toast('Preencha o ID e o nome da empresa'); return; }
+  try {
+    const r = await api('/v1/license/issue', {
+      method: 'POST',
+      body: JSON.stringify({
+        tenant_id: id, tenant_name: name,
+        plan: plan, seats: seats, days_valid: days,
+      }),
+    });
+    document.getElementById('ncResTitle').textContent = 'EMPRESA CRIADA';
+    document.getElementById('ncLicBlock').classList.remove('hide');
+    document.getElementById('ncLicKey').value = r.license_key || '';
+    document.getElementById('ncResTenant').textContent = r.tenant_id || id;
+    document.getElementById('ncDashToken').value = r.dash_token || '';
+    document.getElementById('ncResult').classList.remove('hide');
+    document.getElementById('ncId').value = '';
+    document.getElementById('ncName').value = '';
+    toast('Empresa "' + name + '" criada.');
+    loadTenants();
+  } catch (e) {
+    toast('Erro: ' + e.message);
+  }
+}
+
+// Gera/renova o acesso ao painel de um tenant existente.
+async function genTenantAccess(tenantId) {
+  if (!confirm('Gerar um novo token de acesso ao painel para "' + tenantId + '"?\n' +
+               'Se já existia um, o anterior deixará de funcionar.')) return;
+  try {
+    const r = await api('/v1/admin/tenant-token?tenant=' + encodeURIComponent(tenantId), { method: 'POST' });
+    document.getElementById('ncResTitle').textContent = 'ACESSO AO PAINEL GERADO';
+    document.getElementById('ncLicBlock').classList.add('hide');
+    document.getElementById('ncResTenant').textContent = r.tenant_id;
+    document.getElementById('ncDashToken').value = r.dash_token || '';
+    document.getElementById('ncResult').classList.remove('hide');
+    document.getElementById('ncResult').scrollIntoView({ behavior: 'smooth', block: 'center' });
+    toast('Acesso gerado para ' + tenantId);
+  } catch (e) {
+    toast('Erro: ' + e.message);
+  }
+}
+
+function copyLicKey()   { copyFrom('ncLicKey', 'Licença copiada'); }
+function copyDashToken(){ copyFrom('ncDashToken', 'Token do painel copiado'); }
+function copyFrom(elId, okMsg) {
+  const ta = document.getElementById(elId);
+  ta.select();
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(ta.value)
+      .then(() => toast(okMsg))
+      .catch(() => toast('Selecione o texto e copie com Ctrl+C'));
+  } else {
+    document.execCommand('copy');
+    toast(okMsg);
+  }
 }
 
 // ---------- Licenses ----------

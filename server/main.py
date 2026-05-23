@@ -95,7 +95,8 @@ CREATE TABLE IF NOT EXISTS tenants (
     name          TEXT NOT NULL,
     plan          TEXT NOT NULL DEFAULT 'starter',
     status        TEXT NOT NULL DEFAULT 'active',
-    created_at    TEXT NOT NULL
+    created_at    TEXT NOT NULL,
+    dash_token    TEXT
 );
 CREATE TABLE IF NOT EXISTS licenses (
     lic_id        TEXT PRIMARY KEY,
@@ -175,6 +176,10 @@ def db():
 def init_db():
     with db() as c:
         c.executescript(SCHEMA)
+        # Migracao: garante a coluna dash_token em bancos ja existentes.
+        cols = [r["name"] for r in c.execute("PRAGMA table_info(tenants)").fetchall()]
+        if "dash_token" not in cols:
+            c.execute("ALTER TABLE tenants ADD COLUMN dash_token TEXT")
 
 
 def audit(actor: str, action: str, target: str | None = None,
@@ -286,6 +291,29 @@ def require_admin(x_admin_token: Annotated[str | None, Header()] = None):
     # the admin token byte-by-byte over many requests.
     if not x_admin_token or not secrets.compare_digest(x_admin_token, ADMIN_TOKEN):
         raise HTTPException(status_code=401, detail="invalid admin token")
+
+
+def require_tenant_scope(
+    tenant: str,
+    x_admin_token: Annotated[str | None, Header()] = None,
+):
+    """Autoriza endpoints com escopo de tenant.
+
+    Aceita o token de admin master (qualquer tenant) ou o token de painel
+    (dash_token) do proprio tenant solicitado. Assim cada empresa-cliente
+    acessa apenas os proprios dados, com a sua propria credencial.
+    """
+    if not x_admin_token:
+        raise HTTPException(status_code=401, detail="missing token")
+    if secrets.compare_digest(x_admin_token, ADMIN_TOKEN):
+        return
+    with db() as c:
+        row = c.execute(
+            "SELECT dash_token FROM tenants WHERE id = ?", (tenant,)
+        ).fetchone()
+    if row and row["dash_token"] and secrets.compare_digest(x_admin_token, row["dash_token"]):
+        return
+    raise HTTPException(status_code=403, detail="token invalido para este tenant")
 
 
 def parse_bearer(authorization: str | None) -> str:
@@ -471,6 +499,15 @@ def license_issue(req: LicenseIssueRequest, request: Request):
             (req.tenant_id, req.tenant_name, req.plan, issued.isoformat()),
         )
         c.execute("UPDATE tenants SET plan = ? WHERE id = ?", (req.plan, req.tenant_id))
+        # Gera o token de painel (dash_token) do tenant, se ainda nao tiver.
+        c.execute(
+            """UPDATE tenants SET dash_token = ?
+               WHERE id = ? AND (dash_token IS NULL OR dash_token = '')""",
+            (secrets.token_hex(16), req.tenant_id),
+        )
+        dash_row = c.execute(
+            "SELECT dash_token FROM tenants WHERE id = ?", (req.tenant_id,)
+        ).fetchone()
         c.execute(
             """INSERT INTO licenses (lic_id, tenant_id, plan, seats, issued, expires, token)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
@@ -480,7 +517,13 @@ def license_issue(req: LicenseIssueRequest, request: Request):
     audit("admin", "license.issue", target=lic_id,
           detail=f"tenant={req.tenant_id} plan={req.plan} seats={req.seats}",
           ip=request.client.host if request.client else None)
-    return {"license_key": token, "lic_id": lic_id, "expires": payload["expires"]}
+    return {
+        "license_key": token,
+        "lic_id": lic_id,
+        "expires": payload["expires"],
+        "tenant_id": req.tenant_id,
+        "dash_token": dash_row["dash_token"] if dash_row else None,
+    }
 
 
 @app.post("/v1/license/revoke", dependencies=[Depends(require_admin)])
@@ -499,7 +542,7 @@ def license_revoke(lic_id: str, request: Request):
 
 
 # -- Admin: workforce reporting ---------------------------------------------
-@app.get("/v1/users", dependencies=[Depends(require_admin)])
+@app.get("/v1/users", dependencies=[Depends(require_tenant_scope)])
 def list_users(tenant: str):
     with db() as c:
         rows = c.execute(
@@ -512,7 +555,7 @@ def list_users(tenant: str):
     return {"users": [dict(r) for r in rows]}
 
 
-@app.get("/v1/users/{user_id}/summary", dependencies=[Depends(require_admin)])
+@app.get("/v1/users/{user_id}/summary", dependencies=[Depends(require_tenant_scope)])
 def user_summary(user_id: str, tenant: str, days: int = 7):
     since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).isoformat()
     with db() as c:
@@ -555,7 +598,7 @@ def user_summary(user_id: str, tenant: str, days: int = 7):
     }
 
 
-@app.get("/v1/team/summary", dependencies=[Depends(require_admin)])
+@app.get("/v1/team/summary", dependencies=[Depends(require_tenant_scope)])
 def team_summary(tenant: str, days: int = 7):
     since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).isoformat()
     with db() as c:
@@ -586,7 +629,7 @@ def team_summary(tenant: str, days: int = 7):
     }
 
 
-@app.get("/v1/events", dependencies=[Depends(require_admin)])
+@app.get("/v1/events", dependencies=[Depends(require_tenant_scope)])
 def search_events(
     tenant: str,
     user_id: str | None = None,
@@ -617,7 +660,7 @@ def search_events(
 
 
 # -- Workforce dashboard endpoints -----------------------------------------
-@app.get("/v1/workforce/overview", dependencies=[Depends(require_admin)])
+@app.get("/v1/workforce/overview", dependencies=[Depends(require_tenant_scope)])
 def workforce_overview(tenant: str, days: int = 7):
     """Aggregate metrics for the workforce dashboard."""
     now = dt.datetime.now(dt.timezone.utc)
@@ -726,7 +769,7 @@ def workforce_overview(tenant: str, days: int = 7):
     }
 
 
-@app.get("/v1/workforce/timeseries", dependencies=[Depends(require_admin)])
+@app.get("/v1/workforce/timeseries", dependencies=[Depends(require_tenant_scope)])
 def workforce_timeseries(tenant: str, days: int = 30, bucket: str = "window"):
     since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).isoformat()
     with db() as c:
@@ -741,6 +784,20 @@ def workforce_timeseries(tenant: str, days: int = 30, bucket: str = "window"):
 
 
 # -- Platform admin (super-admin) endpoints --------------------------------
+@app.post("/v1/admin/tenant-token", dependencies=[Depends(require_admin)])
+def admin_tenant_token(tenant: str, request: Request):
+    """Gera (ou renova) o token de painel de um tenant existente."""
+    new_token = secrets.token_hex(16)
+    with db() as c:
+        row = c.execute("SELECT id FROM tenants WHERE id = ?", (tenant,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="tenant nao encontrado")
+        c.execute("UPDATE tenants SET dash_token = ? WHERE id = ?", (new_token, tenant))
+    audit("admin", "tenant.token", target=tenant,
+          ip=request.client.host if request.client else None)
+    return {"tenant_id": tenant, "dash_token": new_token}
+
+
 @app.get("/v1/admin/tenants", dependencies=[Depends(require_admin)])
 def admin_list_tenants():
     with db() as c:
