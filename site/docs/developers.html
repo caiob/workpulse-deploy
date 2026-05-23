@@ -1,0 +1,660 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Desenvolvedores — WorkPulse</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,300;0,6..72,400;1,6..72,300&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --black: #1d1d1f; --black-true: #000;
+    --gray-1: #86868b; --gray-2: #d2d2d7; --gray-3: #f5f5f7;
+    --white: #fbfbfd;
+    --blue: #0071e3; --blue-hover: #0077ed;
+    --green: #00997a; --red: #d2230d;
+    --code-bg: #1d1d1f; --code-fg: #f5f5f7;
+    --display: "Newsreader", ui-serif, "New York", Georgia, serif;
+    --body: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", system-ui, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --easing: cubic-bezier(.28,.16,.22,1);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; -webkit-font-smoothing: antialiased; }
+  body {
+    font-family: var(--body); color: var(--black);
+    background: var(--white);
+    line-height: 1.5;
+  }
+  a { color: var(--blue); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  /* Nav */
+  .nav {
+    position: fixed; top: 0; left: 0; right: 0; height: 48px; z-index: 100;
+    background: rgba(251,251,253,0.72);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    backdrop-filter: saturate(180%) blur(20px);
+    border-bottom: 1px solid rgba(0,0,0,0.04);
+  }
+  .nav-inner {
+    max-width: 1280px; margin: 0 auto;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 24px; height: 100%; font-size: 12px;
+  }
+  .nav-logo { font-weight: 600; font-size: 14px; }
+  .nav-logo a { color: var(--black); text-decoration: none; }
+  .nav-logo .pulse { color: var(--blue); }
+  .nav-logo .crumb { color: var(--gray-1); margin-left: 8px; }
+  .nav-links { display: flex; gap: 28px; list-style: none; }
+  .nav-links a { color: var(--black); opacity: 0.85; }
+  .nav-links a:hover { opacity: 1; text-decoration: none; }
+  .nav-cta {
+    background: var(--blue); color: white;
+    padding: 5px 14px; border-radius: 100px; font-weight: 500;
+  }
+  .nav-cta:hover { background: var(--blue-hover); text-decoration: none; }
+
+  /* Hero */
+  .hero {
+    padding: 144px 24px 80px;
+    text-align: center;
+    background: var(--white);
+  }
+  .hero-eyebrow {
+    font-size: 14px; font-weight: 500; color: var(--blue);
+    text-transform: uppercase; letter-spacing: 0.08em;
+    margin-bottom: 16px;
+  }
+  .hero h1 {
+    font-family: var(--display); font-weight: 400;
+    font-size: clamp(44px, 7vw, 72px);
+    letter-spacing: -0.025em; line-height: 1.05;
+    max-width: 800px; margin: 0 auto 24px;
+  }
+  .hero h1 em { font-style: italic; font-weight: 300; color: var(--gray-1); }
+  .hero p {
+    font-size: 21px; color: var(--gray-1); max-width: 640px;
+    margin: 0 auto 40px; letter-spacing: -0.015em;
+  }
+  .hero-actions { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+  .btn-primary, .btn-secondary, .btn-tertiary {
+    padding: 12px 24px; border-radius: 100px; font-size: 15px; font-weight: 500;
+    cursor: pointer; transition: all 200ms var(--easing); border: 0;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .btn-primary { background: var(--blue); color: white; }
+  .btn-primary:hover { background: var(--blue-hover); text-decoration: none; }
+  .btn-secondary { background: var(--gray-3); color: var(--black); }
+  .btn-secondary:hover { background: var(--gray-2); text-decoration: none; }
+  .btn-tertiary { background: transparent; color: var(--blue); padding: 12px 0; }
+  .btn-tertiary:hover { color: var(--blue-hover); text-decoration: none; }
+  .btn-tertiary::after { content: "›"; transition: transform 200ms; display: inline-block; margin-left: 4px; }
+  .btn-tertiary:hover::after { transform: translateX(4px); }
+
+  /* Inline pill */
+  .pill { display: inline-block; padding: 4px 12px; border-radius: 100px;
+    background: var(--gray-3); color: var(--black);
+    font-family: var(--mono); font-size: 12px; font-weight: 500;
+    margin-right: 4px;
+  }
+  .pill-blue { background: rgba(0,113,227,0.1); color: var(--blue); }
+  .pill-green { background: rgba(0,153,122,0.12); color: var(--green); }
+  .pill-red { background: rgba(210,35,13,0.1); color: var(--red); }
+
+  /* Hero visual: live editor */
+  .hero-visual {
+    max-width: 1100px; margin: 80px auto 0;
+    background: var(--code-bg);
+    border-radius: 18px;
+    box-shadow: 0 30px 80px rgba(0,0,0,0.18), 0 0 0 1px rgba(0,0,0,0.05);
+    overflow: hidden;
+    text-align: left;
+  }
+  .visual-bar {
+    background: #2d2d2f; padding: 12px 16px;
+    display: flex; align-items: center; gap: 12px;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+  }
+  .visual-bar .dots { display: flex; gap: 6px; }
+  .visual-bar .dots span { width: 12px; height: 12px; border-radius: 50%; background: #4d4d4f; }
+  .visual-bar .url {
+    flex: 1; text-align: center;
+    color: #86868b; font-family: var(--mono); font-size: 12px;
+  }
+  .visual-split { display: grid; grid-template-columns: 1fr 1fr; min-height: 360px; }
+  .visual-pane { padding: 20px 24px; font-family: var(--mono); font-size: 13px; line-height: 1.7; }
+  .visual-pane.left { border-right: 1px solid rgba(255,255,255,0.06); color: var(--code-fg); }
+  .visual-pane.right { background: #16161a; color: var(--code-fg); }
+  .visual-pane h5 {
+    font-family: var(--body); font-size: 11px; color: #86868b;
+    text-transform: uppercase; letter-spacing: 0.1em; font-weight: 500;
+    margin-bottom: 16px;
+  }
+  .key { color: #ff79c6; }
+  .str { color: #50fa7b; }
+  .num { color: #bd93f9; }
+  .com { color: #6272a4; font-style: italic; }
+  .pun { color: #f8f8f2; }
+  .fld { color: #8be9fd; }
+
+  /* Sections */
+  section { padding: 100px 24px; }
+  .container { max-width: 1100px; margin: 0 auto; }
+  .container-narrow { max-width: 800px; margin: 0 auto; }
+
+  .section-eyebrow {
+    font-size: 14px; font-weight: 500; color: var(--blue);
+    text-transform: uppercase; letter-spacing: 0.08em;
+    margin-bottom: 12px;
+  }
+  .section-title {
+    font-family: var(--display); font-weight: 400;
+    font-size: clamp(32px, 5vw, 48px);
+    letter-spacing: -0.025em; line-height: 1.1;
+    margin-bottom: 16px;
+  }
+  .section-title em { font-style: italic; font-weight: 300; color: var(--gray-1); }
+  .section-sub {
+    font-size: 19px; color: var(--gray-1); max-width: 640px;
+    line-height: 1.5; letter-spacing: -0.015em;
+    margin-bottom: 56px;
+  }
+
+  /* Quickstart */
+  .quickstart { background: var(--gray-3); }
+  .qs-grid {
+    display: grid; grid-template-columns: 280px 1fr;
+    gap: 48px; align-items: start;
+  }
+  .qs-steps { list-style: none; }
+  .qs-step {
+    padding: 16px 20px; margin-bottom: 8px;
+    border-radius: 12px; cursor: pointer;
+    transition: background 200ms var(--easing);
+    display: flex; gap: 16px; align-items: start;
+  }
+  .qs-step:hover { background: rgba(0,0,0,0.04); }
+  .qs-step.active { background: white; box-shadow: 0 2px 12px rgba(0,0,0,0.06); }
+  .qs-step-num {
+    flex: 0 0 28px; height: 28px; border-radius: 50%;
+    background: var(--blue); color: white;
+    font-family: var(--display); font-size: 14px;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 500;
+  }
+  .qs-step-content h4 { font-size: 15px; margin-bottom: 4px; font-weight: 500; }
+  .qs-step-content p { font-size: 13px; color: var(--gray-1); line-height: 1.5; }
+
+  .qs-code {
+    background: var(--code-bg); border-radius: 16px; overflow: hidden;
+  }
+  .qs-tabs {
+    display: flex; gap: 4px; padding: 12px 12px 0; background: #2d2d2f;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+  }
+  .qs-tab {
+    padding: 8px 16px; font-family: var(--mono); font-size: 12px;
+    color: #86868b; background: transparent; border: 0;
+    border-radius: 8px 8px 0 0; cursor: pointer;
+  }
+  .qs-tab.active { color: white; background: var(--code-bg); }
+  .qs-tab:hover { color: white; }
+  .qs-pane { padding: 24px; font-family: var(--mono); font-size: 13px; color: var(--code-fg); line-height: 1.8; min-height: 320px; }
+  .qs-pane.hidden { display: none; }
+
+  /* API ref */
+  .api-list { display: grid; gap: 1px; background: var(--gray-2); border-radius: 16px; overflow: hidden; border: 1px solid var(--gray-2); }
+  .api-row {
+    background: white; padding: 24px 28px;
+    display: grid; grid-template-columns: 90px 320px 1fr; gap: 24px;
+    align-items: center;
+  }
+  .api-row:hover { background: var(--gray-3); }
+  .api-method {
+    font-family: var(--mono); font-size: 11px; font-weight: 600;
+    padding: 4px 8px; border-radius: 6px; text-align: center;
+    width: fit-content;
+    text-transform: uppercase;
+  }
+  .api-method.get { background: rgba(0,153,122,0.12); color: var(--green); }
+  .api-method.post { background: rgba(0,113,227,0.1); color: var(--blue); }
+  .api-method.del { background: rgba(210,35,13,0.1); color: var(--red); }
+  .api-path { font-family: var(--mono); font-size: 13px; }
+  .api-desc { color: var(--gray-1); font-size: 14px; }
+  .api-section-title {
+    font-family: var(--display); font-size: 24px; letter-spacing: -0.02em;
+    margin: 48px 0 16px; padding-top: 24px;
+    border-top: 1px solid var(--gray-2);
+  }
+  .api-section-title:first-child { border-top: 0; padding-top: 0; margin-top: 0; }
+
+  /* SDKs */
+  .sdks { background: var(--black-true); color: white; }
+  .sdks .section-title { color: white; }
+  .sdks .section-eyebrow { color: #2997ff; }
+  .sdks .section-sub { color: rgba(255,255,255,0.6); }
+  .sdk-grid {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px;
+  }
+  .sdk-card {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 16px; padding: 28px;
+    transition: all 300ms var(--easing); cursor: pointer;
+  }
+  .sdk-card:hover {
+    background: rgba(255,255,255,0.06);
+    transform: translateY(-2px);
+  }
+  .sdk-icon { font-family: var(--mono); font-size: 36px; margin-bottom: 16px; opacity: 0.9; }
+  .sdk-name { font-size: 18px; font-weight: 500; margin-bottom: 4px; }
+  .sdk-meta { font-family: var(--mono); font-size: 12px; color: rgba(255,255,255,0.5); }
+  .sdk-card a { color: #2997ff; font-size: 13px; margin-top: 16px; display: block; }
+
+  /* Sandbox CTA */
+  .sandbox-cta {
+    background: linear-gradient(135deg, #f5f5f7 0%, #e8e8ed 100%);
+    text-align: center; padding: 120px 24px;
+  }
+  .sandbox-cta h2 {
+    font-family: var(--display); font-weight: 400;
+    font-size: clamp(40px, 6vw, 64px);
+    letter-spacing: -0.025em; line-height: 1.05;
+    margin-bottom: 16px;
+  }
+  .sandbox-cta h2 em { font-style: italic; color: var(--blue); font-weight: 300; }
+  .sandbox-cta p { font-size: 19px; color: var(--gray-1); max-width: 540px; margin: 0 auto 32px; }
+
+  /* Webhook events */
+  .events-list { background: var(--gray-3); border-radius: 16px; padding: 8px; }
+  .event-item {
+    background: white; padding: 16px 20px;
+    border-radius: 10px; margin-bottom: 4px;
+    display: flex; gap: 16px; align-items: center;
+  }
+  .event-item:last-child { margin-bottom: 0; }
+  .event-name { font-family: var(--mono); font-size: 13px; color: var(--blue); flex: 0 0 240px; }
+  .event-desc { font-size: 14px; color: var(--gray-1); flex: 1; }
+
+  footer {
+    background: var(--gray-3); padding: 48px 24px;
+    text-align: center; font-size: 12px; color: var(--gray-1);
+  }
+  footer a { color: var(--gray-1); margin: 0 8px; }
+  footer a:hover { color: var(--black); }
+
+  @media (max-width: 768px) {
+    .nav-links { display: none; }
+    .visual-split { grid-template-columns: 1fr; }
+    .visual-pane.left { border-right: 0; border-bottom: 1px solid rgba(255,255,255,0.06); }
+    .qs-grid { grid-template-columns: 1fr; }
+    .sdk-grid { grid-template-columns: 1fr 1fr; }
+    .api-row { grid-template-columns: 1fr; gap: 8px; }
+    section { padding: 64px 24px; }
+  }
+
+  /* Reveal */
+  .reveal { opacity: 0; transform: translateY(24px); transition: opacity 700ms var(--easing), transform 700ms var(--easing); }
+  .reveal.visible { opacity: 1; transform: translateY(0); }
+</style>
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <div class="nav-logo">
+      <a href="../index.html">Work<span class="pulse">Pulse</span>.</a>
+      <span class="crumb">/ Desenvolvedores</span>
+    </div>
+    <ul class="nav-links">
+      <li><a href="#quickstart">Quickstart</a></li>
+      <li><a href="#api">API</a></li>
+      <li><a href="#webhooks">Webhooks</a></li>
+      <li><a href="#sdks">SDKs</a></li>
+      <li><a href="sandbox.html">Sandbox</a></li>
+    </ul>
+    <a href="sandbox.html" class="nav-cta">Abrir sandbox</a>
+  </div>
+</nav>
+
+<!-- HERO -->
+<section class="hero">
+  <div class="hero-eyebrow reveal">Plataforma · API · SDKs</div>
+  <h1 class="reveal">Construa em cima do<br><em>tempo da sua equipe.</em></h1>
+  <p class="reveal">REST autenticada por token assinado, eventos em lote, webhooks, e SDKs em quatro linguagens. Tudo documentado, sem letra miúda.</p>
+  <div class="hero-actions reveal">
+    <a href="sandbox.html" class="btn-primary">Abrir sandbox interativo</a>
+    <a href="#quickstart" class="btn-secondary">Quickstart em 4 passos</a>
+    <a href="#api" class="btn-tertiary">Referência da API</a>
+  </div>
+
+  <div class="hero-visual reveal">
+    <div class="visual-bar">
+      <div class="dots"><span></span><span></span><span></span></div>
+      <div class="url">https://api.workpulse.com.br/v1/team/summary</div>
+    </div>
+    <div class="visual-split">
+      <div class="visual-pane left">
+        <h5>REQUISIÇÃO · cURL</h5>
+<span class="com">## Resumo da equipe nos últimos 7 dias</span><br>
+$ curl https://api.workpulse.com.br/v1/team/summary <span class="pun">\</span><br>
+&nbsp;&nbsp;<span class="key">-H</span> <span class="str">'X-Admin-Token: $WP_TOKEN'</span> <span class="pun">\</span><br>
+&nbsp;&nbsp;<span class="key">-G</span> <span class="key">--data-urlencode</span> <span class="str">'tenant=acme'</span> <span class="pun">\</span><br>
+&nbsp;&nbsp;<span class="key">--data-urlencode</span> <span class="str">'days=7'</span><br>
+<br>
+<span class="com">## Resposta em ~80 ms</span>
+      </div>
+      <div class="visual-pane right">
+        <h5>RESPOSTA · JSON</h5>
+<span class="pun">{</span><br>
+&nbsp;&nbsp;<span class="fld">"tenant"</span><span class="pun">:</span> <span class="str">"acme"</span><span class="pun">,</span><br>
+&nbsp;&nbsp;<span class="fld">"period_days"</span><span class="pun">:</span> <span class="num">7</span><span class="pun">,</span><br>
+&nbsp;&nbsp;<span class="fld">"users"</span><span class="pun">:</span> <span class="pun">[</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class="pun">{</span> <span class="fld">"user_id"</span><span class="pun">:</span> <span class="str">"joao@acme.com"</span><span class="pun">,</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="fld">"active"</span><span class="pun">:</span> <span class="num">119240</span><span class="pun">,</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="fld">"afk"</span><span class="pun">:</span> <span class="num">27860</span> <span class="pun">},</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class="com">// ... mais 61 colaboradores</span><br>
+&nbsp;&nbsp;<span class="pun">],</span><br>
+&nbsp;&nbsp;<span class="fld">"top_apps"</span><span class="pun">:</span> <span class="pun">[</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class="pun">{</span> <span class="fld">"app"</span><span class="pun">:</span> <span class="str">"VS Code"</span><span class="pun">,</span> <span class="fld">"seconds"</span><span class="pun">:</span> <span class="num">412800</span> <span class="pun">},</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class="pun">{</span> <span class="fld">"app"</span><span class="pun">:</span> <span class="str">"Slack"</span><span class="pun">,</span> <span class="fld">"seconds"</span><span class="pun">:</span> <span class="num">189000</span> <span class="pun">}</span><br>
+&nbsp;&nbsp;<span class="pun">]</span><br>
+<span class="pun">}</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- QUICKSTART -->
+<section id="quickstart" class="quickstart">
+  <div class="container">
+    <div class="section-eyebrow reveal">Quickstart</div>
+    <h2 class="section-title reveal">Quatro passos.<br><em>Cinco minutos.</em></h2>
+    <p class="section-sub reveal">Do zero ao primeiro evento ingerido em menos tempo do que leva para fazer um café.</p>
+
+    <div class="qs-grid reveal">
+      <ol class="qs-steps">
+        <li class="qs-step active" data-step="0">
+          <div class="qs-step-num">1</div>
+          <div class="qs-step-content">
+            <h4>Subir o servidor</h4>
+            <p>Docker em uma linha ou Python local — você escolhe.</p>
+          </div>
+        </li>
+        <li class="qs-step" data-step="1">
+          <div class="qs-step-num">2</div>
+          <div class="qs-step-content">
+            <h4>Emitir uma licença</h4>
+            <p>Token Ed25519 assinado pelo seu próprio servidor.</p>
+          </div>
+        </li>
+        <li class="qs-step" data-step="2">
+          <div class="qs-step-num">3</div>
+          <div class="qs-step-content">
+            <h4>Configurar o agente</h4>
+            <p>Cole o token no <code>config.toml</code> e inicie.</p>
+          </div>
+        </li>
+        <li class="qs-step" data-step="3">
+          <div class="qs-step-num">4</div>
+          <div class="qs-step-content">
+            <h4>Consultar a API</h4>
+            <p>Eventos sincronizam automaticamente em lote.</p>
+          </div>
+        </li>
+      </ol>
+
+      <div class="qs-code">
+        <div class="qs-tabs">
+          <button class="qs-tab active" data-pane="docker">Docker</button>
+          <button class="qs-tab" data-pane="python">Python</button>
+          <button class="qs-tab" data-pane="onpremise">On-premise</button>
+        </div>
+        <div class="qs-pane" data-step="0" data-pane-name="docker">
+<span class="com"># 1. Servidor com persistência em volume Docker</span><br>
+$ docker run -d --name workpulse <span class="pun">\</span><br>
+&nbsp;&nbsp;-p <span class="num">8080</span>:<span class="num">8080</span> <span class="pun">\</span><br>
+&nbsp;&nbsp;-v workpulse-data:/data <span class="pun">\</span><br>
+&nbsp;&nbsp;-e <span class="str">WORKPULSE_DB</span>=/data/workpulse.db <span class="pun">\</span><br>
+&nbsp;&nbsp;-e <span class="str">WORKPULSE_ADMIN_TOKEN</span>=<span class="str">$(openssl rand -hex 32)</span> <span class="pun">\</span><br>
+&nbsp;&nbsp;ghcr.io/workpulse/server:1.0<br>
+<br>
+<span class="com"># 2. Verificar saúde</span><br>
+$ curl http://localhost:<span class="num">8080</span>/healthz<br>
+<span class="str">{"status":"ok","version":"1.0.0"}</span>
+        </div>
+        <div class="qs-pane hidden" data-step="0" data-pane-name="python">
+<span class="com"># Python 3.11+ direto, sem Docker</span><br>
+$ git clone https://github.com/workpulse/workpulse<br>
+$ cd workpulse/server<br>
+$ python<span class="num">3.11</span> -m venv .venv <span class="pun">&&</span> source .venv/bin/activate<br>
+$ pip install -r requirements.txt<br>
+$ <span class="key">export</span> WORKPULSE_ADMIN_TOKEN=<span class="str">$(openssl rand -hex 32)</span><br>
+$ python -m main          <span class="com"># lê WORKPULSE_LISTEN</span>
+        </div>
+        <div class="qs-pane hidden" data-step="0" data-pane-name="onpremise">
+<span class="com"># Imagem on-premise air-gapped</span><br>
+$ docker load &lt; workpulse-server-1.0.tar<br>
+$ docker run -d --name workpulse <span class="pun">\</span><br>
+&nbsp;&nbsp;--network workpulse-vlan <span class="pun">\</span><br>
+&nbsp;&nbsp;-v /etc/workpulse/keys:/keys:ro <span class="pun">\</span><br>
+&nbsp;&nbsp;-e <span class="str">WORKPULSE_LICENSE_PRIVKEY</span>=/keys/license.key <span class="pun">\</span><br>
+&nbsp;&nbsp;workpulse/server:1.0
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- API REFERENCE -->
+<section id="api">
+  <div class="container">
+    <div class="section-eyebrow reveal">Referência</div>
+    <h2 class="section-title reveal">API REST.<br><em>Versionada. Estável. Auditável.</em></h2>
+    <p class="section-sub reveal">Todas as respostas em JSON UTF-8. Erros seguem RFC 7807. Autenticação por <code>X-Admin-Token</code> (operadores) ou <code>Authorization: Bearer</code> com chave de licença (agentes).</p>
+
+    <h3 class="api-section-title reveal">Agentes</h3>
+    <div class="api-list reveal">
+      <div class="api-row">
+        <span class="api-method post">POST</span>
+        <span class="api-path">/v1/ingest</span>
+        <span class="api-desc">Recebe lote de eventos de um agente</span>
+      </div>
+      <div class="api-row">
+        <span class="api-method post">POST</span>
+        <span class="api-path">/v1/license/heartbeat</span>
+        <span class="api-desc">Verifica se a chave continua válida</span>
+      </div>
+    </div>
+
+    <h3 class="api-section-title reveal">Workforce</h3>
+    <div class="api-list reveal">
+      <div class="api-row">
+        <span class="api-method get">GET</span>
+        <span class="api-path">/v1/workforce/overview</span>
+        <span class="api-desc">KPIs agregados, alertas, breakdown por departamento</span>
+      </div>
+      <div class="api-row">
+        <span class="api-method get">GET</span>
+        <span class="api-path">/v1/workforce/timeseries</span>
+        <span class="api-desc">Séries temporais para gráficos de tendência</span>
+      </div>
+      <div class="api-row">
+        <span class="api-method get">GET</span>
+        <span class="api-path">/v1/users</span>
+        <span class="api-desc">Lista de colaboradores do tenant</span>
+      </div>
+      <div class="api-row">
+        <span class="api-method get">GET</span>
+        <span class="api-path">/v1/users/{id}/summary</span>
+        <span class="api-desc">Drill-down individual com séries diárias</span>
+      </div>
+      <div class="api-row">
+        <span class="api-method get">GET</span>
+        <span class="api-path">/v1/team/summary</span>
+        <span class="api-desc">Tabela de produtividade da equipe</span>
+      </div>
+      <div class="api-row">
+        <span class="api-method get">GET</span>
+        <span class="api-path">/v1/events</span>
+        <span class="api-desc">Busca paginada de eventos brutos</span>
+      </div>
+    </div>
+
+    <h3 class="api-section-title reveal">Plataforma</h3>
+    <div class="api-list reveal">
+      <div class="api-row">
+        <span class="api-method get">GET</span>
+        <span class="api-path">/v1/admin/tenants</span>
+        <span class="api-desc">Inventário de tenants com contagens agregadas</span>
+      </div>
+      <div class="api-row">
+        <span class="api-method get">GET</span>
+        <span class="api-path">/v1/admin/licenses</span>
+        <span class="api-desc">Inventário de licenças com status e dias restantes</span>
+      </div>
+      <div class="api-row">
+        <span class="api-method get">GET</span>
+        <span class="api-path">/v1/admin/stats</span>
+        <span class="api-desc">Estatísticas do servidor: ingestão, banco, distribuição</span>
+      </div>
+      <div class="api-row">
+        <span class="api-method get">GET</span>
+        <span class="api-path">/v1/admin/audit</span>
+        <span class="api-desc">Log de ações administrativas</span>
+      </div>
+      <div class="api-row">
+        <span class="api-method post">POST</span>
+        <span class="api-path">/v1/license/issue</span>
+        <span class="api-desc">Emite uma nova chave assinada Ed25519</span>
+      </div>
+      <div class="api-row">
+        <span class="api-method del">POST</span>
+        <span class="api-path">/v1/license/revoke</span>
+        <span class="api-desc">Marca chave como revogada (efeito em ≤30 min no agente)</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- WEBHOOKS -->
+<section id="webhooks" class="quickstart">
+  <div class="container">
+    <div class="section-eyebrow reveal">Webhooks · Plano Business+</div>
+    <h2 class="section-title reveal">Eventos em tempo real.<br><em>Onde sua equipe estiver.</em></h2>
+    <p class="section-sub reveal">Receba notificações HTTP assinadas (HMAC-SHA256) sempre que algo importante acontecer no tenant. Reentregue automaticamente em caso de falha.</p>
+
+    <div class="events-list reveal">
+      <div class="event-item">
+        <code class="event-name">user.first_seen</code>
+        <span class="event-desc">Novo colaborador apareceu pela primeira vez no tenant</span>
+        <span class="pill pill-green">comum</span>
+      </div>
+      <div class="event-item">
+        <code class="event-name">user.idle_anomaly</code>
+        <span class="event-desc">Usuário com desvio significativo do padrão histórico</span>
+        <span class="pill pill-blue">smart</span>
+      </div>
+      <div class="event-item">
+        <code class="event-name">workforce.overwork_detected</code>
+        <span class="event-desc">Mais de 10 horas de atividade em um único dia</span>
+        <span class="pill pill-red">alerta</span>
+      </div>
+      <div class="event-item">
+        <code class="event-name">license.expiring_soon</code>
+        <span class="event-desc">Licença expira em menos de 30 dias</span>
+        <span class="pill">aviso</span>
+      </div>
+      <div class="event-item">
+        <code class="event-name">license.revoked</code>
+        <span class="event-desc">Licença foi revogada manualmente pelo administrador</span>
+        <span class="pill pill-red">crítico</span>
+      </div>
+      <div class="event-item">
+        <code class="event-name">device.offline_72h</code>
+        <span class="event-desc">Dispositivo sem sincronizar há mais de 72 horas</span>
+        <span class="pill">aviso</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- SDKs -->
+<section id="sdks" class="sdks">
+  <div class="container">
+    <div class="section-eyebrow reveal">SDKs</div>
+    <h2 class="section-title reveal">Quatro linguagens.<br><em>Mesma assinatura.</em></h2>
+    <p class="section-sub reveal">SDKs oficiais publicados em registries públicos. Tipados, async-first, retry com backoff exponencial, telemetria opt-in.</p>
+
+    <div class="sdk-grid reveal">
+      <div class="sdk-card">
+        <div class="sdk-icon">🐍</div>
+        <div class="sdk-name">Python</div>
+        <div class="sdk-meta">workpulse-sdk · pip</div>
+        <a href="#">Documentação ›</a>
+      </div>
+      <div class="sdk-card">
+        <div class="sdk-icon">🟨</div>
+        <div class="sdk-name">JavaScript</div>
+        <div class="sdk-meta">@workpulse/sdk · npm</div>
+        <a href="#">Documentação ›</a>
+      </div>
+      <div class="sdk-card">
+        <div class="sdk-icon">🦀</div>
+        <div class="sdk-name">Rust</div>
+        <div class="sdk-meta">workpulse · crates.io</div>
+        <a href="#">Documentação ›</a>
+      </div>
+      <div class="sdk-card">
+        <div class="sdk-icon">🦫</div>
+        <div class="sdk-name">Go</div>
+        <div class="sdk-meta">workpulse-go · pkg.go.dev</div>
+        <a href="#">Documentação ›</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- SANDBOX CTA -->
+<section class="sandbox-cta">
+  <h2>Vá direto<br><em>ao código.</em></h2>
+  <p>Sandbox interativo com requisições reais a um servidor mockado. Sem cadastro. Sem cartão. Sem fricção.</p>
+  <a href="sandbox.html" class="btn-primary">Abrir sandbox →</a>
+</section>
+
+<footer>
+  <div>
+    <a href="../index.html">Início</a> · 
+    <a href="developers.html">Desenvolvedores</a> · 
+    <a href="sandbox.html">Sandbox</a> · 
+    <a href="mailto:dev@workpulse.com.br">dev@workpulse.com.br</a>
+  </div>
+  <div style="margin-top:8px">© 2026 WorkPulse Technologies · Todos os direitos reservados</div>
+</footer>
+
+<script>
+  // Reveal
+  const obs = new IntersectionObserver((entries) => {
+    entries.forEach(e => { if (e.isIntersecting) { e.target.classList.add('visible'); obs.unobserve(e.target); } });
+  }, { threshold: 0.05, rootMargin: '0px 0px -60px 0px' });
+  document.querySelectorAll('.reveal').forEach(el => obs.observe(el));
+  document.querySelectorAll('.hero .reveal').forEach((el, i) => {
+    el.style.transitionDelay = (i * 100) + 'ms';
+    setTimeout(() => el.classList.add('visible'), 50);
+  });
+
+  // Quickstart code tabs
+  document.querySelectorAll('.qs-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.qs-tab').forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      document.querySelectorAll('.qs-pane').forEach(p => p.classList.add('hidden'));
+      document.querySelector(`[data-pane-name="${tab.dataset.pane}"]`).classList.remove('hidden');
+    });
+  });
+</script>
+
+</body>
+</html>

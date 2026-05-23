@@ -1,0 +1,973 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sandbox — WorkPulse Developers</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,300;0,6..72,400;1,6..72,300&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --black: #1d1d1f; --black-true: #000;
+    --gray-1: #86868b; --gray-2: #d2d2d7; --gray-3: #f5f5f7;
+    --white: #fbfbfd;
+    --blue: #0071e3; --blue-hover: #0077ed;
+    --green: #00997a; --red: #d2230d; --orange: #ff9500;
+    --code-bg: #1d1d1f; --code-fg: #f5f5f7;
+    --display: "Newsreader", ui-serif, Georgia, serif;
+    --body: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --easing: cubic-bezier(.28,.16,.22,1);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    font-family: var(--body); color: var(--black);
+    background: var(--white); -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+    display: flex; flex-direction: column;
+  }
+  a { color: var(--blue); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  /* Nav */
+  .nav {
+    height: 48px; flex: 0 0 auto;
+    background: rgba(251,251,253,0.85);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    backdrop-filter: saturate(180%) blur(20px);
+    border-bottom: 1px solid rgba(0,0,0,0.06);
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 24px; font-size: 12px;
+  }
+  .nav-logo { font-weight: 600; font-size: 14px; }
+  .nav-logo a { color: var(--black); }
+  .nav-logo .pulse { color: var(--blue); }
+  .nav-logo .crumb { color: var(--gray-1); margin-left: 8px; }
+  .nav-meta { display: flex; gap: 16px; align-items: center; color: var(--gray-1); }
+  .nav-meta .led {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--green); box-shadow: 0 0 8px var(--green);
+    display: inline-block; margin-right: 6px;
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  /* Layout: sidebar + main */
+  .app {
+    flex: 1; display: grid; grid-template-columns: 280px 1fr;
+    overflow: hidden;
+  }
+
+  /* Sidebar */
+  .sidebar {
+    background: var(--gray-3);
+    border-right: 1px solid var(--gray-2);
+    overflow-y: auto;
+    padding: 24px 0;
+  }
+  .sidebar-section {
+    padding: 8px 24px;
+    font-size: 11px; font-weight: 600;
+    color: var(--gray-1); letter-spacing: 0.06em;
+    text-transform: uppercase;
+    margin-top: 16px;
+  }
+  .sidebar-section:first-of-type { margin-top: 0; }
+  .endpoint {
+    padding: 10px 24px;
+    cursor: pointer;
+    border-left: 3px solid transparent;
+    transition: all 200ms var(--easing);
+    display: flex; align-items: center; gap: 10px;
+    font-family: var(--mono); font-size: 12px;
+  }
+  .endpoint:hover { background: rgba(0,0,0,0.04); }
+  .endpoint.active {
+    background: white;
+    border-left-color: var(--blue);
+    box-shadow: inset 0 0 0 1px rgba(0,0,0,0.04);
+  }
+  .endpoint .method {
+    font-size: 10px; font-weight: 700;
+    padding: 2px 6px; border-radius: 4px;
+    flex: 0 0 auto;
+  }
+  .endpoint .method.get { background: rgba(0,153,122,0.15); color: var(--green); }
+  .endpoint .method.post { background: rgba(0,113,227,0.12); color: var(--blue); }
+  .endpoint .method.del { background: rgba(210,35,13,0.12); color: var(--red); }
+  .endpoint .path { color: var(--black); flex: 1; overflow: hidden; text-overflow: ellipsis; }
+
+  /* Main panel */
+  .main {
+    display: grid; grid-template-rows: auto 1fr;
+    overflow: hidden;
+  }
+  .toolbar {
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--gray-2);
+    background: white;
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  }
+  .url-bar {
+    flex: 1; min-width: 280px;
+    display: flex; align-items: center;
+    background: var(--gray-3); border-radius: 10px;
+    overflow: hidden;
+    font-family: var(--mono); font-size: 13px;
+  }
+  .url-method {
+    padding: 10px 14px; font-weight: 700; font-size: 11px;
+    color: white;
+  }
+  .url-method.get { background: var(--green); }
+  .url-method.post { background: var(--blue); }
+  .url-method.del { background: var(--red); }
+  .url-path {
+    flex: 1; padding: 10px 14px;
+    color: var(--black);
+    border: 0; background: transparent;
+    font-family: inherit; font-size: 13px;
+    outline: none;
+  }
+  .btn-run {
+    padding: 10px 24px;
+    border-radius: 10px;
+    background: var(--blue); color: white;
+    border: 0; font-size: 14px; font-weight: 500;
+    cursor: pointer;
+    transition: background 200ms var(--easing);
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .btn-run:hover { background: var(--blue-hover); }
+  .btn-run:disabled { background: var(--gray-2); cursor: not-allowed; }
+
+  /* Split panes */
+  .split {
+    display: grid; grid-template-columns: 1fr 1fr;
+    overflow: hidden;
+  }
+  .pane {
+    overflow: hidden;
+    display: flex; flex-direction: column;
+  }
+  .pane-left { border-right: 1px solid var(--gray-2); background: white; }
+  .pane-right { background: #16161a; color: var(--code-fg); }
+
+  .pane-header {
+    padding: 12px 24px;
+    font-size: 11px; font-weight: 600;
+    color: var(--gray-1); letter-spacing: 0.06em;
+    text-transform: uppercase;
+    border-bottom: 1px solid var(--gray-2);
+    display: flex; justify-content: space-between; align-items: center;
+    flex: 0 0 auto;
+  }
+  .pane-right .pane-header {
+    color: var(--gray-1); border-bottom-color: rgba(255,255,255,0.06);
+  }
+  .pane-body { flex: 1; overflow-y: auto; padding: 20px 24px; }
+
+  /* Endpoint detail */
+  .ep-title {
+    font-family: var(--display); font-size: 28px;
+    letter-spacing: -0.02em; margin-bottom: 8px;
+    font-weight: 400;
+  }
+  .ep-desc { font-size: 14px; color: var(--gray-1); line-height: 1.5; margin-bottom: 24px; }
+
+  .params-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 24px; }
+  .params-table th {
+    text-align: left; font-weight: 600; font-size: 11px;
+    color: var(--gray-1); letter-spacing: 0.06em; text-transform: uppercase;
+    padding: 8px 0; border-bottom: 1px solid var(--gray-2);
+  }
+  .params-table td {
+    padding: 12px 0;
+    border-bottom: 1px solid var(--gray-2);
+    vertical-align: top;
+  }
+  .params-table td:first-child { font-family: var(--mono); width: 200px; padding-right: 12px; }
+  .params-table .pname { font-weight: 600; color: var(--black); }
+  .params-table .ptype { color: var(--gray-1); font-size: 11px; }
+  .params-table .preq { color: var(--red); font-size: 11px; margin-left: 6px; }
+  .params-table input, .params-table textarea {
+    margin-top: 6px; width: 100%;
+    padding: 8px 12px;
+    border: 1px solid var(--gray-2); border-radius: 8px;
+    font-family: var(--mono); font-size: 12px;
+    background: var(--gray-3);
+    transition: all 150ms var(--easing);
+  }
+  .params-table input:focus, .params-table textarea:focus {
+    outline: 2px solid var(--blue); border-color: var(--blue);
+    background: white;
+  }
+  .params-table textarea { resize: vertical; min-height: 100px; font-family: var(--mono); }
+
+  .auth-block {
+    background: var(--gray-3); padding: 16px 20px;
+    border-radius: 12px; margin-bottom: 24px;
+    border: 1px solid var(--gray-2);
+  }
+  .auth-block-title { font-size: 11px; font-weight: 600; color: var(--gray-1); letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 6px; }
+  .auth-block code { font-family: var(--mono); font-size: 12px; }
+
+  /* Response panel */
+  .resp-status {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 4px 12px; border-radius: 100px;
+    font-family: var(--mono); font-size: 11px; font-weight: 600;
+  }
+  .resp-status.ok { background: rgba(0,153,122,0.15); color: #5dd3a8; }
+  .resp-status.err { background: rgba(210,35,13,0.15); color: #ff6b5b; }
+  .resp-status.idle { background: rgba(134,134,139,0.15); color: var(--gray-1); }
+  .resp-meta { font-family: var(--mono); font-size: 11px; color: var(--gray-1); }
+
+  .resp-empty {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    height: 100%; text-align: center; padding: 40px;
+    color: var(--gray-1);
+  }
+  .resp-empty .icon { font-size: 48px; margin-bottom: 16px; opacity: 0.4; }
+  .resp-empty h3 { font-family: var(--display); font-size: 24px; color: white; margin-bottom: 8px; font-weight: 400; }
+  .resp-empty p { font-size: 14px; max-width: 320px; line-height: 1.5; }
+
+  pre {
+    font-family: var(--mono); font-size: 12px;
+    line-height: 1.65; color: var(--code-fg);
+    white-space: pre-wrap; word-wrap: break-word;
+  }
+  /* JSON syntax */
+  .json-key { color: #79c0ff; }
+  .json-str { color: #a5d6ff; }
+  .json-num { color: #ffa657; }
+  .json-bool { color: #ff7b72; }
+  .json-null { color: #8b949e; }
+  .json-pun { color: #c9d1d9; }
+
+  /* Tabs in left pane */
+  .tabs {
+    display: flex; gap: 4px; padding: 0 24px;
+    border-bottom: 1px solid var(--gray-2);
+    margin-top: -1px;
+    flex: 0 0 auto;
+  }
+  .tab-btn {
+    padding: 10px 16px;
+    background: transparent; border: 0;
+    font-family: inherit; font-size: 13px;
+    color: var(--gray-1);
+    border-bottom: 2px solid transparent;
+    cursor: pointer;
+    transition: all 150ms var(--easing);
+  }
+  .tab-btn.active { color: var(--black); border-bottom-color: var(--blue); }
+  .tab-btn:hover { color: var(--black); }
+  .tab-content { display: none; flex: 1; overflow-y: auto; padding: 20px 24px; }
+  .tab-content.active { display: block; }
+
+  .code-snippet {
+    background: #16161a; color: var(--code-fg);
+    padding: 16px 20px;
+    border-radius: 12px; margin-top: 16px;
+    font-family: var(--mono); font-size: 12px;
+    line-height: 1.65;
+    overflow-x: auto;
+    white-space: pre;
+  }
+  .lang-tabs { display: flex; gap: 0; border-bottom: 1px solid var(--gray-2); margin-top: 16px; }
+  .lang-tab {
+    padding: 8px 14px;
+    background: transparent; border: 0;
+    font-family: var(--mono); font-size: 11px;
+    color: var(--gray-1);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+  }
+  .lang-tab.active { color: var(--blue); border-bottom-color: var(--blue); }
+
+  .info-box {
+    background: rgba(0,113,227,0.06);
+    border: 1px solid rgba(0,113,227,0.18);
+    border-radius: 12px; padding: 12px 16px;
+    font-size: 13px;
+    margin-bottom: 20px;
+    display: flex; gap: 12px;
+  }
+  .info-box .icon { color: var(--blue); flex: 0 0 auto; font-size: 16px; }
+
+  /* Welcome state */
+  .welcome {
+    height: 100%;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    text-align: center; padding: 40px;
+    background: linear-gradient(135deg, var(--gray-3) 0%, var(--white) 100%);
+  }
+  .welcome h2 {
+    font-family: var(--display); font-weight: 400;
+    font-size: 40px; letter-spacing: -0.025em;
+    margin-bottom: 12px;
+  }
+  .welcome h2 em { font-style: italic; color: var(--blue); font-weight: 300; }
+  .welcome p { font-size: 17px; color: var(--gray-1); max-width: 480px; margin-bottom: 24px; line-height: 1.5; }
+  .welcome-pills { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+  .wp-pill {
+    padding: 6px 14px; border-radius: 100px;
+    background: white; border: 1px solid var(--gray-2);
+    font-family: var(--mono); font-size: 12px;
+    cursor: pointer;
+    transition: all 200ms var(--easing);
+  }
+  .wp-pill:hover {
+    background: var(--blue); color: white; border-color: var(--blue);
+    transform: translateY(-1px);
+  }
+
+  @media (max-width: 900px) {
+    .app { grid-template-columns: 220px 1fr; }
+    .split { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
+    .pane-left { border-right: 0; border-bottom: 1px solid var(--gray-2); }
+  }
+  @media (max-width: 640px) {
+    .app { grid-template-columns: 1fr; }
+    .sidebar { display: none; }
+  }
+
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.15); border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: rgba(0,0,0,0.3); }
+  .pane-right ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); }
+  .pane-right ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.3); }
+</style>
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-logo">
+    <a href="../index.html">Work<span class="pulse">Pulse</span>.</a>
+    <span class="crumb">/ Sandbox</span>
+  </div>
+  <div class="nav-meta">
+    <span><span class="led"></span>Servidor mock conectado</span>
+    <a href="developers.html">Documentação ›</a>
+  </div>
+</nav>
+
+<div class="app">
+
+  <!-- ===== Sidebar: lista de endpoints ===== -->
+  <aside class="sidebar">
+    <div class="sidebar-section">Agentes</div>
+    <div class="endpoint" data-id="ingest">
+      <span class="method post">POST</span>
+      <span class="path">/v1/ingest</span>
+    </div>
+    <div class="endpoint" data-id="heartbeat">
+      <span class="method post">POST</span>
+      <span class="path">/v1/license/heartbeat</span>
+    </div>
+
+    <div class="sidebar-section">Workforce</div>
+    <div class="endpoint" data-id="workforce-overview">
+      <span class="method get">GET</span>
+      <span class="path">/v1/workforce/overview</span>
+    </div>
+    <div class="endpoint" data-id="workforce-timeseries">
+      <span class="method get">GET</span>
+      <span class="path">/v1/workforce/timeseries</span>
+    </div>
+    <div class="endpoint" data-id="users">
+      <span class="method get">GET</span>
+      <span class="path">/v1/users</span>
+    </div>
+    <div class="endpoint" data-id="user-summary">
+      <span class="method get">GET</span>
+      <span class="path">/v1/users/{id}/summary</span>
+    </div>
+    <div class="endpoint" data-id="team-summary">
+      <span class="method get">GET</span>
+      <span class="path">/v1/team/summary</span>
+    </div>
+
+    <div class="sidebar-section">Plataforma</div>
+    <div class="endpoint" data-id="admin-tenants">
+      <span class="method get">GET</span>
+      <span class="path">/v1/admin/tenants</span>
+    </div>
+    <div class="endpoint" data-id="admin-licenses">
+      <span class="method get">GET</span>
+      <span class="path">/v1/admin/licenses</span>
+    </div>
+    <div class="endpoint" data-id="admin-stats">
+      <span class="method get">GET</span>
+      <span class="path">/v1/admin/stats</span>
+    </div>
+    <div class="endpoint" data-id="admin-audit">
+      <span class="method get">GET</span>
+      <span class="path">/v1/admin/audit</span>
+    </div>
+    <div class="endpoint" data-id="license-issue">
+      <span class="method post">POST</span>
+      <span class="path">/v1/license/issue</span>
+    </div>
+    <div class="endpoint" data-id="license-revoke">
+      <span class="method del">POST</span>
+      <span class="path">/v1/license/revoke</span>
+    </div>
+  </aside>
+
+  <!-- ===== Main: toolbar + split ===== -->
+  <div class="main">
+
+    <div class="toolbar">
+      <div class="url-bar">
+        <span id="urlMethod" class="url-method get">GET</span>
+        <input id="urlPath" class="url-path" readonly value="https://api.workpulse.com.br/v1/...">
+      </div>
+      <button id="runBtn" class="btn-run" disabled>
+        <span>Executar</span>
+        <span style="font-size:10px;opacity:.7;border:1px solid rgba(255,255,255,.4);padding:1px 4px;border-radius:3px">⌘ ↵</span>
+      </button>
+    </div>
+
+    <div class="split">
+
+      <!-- LEFT: parâmetros / código -->
+      <div class="pane pane-left" id="leftPane">
+        <div class="welcome" id="welcome">
+          <h2>Sandbox<br><em>do WorkPulse.</em></h2>
+          <p>Selecione um endpoint à esquerda para começar. Todas as chamadas são executadas contra um servidor mock — nada sai do seu navegador.</p>
+          <div class="welcome-pills">
+            <button class="wp-pill" data-id="workforce-overview">/workforce/overview</button>
+            <button class="wp-pill" data-id="admin-tenants">/admin/tenants</button>
+            <button class="wp-pill" data-id="license-issue">/license/issue</button>
+            <button class="wp-pill" data-id="ingest">/ingest</button>
+          </div>
+        </div>
+
+        <div id="endpointView" style="display:none;height:100%;">
+          <div class="tabs">
+            <button class="tab-btn active" data-tab="params">Parâmetros</button>
+            <button class="tab-btn" data-tab="snippets">Código</button>
+            <button class="tab-btn" data-tab="info">Sobre</button>
+          </div>
+
+          <div id="tab-params" class="tab-content active">
+            <h3 class="ep-title" id="epTitle">—</h3>
+            <p class="ep-desc" id="epDesc">—</p>
+
+            <div class="auth-block">
+              <div class="auth-block-title">Autenticação</div>
+              <div id="epAuth">—</div>
+            </div>
+
+            <div id="epParams"></div>
+          </div>
+
+          <div id="tab-snippets" class="tab-content">
+            <h3 class="ep-title">Exemplos de código</h3>
+            <p class="ep-desc">Copie diretamente para o seu projeto. As variáveis usam os mesmos valores configurados na aba Parâmetros.</p>
+            <div class="lang-tabs">
+              <button class="lang-tab active" data-lang="curl">cURL</button>
+              <button class="lang-tab" data-lang="python">Python</button>
+              <button class="lang-tab" data-lang="js">JavaScript</button>
+              <button class="lang-tab" data-lang="go">Go</button>
+            </div>
+            <pre id="snippetCode" class="code-snippet">—</pre>
+          </div>
+
+          <div id="tab-info" class="tab-content">
+            <h3 class="ep-title" id="infoTitle">—</h3>
+            <div id="infoBody">—</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- RIGHT: resposta -->
+      <div class="pane pane-right">
+        <div class="pane-header">
+          <span>Resposta</span>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <span id="respStatus" class="resp-status idle">aguardando</span>
+            <span id="respMeta" class="resp-meta"></span>
+          </div>
+        </div>
+        <div class="pane-body" id="respBody">
+          <div class="resp-empty">
+            <div class="icon">⌨</div>
+            <h3>Pronto para enviar.</h3>
+            <p>A resposta aparece aqui assim que você clica em <strong>Executar</strong> ou pressiona ⌘ ↵.</p>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<script>
+// =============================================================================
+// Endpoint catalog with mock responses
+// =============================================================================
+const ENDPOINTS = {
+  'ingest': {
+    method: 'POST', path: '/v1/ingest',
+    title: 'Ingerir eventos',
+    desc: 'Recebe um lote de eventos de atividade vindos do agente. Cada evento tem um bucket (window | afk | browser), um timestamp UTC, duração em segundos e payload arbitrário.',
+    auth: '<code>Authorization: Bearer &lt;chave de licença&gt;</code><br><code>X-Tenant: &lt;tenant_id&gt;</code>',
+    params: [
+      { name: 'X-Tenant', type: 'header string', required: true, default: 'acme' },
+      { name: 'Authorization', type: 'header string', required: true, default: 'Bearer eyJ...assinatura' },
+      { name: 'body', type: 'JSON', required: true, default: JSON.stringify({
+        device: 'host-001', os: 'macos', os_version: '14.4',
+        agent_version: '1.0.0', user_id: 'joao@acme.com',
+        events: [
+          { bucket: 'window', timestamp: '2026-05-07T13:42:11Z', duration: 87,
+            data: { app: 'Visual Studio Code', title: 'main.rs - workpulse', pid: 12034 } },
+          { bucket: 'afk', timestamp: '2026-05-07T13:43:38Z', duration: 220,
+            data: { status: 'afk' } }
+        ]
+      }, null, 2), multiline: true }
+    ],
+    info: 'Eventos são deduplicados implicitamente pelo timestamp + bucket no servidor. Lotes acima de 1.000 eventos serão truncados — o agente já respeita o limite.',
+    response: { status: 200, time: 12, body: { accepted: 2 } }
+  },
+
+  'heartbeat': {
+    method: 'POST', path: '/v1/license/heartbeat',
+    title: 'Heartbeat de licença',
+    desc: 'Confirma se a licença ainda está válida. O agente faz isso a cada 30 minutos. Retorna 403 quando revogada.',
+    auth: '<code>Bearer &lt;chave de licença&gt;</code> (ou nenhum, body próprio)',
+    params: [
+      { name: 'body', type: 'JSON', required: true, default: JSON.stringify({
+        lic: '54189aaebe73eaa4', tenant: 'acme', device: 'host-001'
+      }, null, 2), multiline: true }
+    ],
+    info: 'Em ambientes air-gapped sem servidor acessível, o agente trata 404 como tolerável e segue operando.',
+    response: { status: 200, time: 8, body: { status: 'ok', expires: '2027-05-07T23:11:20Z' } }
+  },
+
+  'workforce-overview': {
+    method: 'GET', path: '/v1/workforce/overview',
+    title: 'Visão geral da força de trabalho',
+    desc: 'KPIs agregados, distribuição horária, breakdown por departamento e alertas heurísticos (overwork, underwork) para o dashboard de RH.',
+    auth: '<code>X-Admin-Token: &lt;admin_token&gt;</code>',
+    params: [
+      { name: 'tenant', type: 'query string', required: true, default: 'acme' },
+      { name: 'days', type: 'query int', required: false, default: '7' }
+    ],
+    info: 'Alertas usam janela de 7 dias. Overwork = um dia com mais de 10h ativas. Underwork = média menor que 2h/dia. São pontos de partida para conversas, não veredictos.',
+    response: { status: 200, time: 134, body: {
+      tenant: 'acme', since: '2026-04-30T13:00:00Z', days: 7,
+      totals: { total_users: 62, online_now: 41, active_seconds: 1842*3600, afk_seconds: 266*3600, today_active_seconds: 187*3600 },
+      hourly: [
+        { hour: 8, seconds: 12000 }, { hour: 9, seconds: 35000 }, { hour: 10, seconds: 48000 },
+        { hour: 11, seconds: 51000 }, { hour: 12, seconds: 22000 }, { hour: 13, seconds: 38000 },
+        { hour: 14, seconds: 49000 }, { hour: 15, seconds: 47000 }, { hour: 16, seconds: 41000 },
+        { hour: 17, seconds: 28000 }, { hour: 18, seconds: 14000 }
+      ],
+      by_department: [
+        { dept: 'Engenharia', users: 28, active: 980*3600 },
+        { dept: 'Produto', users: 12, active: 420*3600 },
+        { dept: 'Vendas', users: 14, active: 295*3600 },
+        { dept: 'Operações', users: 8, active: 147*3600 }
+      ],
+      alerts: {
+        overwork: [ { user_id: 'maria@acme.com', display_name: 'Maria Silva', max_day_hours: 11.4 } ],
+        underwork: []
+      }
+    } }
+  },
+
+  'workforce-timeseries': {
+    method: 'GET', path: '/v1/workforce/timeseries',
+    title: 'Série temporal',
+    desc: 'Série diária de tempo total por bucket. Útil para gráficos de tendência de longo prazo.',
+    auth: '<code>X-Admin-Token: &lt;admin_token&gt;</code>',
+    params: [
+      { name: 'tenant', type: 'query string', required: true, default: 'acme' },
+      { name: 'days', type: 'query int', required: false, default: '30' },
+      { name: 'bucket', type: 'query string', required: false, default: 'window' }
+    ],
+    info: 'Buckets disponíveis: window, afk, browser. Para horizontes maiores que 90 dias use o endpoint de relatórios em batch.',
+    response: { status: 200, time: 67, body: {
+      tenant: 'acme', bucket: 'window',
+      series: Array.from({length: 30}, (_, i) => ({
+        day: new Date(Date.now() - (29-i)*86400000).toISOString().slice(0,10),
+        seconds: Math.round(180000 + Math.random()*120000 - (i%7===0||i%7===6?160000:0))
+      }))
+    } }
+  },
+
+  'users': {
+    method: 'GET', path: '/v1/users',
+    title: 'Listar usuários',
+    desc: 'Retorna a lista de colaboradores que já enviaram pelo menos um evento, ordenados por última atividade.',
+    auth: '<code>X-Admin-Token: &lt;admin_token&gt;</code>',
+    params: [{ name: 'tenant', type: 'query string', required: true, default: 'acme' }],
+    info: 'Usuários inativos por mais de 90 dias são excluídos do retorno. Para o histórico completo use o endpoint /v1/admin/audit ou exporte via API.',
+    response: { status: 200, time: 41, body: { users: [
+      { user_id: 'joao@acme.com', display_name: 'João Silva', email: 'joao@acme.com', department: 'Engenharia', role: 'Senior', last_seen: '2026-05-07T17:32:11Z', devices: 1 },
+      { user_id: 'maria@acme.com', display_name: 'Maria Souza', email: 'maria@acme.com', department: 'Produto', role: 'Lead', last_seen: '2026-05-07T17:30:48Z', devices: 2 },
+      { user_id: 'pedro@acme.com', display_name: 'Pedro Costa', email: 'pedro@acme.com', department: 'Engenharia', role: 'Pleno', last_seen: '2026-05-07T17:28:01Z', devices: 1 }
+    ] } }
+  },
+
+  'user-summary': {
+    method: 'GET', path: '/v1/users/{user_id}/summary',
+    title: 'Resumo individual',
+    desc: 'Drill-down completo de um colaborador: tempo ativo, AFK, top aplicativos e série diária dentro da janela.',
+    auth: '<code>X-Admin-Token: &lt;admin_token&gt;</code>',
+    params: [
+      { name: 'user_id', type: 'path string', required: true, default: 'joao@acme.com' },
+      { name: 'tenant', type: 'query string', required: true, default: 'acme' },
+      { name: 'days', type: 'query int', required: false, default: '7' }
+    ],
+    info: 'O nome do colaborador é parte do path. Caracteres especiais devem ser url-encoded.',
+    response: { status: 200, time: 53, body: {
+      user_id: 'joao@acme.com', since: '2026-04-30T13:00:00Z',
+      active_seconds: 119240, afk_seconds: 27860,
+      top_apps: [
+        { app: 'Visual Studio Code', seconds: 41200 },
+        { app: 'Slack', seconds: 18960 },
+        { app: 'Google Chrome', seconds: 14530 },
+        { app: 'Zoom', seconds: 9870 }
+      ],
+      by_day: [
+        { day: '2026-05-01', active: 17200, afk: 4200 },
+        { day: '2026-05-02', active: 16880, afk: 3950 },
+        { day: '2026-05-03', active: 1240, afk: 200 },
+        { day: '2026-05-04', active: 800, afk: 100 },
+        { day: '2026-05-05', active: 18450, afk: 4980 },
+        { day: '2026-05-06', active: 17200, afk: 4900 },
+        { day: '2026-05-07', active: 17470, afk: 4530 }
+      ]
+    } }
+  },
+
+  'team-summary': {
+    method: 'GET', path: '/v1/team/summary',
+    title: 'Resumo da equipe',
+    desc: 'Tabela completa com tempo ativo e AFK por colaborador, mais top aplicativos do tenant inteiro.',
+    auth: '<code>X-Admin-Token: &lt;admin_token&gt;</code>',
+    params: [
+      { name: 'tenant', type: 'query string', required: true, default: 'acme' },
+      { name: 'days', type: 'query int', required: false, default: '7' }
+    ],
+    info: 'Endpoint principal usado pelo dashboard de visão geral. Alimenta o gráfico empilhado de barras e a tabela de aderência.',
+    response: { status: 200, time: 89, body: {
+      tenant: 'acme', since: '2026-04-30T13:00:00Z',
+      users: [
+        { user_id: 'joao@acme.com', display_name: 'João Silva', department: 'Engenharia', active: 119240, afk: 27860 },
+        { user_id: 'maria@acme.com', display_name: 'Maria Souza', department: 'Produto', active: 110800, afk: 24300 },
+        { user_id: 'pedro@acme.com', display_name: 'Pedro Costa', department: 'Engenharia', active: 98400, afk: 19800 }
+      ],
+      top_apps: [
+        { app: 'Visual Studio Code', seconds: 412800 },
+        { app: 'Slack', seconds: 189000 },
+        { app: 'Google Chrome', seconds: 145200 },
+        { app: 'Figma', seconds: 87600 },
+        { app: 'Zoom', seconds: 76200 }
+      ]
+    } }
+  },
+
+  'admin-tenants': {
+    method: 'GET', path: '/v1/admin/tenants',
+    title: 'Inventário de tenants',
+    desc: 'Para uso do super-admin da plataforma. Lista todos os tenants com contagem de usuários, dispositivos, licenças ativas e última atividade.',
+    auth: '<code>X-Admin-Token: &lt;admin_token&gt;</code>',
+    params: [],
+    info: 'Endpoint exclusivo do dashboard de administração da plataforma. Não exposto a tenants individuais.',
+    response: { status: 200, time: 24, body: { tenants: [
+      { id: 'acme', name: 'ACME Corp', plan: 'business', status: 'active', created_at: '2026-01-15T09:00:00Z', users: 62, devices: 78, active_licenses: 1, last_activity: '2026-05-07T17:32:11Z' },
+      { id: 'globex', name: 'Globex', plan: 'starter', status: 'active', created_at: '2026-03-22T14:30:00Z', users: 18, devices: 18, active_licenses: 1, last_activity: '2026-05-07T16:48:02Z' },
+      { id: 'umbrella', name: 'Umbrella Corp', plan: 'enterprise', status: 'active', created_at: '2025-11-04T10:15:00Z', users: 412, devices: 437, active_licenses: 1, last_activity: '2026-05-07T17:31:54Z' },
+      { id: 'initech', name: 'Initech', plan: 'business', status: 'suspended', created_at: '2025-08-19T08:45:00Z', users: 24, devices: 26, active_licenses: 0, last_activity: '2026-04-12T11:20:33Z' }
+    ] } }
+  },
+
+  'admin-licenses': {
+    method: 'GET', path: '/v1/admin/licenses',
+    title: 'Inventário de licenças',
+    desc: 'Lista de todas as licenças do servidor com status, dias restantes e plano.',
+    auth: '<code>X-Admin-Token: &lt;admin_token&gt;</code>',
+    params: [
+      { name: 'tenant', type: 'query string', required: false, default: '' },
+      { name: 'status', type: 'query string', required: false, default: 'all', placeholder: 'all | active | revoked' }
+    ],
+    info: 'Filtros são opcionais. Sem parâmetros, retorna todas as licenças (ativas + revogadas) de todos os tenants.',
+    response: { status: 200, time: 19, body: { licenses: [
+      { lic_id: '54189aaebe73eaa4', tenant_id: 'acme', tenant_name: 'ACME Corp', plan: 'business', seats: 250, issued: '2026-01-15T09:00:00Z', expires: '2027-01-15T09:00:00Z', revoked: 0, days_remaining: 252, expired: false },
+      { lic_id: 'a3b9c7d20e1f8455', tenant_id: 'globex', tenant_name: 'Globex', plan: 'starter', seats: 25, issued: '2026-03-22T14:30:00Z', expires: '2026-06-20T14:30:00Z', revoked: 0, days_remaining: 43, expired: false },
+      { lic_id: 'b6d4f12e983a55c7', tenant_id: 'umbrella', tenant_name: 'Umbrella Corp', plan: 'enterprise', seats: 500, issued: '2025-11-04T10:15:00Z', expires: '2026-11-04T10:15:00Z', revoked: 0, days_remaining: 181, expired: false },
+      { lic_id: 'cd218e5b09f74321', tenant_id: 'initech', tenant_name: 'Initech', plan: 'business', seats: 50, issued: '2025-08-19T08:45:00Z', expires: '2026-08-19T08:45:00Z', revoked: 1, revoked_at: '2026-04-12T11:30:00Z', days_remaining: 104, expired: false }
+    ] } }
+  },
+
+  'admin-stats': {
+    method: 'GET', path: '/v1/admin/stats',
+    title: 'Estatísticas do servidor',
+    desc: 'Telemetria agregada do servidor: contagens de tenants, eventos, ingestão por hora, distribuição por plano e SO.',
+    auth: '<code>X-Admin-Token: &lt;admin_token&gt;</code>',
+    params: [],
+    info: 'Endpoint usado pelo dashboard de admin para o gráfico de saúde do servidor. Métricas mais granulares disponíveis via Prometheus em /metrics.',
+    response: { status: 200, time: 31, body: {
+      counts: { tenants: 4, users: 516, devices: 559, active_licenses: 3, revoked_licenses: 1, total_events: 4_128_330 },
+      events_last_24h: 184_220, events_last_7d: 1_180_400,
+      db_size_bytes: 1_280_000_000,
+      ingest_per_hour: Array.from({length: 24}, (_,i) => ({ hour: `2026-05-07T${String(i).padStart(2,'0')}`, events: 6000 + Math.floor(Math.random()*3000) })),
+      plan_distribution: [
+        { plan: 'starter', n: 1 },
+        { plan: 'business', n: 2 },
+        { plan: 'enterprise', n: 1 }
+      ],
+      os_distribution: [
+        { os: 'macos', n: 198 },
+        { os: 'windows', n: 247 },
+        { os: 'linux', n: 114 }
+      ],
+      server_time: '2026-05-07T17:35:29Z',
+      version: '1.0.0'
+    } }
+  },
+
+  'admin-audit': {
+    method: 'GET', path: '/v1/admin/audit',
+    title: 'Log de auditoria',
+    desc: 'Append-only log de todas as ações administrativas com timestamp, ator, ação, alvo e IP de origem.',
+    auth: '<code>X-Admin-Token: &lt;admin_token&gt;</code>',
+    params: [
+      { name: 'limit', type: 'query int', required: false, default: '100', placeholder: 'máximo 500' }
+    ],
+    info: 'Logs são imutáveis. Não há endpoint de DELETE. Retenção mínima de 12 meses no plano Business e 36 meses no Enterprise.',
+    response: { status: 200, time: 14, body: { entries: [
+      { id: 1547, ts: '2026-05-07T17:32:11Z', actor: 'admin', action: 'license.issue', target: '54189aaebe73eaa4', detail: 'tenant=acme plan=business seats=250', ip: '10.0.4.18' },
+      { id: 1546, ts: '2026-05-07T16:45:02Z', actor: 'admin', action: 'license.revoke', target: 'cd218e5b09f74321', detail: null, ip: '10.0.4.18' },
+      { id: 1545, ts: '2026-05-07T15:22:48Z', actor: 'admin', action: 'license.issue', target: 'b6d4f12e983a55c7', detail: 'tenant=umbrella plan=enterprise seats=500', ip: '10.0.4.18' }
+    ] } }
+  },
+
+  'license-issue': {
+    method: 'POST', path: '/v1/license/issue',
+    title: 'Emitir licença',
+    desc: 'Cria uma nova chave de ativação assinada Ed25519. O retorno contém o token a ser embarcado na config do agente.',
+    auth: '<code>X-Admin-Token: &lt;admin_token&gt;</code>',
+    params: [
+      { name: 'body', type: 'JSON', required: true, default: JSON.stringify({
+        tenant_id: 'acme', tenant_name: 'ACME Corp',
+        plan: 'business', seats: 250, days_valid: 365,
+        features: ['window', 'afk', 'browser', 'sso']
+      }, null, 2), multiline: true }
+    ],
+    info: 'Tokens de licença são imutáveis após assinados. Para mudar plano ou número de assentos, emita uma nova chave e revogue a antiga.',
+    response: { status: 200, time: 178, body: {
+      license_key: 'eyJleHBpcmVzIjoiMjAyNy0wNS0wN1QyMzoxMToyMC4yMDg5MjBaIiwiZmVhdHVyZXMiOlsid2luZG93IiwiYWZrIiwiYnJvd3NlciIsInNzbyJdLCJpc3N1ZWQiOiIyMDI2LTA1LTA3VDIzOjExOjIwLjIwODkyMFoiLCJsaWMiOiI1NDE4OWFhZWJlNzNlYWE0IiwicGxhbiI6ImJ1c2luZXNzIiwic2VhdHMiOjI1MCwidGVuYW50IjoiYWNtZSJ9.YKBHZ28v...',
+      lic_id: '54189aaebe73eaa4',
+      expires: '2027-05-07T23:11:20Z'
+    } }
+  },
+
+  'license-revoke': {
+    method: 'POST', path: '/v1/license/revoke',
+    title: 'Revogar licença',
+    desc: 'Marca uma chave como revogada. Agentes detectam pelo heartbeat (em até 30 minutos) e cessam a coleta.',
+    auth: '<code>X-Admin-Token: &lt;admin_token&gt;</code>',
+    params: [
+      { name: 'lic_id', type: 'query string', required: true, default: '54189aaebe73eaa4' }
+    ],
+    info: 'Revogação é irreversível. Para reativar um tenant após revogar acidentalmente, emita uma nova chave.',
+    response: { status: 200, time: 22, body: { status: 'revoked', lic_id: '54189aaebe73eaa4' } }
+  }
+};
+
+// =============================================================================
+// State + DOM helpers
+// =============================================================================
+let currentEp = null;
+const $ = id => document.getElementById(id);
+
+function selectEndpoint(id) {
+  if (!ENDPOINTS[id]) return;
+  currentEp = id;
+  const ep = ENDPOINTS[id];
+
+  document.querySelectorAll('.endpoint').forEach(e => e.classList.toggle('active', e.dataset.id === id));
+
+  $('welcome').style.display = 'none';
+  $('endpointView').style.display = 'block';
+
+  $('urlMethod').textContent = ep.method;
+  $('urlMethod').className = 'url-method ' + (ep.method === 'GET' ? 'get' : ep.method === 'POST' && id === 'license-revoke' ? 'del' : 'post');
+  $('urlPath').value = `https://api.workpulse.com.br${ep.path}`;
+  $('runBtn').disabled = false;
+
+  $('epTitle').textContent = ep.title;
+  $('epDesc').textContent = ep.desc;
+  $('epAuth').innerHTML = ep.auth;
+  $('infoTitle').textContent = ep.title;
+  $('infoBody').innerHTML = `<p style="font-size:14px;color:var(--gray-1);line-height:1.6">${ep.info}</p>`;
+
+  // Parameters
+  if (ep.params.length === 0) {
+    $('epParams').innerHTML = '<p style="font-size:13px;color:var(--gray-1)">Este endpoint não recebe parâmetros adicionais.</p>';
+  } else {
+    let html = '<table class="params-table"><thead><tr><th>Parâmetro</th><th>Valor</th></tr></thead><tbody>';
+    ep.params.forEach((p, i) => {
+      const inputId = `p_${i}`;
+      const inputEl = p.multiline
+        ? `<textarea id="${inputId}" rows="6">${p.default || ''}</textarea>`
+        : `<input id="${inputId}" type="text" value="${p.default || ''}" placeholder="${p.placeholder || ''}">`;
+      html += `<tr>
+        <td>
+          <div class="pname">${p.name}${p.required ? '<span class="preq">obrigatório</span>' : ''}</div>
+          <div class="ptype">${p.type}</div>
+        </td>
+        <td>${inputEl}</td>
+      </tr>`;
+    });
+    html += '</tbody></table>';
+    $('epParams').innerHTML = html;
+  }
+
+  buildSnippet('curl');
+}
+
+// =============================================================================
+// Code snippets per language
+// =============================================================================
+function buildSnippet(lang) {
+  if (!currentEp) return;
+  const ep = ENDPOINTS[currentEp];
+  const url = `https://api.workpulse.com.br${ep.path}`;
+  const queryParams = ep.params.filter(p => p.type.startsWith('query'));
+  const bodyParam = ep.params.find(p => p.name === 'body');
+  const headerParams = ep.params.filter(p => p.type.startsWith('header'));
+
+  let q = '';
+  if (queryParams.length > 0) {
+    q = '?' + queryParams.map(p => `${p.name}=${encodeURIComponent(p.default)}`).join('&');
+  }
+
+  let snippet = '';
+  if (lang === 'curl') {
+    snippet = `curl${ep.method !== 'GET' ? ' -X ' + ep.method : ''} \\\n  '${url}${q}'`;
+    if (ep.auth.includes('X-Admin-Token')) snippet += ` \\\n  -H 'X-Admin-Token: $WP_ADMIN_TOKEN'`;
+    if (headerParams.length) headerParams.forEach(h => { if (h.name !== 'Authorization') snippet += ` \\\n  -H '${h.name}: ${h.default}'`; });
+    if (ep.auth.includes('Bearer')) snippet += ` \\\n  -H 'Authorization: Bearer $WP_LICENSE_KEY'`;
+    if (bodyParam) snippet += ` \\\n  -H 'Content-Type: application/json' \\\n  -d '${bodyParam.default.replace(/\n\s*/g, ' ').replace(/'/g, "'\\''")}'`;
+  } else if (lang === 'python') {
+    snippet = `import requests\n\nheaders = {\n`;
+    if (ep.auth.includes('X-Admin-Token')) snippet += `    "X-Admin-Token": os.environ["WP_ADMIN_TOKEN"],\n`;
+    if (ep.auth.includes('Bearer')) snippet += `    "Authorization": f"Bearer {os.environ['WP_LICENSE_KEY']}",\n`;
+    headerParams.forEach(h => { if (h.name !== 'Authorization') snippet += `    "${h.name}": "${h.default}",\n`; });
+    snippet += `    "Content-Type": "application/json",\n}\n\n`;
+    if (queryParams.length) {
+      snippet += `params = {\n`;
+      queryParams.forEach(p => snippet += `    "${p.name}": "${p.default}",\n`);
+      snippet += `}\n\n`;
+    }
+    if (bodyParam) snippet += `body = ${bodyParam.default}\n\n`;
+    snippet += `r = requests.${ep.method.toLowerCase()}(\n    "${url}",\n    headers=headers,${queryParams.length ? '\n    params=params,' : ''}${bodyParam ? '\n    json=body,' : ''}\n)\n\nprint(r.status_code, r.json())`;
+  } else if (lang === 'js') {
+    snippet = `const res = await fetch(\n  "${url}${q}",\n  {\n    method: "${ep.method}",\n    headers: {\n`;
+    if (ep.auth.includes('X-Admin-Token')) snippet += `      "X-Admin-Token": process.env.WP_ADMIN_TOKEN,\n`;
+    if (ep.auth.includes('Bearer')) snippet += `      "Authorization": \`Bearer \${process.env.WP_LICENSE_KEY}\`,\n`;
+    headerParams.forEach(h => { if (h.name !== 'Authorization') snippet += `      "${h.name}": "${h.default}",\n`; });
+    snippet += `      "Content-Type": "application/json",\n    },\n`;
+    if (bodyParam) snippet += `    body: JSON.stringify(${bodyParam.default}),\n`;
+    snippet += `  }\n);\n\nconst data = await res.json();\nconsole.log(res.status, data);`;
+  } else if (lang === 'go') {
+    snippet = `package main\n\nimport (\n  "bytes"\n  "encoding/json"\n  "io"\n  "net/http"\n  "os"\n)\n\nfunc main() {\n`;
+    if (bodyParam) snippet += `  body := []byte(\`${bodyParam.default}\`)\n  req, _ := http.NewRequest("${ep.method}", "${url}${q}", bytes.NewReader(body))\n`;
+    else snippet += `  req, _ := http.NewRequest("${ep.method}", "${url}${q}", nil)\n`;
+    if (ep.auth.includes('X-Admin-Token')) snippet += `  req.Header.Set("X-Admin-Token", os.Getenv("WP_ADMIN_TOKEN"))\n`;
+    if (ep.auth.includes('Bearer')) snippet += `  req.Header.Set("Authorization", "Bearer " + os.Getenv("WP_LICENSE_KEY"))\n`;
+    headerParams.forEach(h => { if (h.name !== 'Authorization') snippet += `  req.Header.Set("${h.name}", "${h.default}")\n`; });
+    snippet += `  req.Header.Set("Content-Type", "application/json")\n\n  resp, _ := http.DefaultClient.Do(req)\n  defer resp.Body.Close()\n  out, _ := io.ReadAll(resp.Body)\n  os.Stdout.Write(out)\n}`;
+  }
+
+  $('snippetCode').textContent = snippet;
+}
+
+// =============================================================================
+// JSON syntax highlighting
+// =============================================================================
+function colorizeJson(obj) {
+  const json = JSON.stringify(obj, null, 2);
+  return json
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, function (match) {
+      let cls = 'json-num';
+      if (/^"/.test(match)) {
+        cls = /:$/.test(match) ? 'json-key' : 'json-str';
+      } else if (/true|false/.test(match)) cls = 'json-bool';
+      else if (/null/.test(match)) cls = 'json-null';
+      return '<span class="' + cls + '">' + match + '</span>';
+    });
+}
+
+// =============================================================================
+// Run request (mocked)
+// =============================================================================
+async function runRequest() {
+  if (!currentEp) return;
+  const ep = ENDPOINTS[currentEp];
+  $('respStatus').textContent = 'enviando…';
+  $('respStatus').className = 'resp-status idle';
+  $('respMeta').textContent = '';
+  $('respBody').innerHTML = '<div class="resp-empty"><div class="icon" style="font-size:36px">⏳</div><h3 style="font-size:18px">Processando…</h3></div>';
+
+  // Simulated network latency
+  const latency = ep.response.time + Math.random() * 30;
+  await new Promise(r => setTimeout(r, latency));
+
+  const ok = ep.response.status >= 200 && ep.response.status < 300;
+  $('respStatus').textContent = `${ep.response.status} ${ok ? 'OK' : 'ERROR'}`;
+  $('respStatus').className = 'resp-status ' + (ok ? 'ok' : 'err');
+  $('respMeta').textContent = `${Math.round(latency)} ms · ${JSON.stringify(ep.response.body).length} bytes`;
+
+  $('respBody').innerHTML = '<pre>' + colorizeJson(ep.response.body) + '</pre>';
+}
+
+// =============================================================================
+// Wire up event handlers
+// =============================================================================
+document.querySelectorAll('.endpoint').forEach(el => {
+  el.addEventListener('click', () => selectEndpoint(el.dataset.id));
+});
+document.querySelectorAll('.wp-pill').forEach(el => {
+  el.addEventListener('click', () => selectEndpoint(el.dataset.id));
+});
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+    $('tab-' + btn.dataset.tab).classList.add('active');
+  });
+});
+document.querySelectorAll('.lang-tab').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.lang-tab').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    buildSnippet(btn.dataset.lang);
+  });
+});
+$('runBtn').addEventListener('click', runRequest);
+document.addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+    e.preventDefault();
+    runRequest();
+  }
+});
+</script>
+
+</body>
+</html>

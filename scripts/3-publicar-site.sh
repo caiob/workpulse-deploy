@@ -56,9 +56,12 @@ echo "============================================================"
 echo " Site publicado!"
 echo
 echo "   Site institucional : https://${DOMAIN}"
-echo "   Dashboard admin    : https://${DOMAIN}/admin.html"
-echo "   Dashboard workforce: https://${DOMAIN}/workforce.html"
-echo "   Painel geral       : https://${DOMAIN}/dashboard/index.html"
+echo "   Painel do cliente  : https://${DOMAIN}/dashboard/workforce.html"
+echo "   Console admin      : https://${DOMAIN}/adm/admin.html"
+echo "   Documentacao API   : https://${DOMAIN}/docs/developers.html"
+echo
+echo "   (caminhos antigos -- /workforce.html, /admin.html, /developers.html"
+echo "    e /sandbox.html -- continuam funcionando: redirecionam para os novos.)"
 echo
 echo " Observação: a primeira vez que o CloudFront e o DNS propagam"
 echo " pode levar de 15 a 40 minutos. Se o site não abrir de imediato,"
