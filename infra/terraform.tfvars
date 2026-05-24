@@ -1,21 +1,23 @@
 # =============================================================================
 # WorkPulse — Valores de configuração do deploy
 # =============================================================================
-# Edite este arquivo se precisar mudar algo. Os valores abaixo já estão
-# corretos para o deploy do Caio (workpulse.com.br, us-east-1).
-# =============================================================================
 
 aws_region    = "us-east-1"
 environment   = "prod"
 owner         = "Caio"
 public_domain = "workpulse.com.br"
 
-# Tamanho do servidor (ECS Fargate). 512 CPU / 1024 MB atende o início com
-# folga. Para aumentar depois: 1024 / 2048, 2048 / 4096, etc.
-fargate_cpu       = "512"
-fargate_memory    = "1024"
+# Servidor ECS Fargate — 1 vCPU / 2 GB RAM.
+# Para escalar depois: 2048/4096, 4096/8192, etc.
+fargate_cpu       = "1024"
+fargate_memory    = "2048"
 ecs_desired_count = 1
 
-# E-mail que recebe os alertas de monitoramento (erros, indisponibilidade).
-# A AWS envia um e-mail de confirmação que precisa ser aceito uma vez.
+# RDS PostgreSQL — db.t3.micro (~$15/mês).
+# Para escalar depois: db.t3.small, db.t3.medium, etc.
+db_instance_class = "db.t3.micro"
+db_name           = "workpulse"
+db_username       = "workpulse"
+
+# E-mail que recebe os alertas de monitoramento.
 alert_email = "caiob@hotmail.com"

@@ -1,22 +1,18 @@
 # =============================================================================
-# WorkPulse — Infraestrutura AWS (Terraform) — Caminho A: SQLite + EFS
+# WorkPulse — Infraestrutura AWS (Terraform) — PostgreSQL + RDS
 # =============================================================================
-# Topologia provisionada nesta configuração:
-#
+# Topologia:
 #   Route 53  ─→  CloudFront ─→ S3 .................. site + dashboards (estático)
-#   Route 53  ─→  ALB (HTTPS/ACM) ─→ ECS Fargate ─→ EFS .. API do servidor
+#   Route 53  ─→  ALB (HTTPS/ACM) ─→ ECS Fargate ─→ RDS PostgreSQL
 #   ECR + CodeBuild ............................. build e registro da imagem
-#   Secrets Manager ............................. token de admin
+#   Secrets Manager ............................. admin token + senha DB + chave de licença
 #   CloudWatch + SNS ............................ logs e alertas
 #
-# Banco de dados: SQLite em volume EFS (persistente). NÃO usa RDS.
-# Região: us-east-1.  Servidor: 1 task ECS Fargate.
-#
-# Uso (feito pelos scripts em ../scripts):
-#   terraform init -backend-config=...
-#   terraform apply -target=aws_ecr_repository.server -target=aws_codebuild_project.server
-#   (build da imagem via CodeBuild)
-#   terraform apply
+# Banco de dados: PostgreSQL 15 no RDS (substitui SQLite/EFS).
+#   - Múltiplos gravadores → rolling deployment SEM DOWNTIME
+#   - ~10-50× mais rápido que SQLite sobre EFS
+#   - Backups automáticos de 7 dias + autoscaling de storage
+# Região: us-east-1.
 # =============================================================================
 
 terraform {
@@ -27,7 +23,6 @@ terraform {
     random = { source = "hashicorp/random", version = "~> 3.6" }
   }
 
-  # Backend remoto (S3). Configurado via -backend-config no `terraform init`.
   backend "s3" {}
 }
 
@@ -53,7 +48,6 @@ data "aws_availability_zones" "available" {
 
 data "aws_caller_identity" "current" {}
 
-# A hosted zone do domínio precisa já existir no Route 53 desta conta.
 data "aws_route53_zone" "main" {
   name = var.public_domain
 }
@@ -73,9 +67,8 @@ locals {
   api_domain = "api.${var.public_domain}"
   www_domain = "www.${var.public_domain}"
 
-  # Buckets com nome determinístico (S3 exige nome global único).
-  deploy_bucket = "workpulse-deploy-${local.account_id}" # fonte do build (criado pelo script de bootstrap)
-  site_bucket   = "workpulse-site-${local.account_id}"   # site estático (criado por este Terraform)
+  deploy_bucket = "workpulse-deploy-${local.account_id}"
+  site_bucket   = "workpulse-site-${local.account_id}"
 }
 
 # =============================================================================
@@ -193,7 +186,7 @@ resource "aws_security_group" "alb" {
 
 resource "aws_security_group" "ecs" {
   name        = "${local.name_prefix}-ecs"
-  description = "ECS tasks - aceita 8080 apenas do ALB"
+  description = "ECS tasks - aceita 8080 do ALB, acessa RDS e internet"
   vpc_id      = aws_vpc.main.id
 
   ingress {
@@ -204,7 +197,7 @@ resource "aws_security_group" "ecs" {
     security_groups = [aws_security_group.alb.id]
   }
   egress {
-    description = "Saida - ECR, Secrets Manager, EFS, CloudWatch"
+    description = "Saida - RDS, ECR, Secrets Manager, CloudWatch"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
@@ -213,77 +206,24 @@ resource "aws_security_group" "ecs" {
   tags = { Name = "${local.name_prefix}-ecs" }
 }
 
-resource "aws_security_group" "efs" {
-  name        = "${local.name_prefix}-efs"
-  description = "EFS - aceita NFS 2049 apenas do ECS"
+# Security group do RDS — só aceita conexões vindas do ECS
+resource "aws_security_group" "rds" {
+  name        = "${local.name_prefix}-rds"
+  description = "RDS PostgreSQL - aceita 5432 apenas do ECS"
   vpc_id      = aws_vpc.main.id
 
   ingress {
-    description     = "NFS vindo das tasks ECS"
-    from_port       = 2049
-    to_port         = 2049
+    description     = "PostgreSQL vindo das tasks ECS"
+    from_port       = 5432
+    to_port         = 5432
     protocol        = "tcp"
     security_groups = [aws_security_group.ecs.id]
   }
-  tags = { Name = "${local.name_prefix}-efs" }
+  tags = { Name = "${local.name_prefix}-rds" }
 }
 
 # =============================================================================
-# 3) EFS — armazenamento persistente para o banco SQLite e a chave de licença
-# =============================================================================
-
-resource "aws_efs_file_system" "data" {
-  creation_token   = "${local.name_prefix}-data"
-  encrypted        = true
-  performance_mode = "generalPurpose"
-  throughput_mode  = "bursting"
-
-  lifecycle_policy {
-    transition_to_ia = "AFTER_30_DAYS"
-  }
-
-  tags = { Name = "${local.name_prefix}-data" }
-}
-
-# Backups automáticos diários do EFS (gerenciados pela AWS).
-resource "aws_efs_backup_policy" "data" {
-  file_system_id = aws_efs_file_system.data.id
-  backup_policy {
-    status = "ENABLED"
-  }
-}
-
-resource "aws_efs_mount_target" "data" {
-  count           = 3
-  file_system_id  = aws_efs_file_system.data.id
-  subnet_id       = aws_subnet.app[count.index].id
-  security_groups = [aws_security_group.efs.id]
-}
-
-# Access point: fixa o usuário POSIX 1000:1000 (mesmo usuário do contêiner)
-# e isola os dados do WorkPulse no diretório /workpulse do volume.
-resource "aws_efs_access_point" "data" {
-  file_system_id = aws_efs_file_system.data.id
-
-  posix_user {
-    uid = 1000
-    gid = 1000
-  }
-
-  root_directory {
-    path = "/workpulse"
-    creation_info {
-      owner_uid   = 1000
-      owner_gid   = 1000
-      permissions = "0755"
-    }
-  }
-
-  tags = { Name = "${local.name_prefix}-data-ap" }
-}
-
-# =============================================================================
-# 4) SECRETS — token de admin (gerado automaticamente)
+# 3) SECRETS — token de admin, senha do banco, chave de licença
 # =============================================================================
 
 resource "random_password" "admin_token" {
@@ -293,13 +233,93 @@ resource "random_password" "admin_token" {
 
 resource "aws_secretsmanager_secret" "admin_token" {
   name                    = "${local.name_prefix}/admin-token"
-  description             = "Bearer token usado pelos dashboards de administração do WorkPulse"
+  description             = "Bearer token de administração do WorkPulse"
   recovery_window_in_days = 0
 }
 
 resource "aws_secretsmanager_secret_version" "admin_token" {
   secret_id     = aws_secretsmanager_secret.admin_token.id
   secret_string = random_password.admin_token.result
+}
+
+resource "random_password" "db_password" {
+  length  = 32
+  special = false
+}
+
+resource "aws_secretsmanager_secret" "db_password" {
+  name                    = "${local.name_prefix}/db-password"
+  description             = "Senha do PostgreSQL do WorkPulse"
+  recovery_window_in_days = 0
+}
+
+resource "aws_secretsmanager_secret_version" "db_password" {
+  secret_id     = aws_secretsmanager_secret.db_password.id
+  secret_string = random_password.db_password.result
+}
+
+# Chave Ed25519 de assinatura de licenças (PEM, base64-encoded).
+# O script migrar-dados.sh extrai a chave do EFS e preenche este secret
+# ANTES de destruir o EFS. Em instalações novas o servidor gera a chave
+# no primeiro boot e a grava aqui automaticamente.
+resource "aws_secretsmanager_secret" "license_key" {
+  name                    = "${local.name_prefix}/license-key-b64"
+  description             = "Chave privada Ed25519 (PEM em base64) de assinatura de licenças"
+  recovery_window_in_days = 0
+}
+
+resource "aws_secretsmanager_secret_version" "license_key" {
+  secret_id     = aws_secretsmanager_secret.license_key.id
+  secret_string = "PLACEHOLDER"
+
+  # Ignora mudanças feitas externamente (script de migração ou primeiro boot do servidor).
+  lifecycle {
+    ignore_changes = [secret_string]
+  }
+}
+
+# =============================================================================
+# 4) RDS — PostgreSQL 15 (substitui SQLite/EFS)
+# =============================================================================
+
+resource "aws_db_subnet_group" "main" {
+  name       = "${local.name_prefix}-db"
+  subnet_ids = aws_subnet.app[*].id
+  tags       = { Name = "${local.name_prefix}-db" }
+}
+
+resource "aws_db_instance" "main" {
+  identifier            = "${local.name_prefix}-pg"
+  engine                = "postgres"
+  engine_version        = "15"
+  instance_class        = var.db_instance_class
+  allocated_storage     = 20
+  max_allocated_storage = 100   # autoscaling automático até 100 GB
+  storage_type          = "gp2"
+  storage_encrypted     = true
+
+  db_name  = var.db_name
+  username = var.db_username
+  password = random_password.db_password.result
+
+  db_subnet_group_name   = aws_db_subnet_group.main.name
+  vpc_security_group_ids = [aws_security_group.rds.id]
+  publicly_accessible    = false
+
+  # Backups automáticos diários com retenção de 7 dias
+  backup_retention_period    = 7
+  backup_window              = "03:00-04:00"
+  maintenance_window         = "sun:04:00-sun:05:00"
+  auto_minor_version_upgrade = true
+
+  # Para desenvolvimento — habilite deletion_protection em produção real
+  deletion_protection = false
+  skip_final_snapshot = true
+
+  # Performance Insights consome ~$25/mês extra — habilite quando houver tráfego real
+  performance_insights_enabled = false
+
+  tags = { Name = "${local.name_prefix}-pg" }
 }
 
 # =============================================================================
@@ -335,9 +355,6 @@ resource "aws_ecr_lifecycle_policy" "server" {
 # =============================================================================
 # 6) CODEBUILD — constrói a imagem Docker e envia ao ECR
 # =============================================================================
-# O AWS CloudShell não consegue rodar `docker build`. O CodeBuild faz esse
-# trabalho: baixa o código-fonte do bucket de deploy, builda a imagem e envia
-# ao ECR. O código-fonte (server-src.zip) é enviado pelos scripts de deploy.
 
 resource "aws_iam_role" "codebuild" {
   name = "${local.name_prefix}-codebuild"
@@ -351,10 +368,6 @@ resource "aws_iam_role" "codebuild" {
   })
 }
 
-# NOTA: as permissões abaixo foram ajustadas para incluir s3:ListBucket e
-# ecr:GetDownloadUrlForLayer — permissões que se mostraram necessárias para o
-# build da imagem no primeiro deploy real (maio/2026). Com esta versão, um
-# novo deploy do zero funciona sem nenhum ajuste manual de IAM.
 resource "aws_iam_role_policy" "codebuild" {
   name = "codebuild-permissions"
   role = aws_iam_role.codebuild.id
@@ -405,15 +418,13 @@ resource "aws_codebuild_project" "server" {
   description  = "Builda a imagem Docker do servidor WorkPulse e envia ao ECR"
   service_role = aws_iam_role.codebuild.arn
 
-  artifacts {
-    type = "NO_ARTIFACTS"
-  }
+  artifacts { type = "NO_ARTIFACTS" }
 
   environment {
     compute_type    = "BUILD_GENERAL1_SMALL"
     image           = "aws/codebuild/amazonlinux2-x86_64-standard:5.0"
     type            = "LINUX_CONTAINER"
-    privileged_mode = true # necessário para `docker build`
+    privileged_mode = true
 
     environment_variable {
       name  = "ECR_URI"
@@ -471,7 +482,6 @@ resource "aws_cloudwatch_log_group" "server" {
   retention_in_days = 30
 }
 
-# Role que o agente ECS usa para puxar a imagem e ler o secret.
 resource "aws_iam_role" "ecs_execution" {
   name = "${local.name_prefix}-ecs-execution"
   assume_role_policy = jsonencode({
@@ -497,12 +507,16 @@ resource "aws_iam_role_policy" "ecs_execution_secrets" {
     Statement = [{
       Effect   = "Allow"
       Action   = ["secretsmanager:GetSecretValue"]
-      Resource = [aws_secretsmanager_secret.admin_token.arn]
+      Resource = [
+        aws_secretsmanager_secret.admin_token.arn,
+        aws_secretsmanager_secret.db_password.arn,
+        aws_secretsmanager_secret.license_key.arn,
+      ]
     }]
   })
 }
 
-# Role da aplicação em runtime (não precisa de permissões extras neste deploy).
+# Role da aplicação: permissão para gravar a chave de licença no primeiro boot
 resource "aws_iam_role" "ecs_task" {
   name = "${local.name_prefix}-ecs-task"
   assume_role_policy = jsonencode({
@@ -511,6 +525,19 @@ resource "aws_iam_role" "ecs_task" {
       Effect    = "Allow"
       Principal = { Service = "ecs-tasks.amazonaws.com" }
       Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "ecs_task_secrets" {
+  name = "license-key-write"
+  role = aws_iam_role.ecs_task.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["secretsmanager:PutSecretValue"]
+      Resource = [aws_secretsmanager_secret.license_key.arn]
     }]
   })
 }
@@ -524,17 +551,7 @@ resource "aws_ecs_task_definition" "server" {
   execution_role_arn       = aws_iam_role.ecs_execution.arn
   task_role_arn            = aws_iam_role.ecs_task.arn
 
-  volume {
-    name = "data"
-    efs_volume_configuration {
-      file_system_id     = aws_efs_file_system.data.id
-      transit_encryption = "ENABLED"
-      authorization_config {
-        access_point_id = aws_efs_access_point.data.id
-        iam             = "DISABLED"
-      }
-    }
-  }
+  # Sem volume EFS — PostgreSQL no RDS cuida da persistência.
 
   container_definitions = jsonencode([{
     name      = "server"
@@ -543,21 +560,22 @@ resource "aws_ecs_task_definition" "server" {
 
     portMappings = [{ containerPort = 8080, protocol = "tcp" }]
 
-    mountPoints = [{
-      sourceVolume  = "data"
-      containerPath = "/data"
-      readOnly      = false
-    }]
-
     environment = [
-      { name = "WORKPULSE_LISTEN", value = "0.0.0.0:8080" },
-      { name = "WORKPULSE_DB", value = "/data/workpulse.db" },
-      { name = "WORKPULSE_LICENSE_PRIVKEY", value = "/data/license_priv.key" },
-      { name = "WORKPULSE_CORS_ORIGINS", value = "https://${var.public_domain},https://${local.www_domain}" }
+      { name = "WORKPULSE_LISTEN",        value = "0.0.0.0:8080" },
+      { name = "WORKPULSE_CORS_ORIGINS",  value = "https://${var.public_domain},https://${local.www_domain}" },
+      { name = "DB_HOST",                 value = aws_db_instance.main.address },
+      { name = "DB_PORT",                 value = tostring(aws_db_instance.main.port) },
+      { name = "DB_NAME",                 value = var.db_name },
+      { name = "DB_USER",                 value = var.db_username },
+      { name = "WEB_CONCURRENCY",         value = "2" },
+      # ARN para o servidor gravar a chave de licença gerada no primeiro boot
+      { name = "LICENSE_KEY_SECRET_ARN",  value = aws_secretsmanager_secret.license_key.arn },
     ]
 
     secrets = [
-      { name = "WORKPULSE_ADMIN_TOKEN", valueFrom = aws_secretsmanager_secret.admin_token.arn }
+      { name = "WORKPULSE_ADMIN_TOKEN",         valueFrom = aws_secretsmanager_secret.admin_token.arn },
+      { name = "DB_PASSWORD",                   valueFrom = aws_secretsmanager_secret.db_password.arn },
+      { name = "WORKPULSE_LICENSE_PRIVKEY_B64", valueFrom = aws_secretsmanager_secret.license_key.arn },
     ]
 
     logConfiguration = {
@@ -574,7 +592,7 @@ resource "aws_ecs_task_definition" "server" {
       interval    = 30
       timeout     = 5
       retries     = 3
-      startPeriod = 30
+      startPeriod = 60
     }
 
     readonlyRootFilesystem = false
@@ -607,14 +625,14 @@ resource "aws_ecs_service" "server" {
     rollback = true
   }
 
-  # SQLite não suporta dois gravadores: para a task antiga ANTES de subir a
-  # nova (causa alguns segundos de indisponibilidade durante atualizações).
-  deployment_minimum_healthy_percent = 0
-  deployment_maximum_percent         = 100
+  # PostgreSQL suporta múltiplos gravadores → rolling deployment SEM DOWNTIME.
+  # A task antiga só para depois que a nova está saudável no ALB.
+  deployment_minimum_healthy_percent = 100
+  deployment_maximum_percent         = 200
 
   depends_on = [
     aws_lb_listener.https,
-    aws_efs_mount_target.data
+    aws_db_instance.main,
   ]
 }
 
@@ -682,29 +700,22 @@ resource "aws_lb_listener" "http" {
 }
 
 # =============================================================================
-# 9) ACM — certificados TLS (validação via DNS no Route 53)
+# 9) ACM — certificados TLS
 # =============================================================================
 
-# Certificado do ALB (API).
 resource "aws_acm_certificate" "alb" {
   domain_name       = local.api_domain
   validation_method = "DNS"
-  lifecycle {
-    create_before_destroy = true
-  }
+  lifecycle { create_before_destroy = true }
 }
 
-# Certificado do CloudFront (site). Precisa estar em us-east-1 — e está.
 resource "aws_acm_certificate" "cdn" {
   domain_name               = var.public_domain
   subject_alternative_names = [local.www_domain]
   validation_method         = "DNS"
-  lifecycle {
-    create_before_destroy = true
-  }
+  lifecycle { create_before_destroy = true }
 }
 
-# Registros CNAME de validação para os dois certificados.
 resource "aws_route53_record" "cert_validation" {
   for_each = {
     for dvo in concat(
@@ -783,9 +794,7 @@ resource "aws_cloudfront_distribution" "site" {
 
     forwarded_values {
       query_string = false
-      cookies {
-        forward = "none"
-      }
+      cookies { forward = "none" }
     }
 
     min_ttl     = 0
@@ -806,13 +815,10 @@ resource "aws_cloudfront_distribution" "site" {
   }
 
   restrictions {
-    geo_restriction {
-      restriction_type = "none"
-    }
+    geo_restriction { restriction_type = "none" }
   }
 }
 
-# Permite que SOMENTE este CloudFront leia os objetos do bucket.
 resource "aws_s3_bucket_policy" "site" {
   bucket = aws_s3_bucket.site.id
   policy = jsonencode({
@@ -833,7 +839,7 @@ resource "aws_s3_bucket_policy" "site" {
 }
 
 # =============================================================================
-# 11) ROUTE 53 — registros DNS apontando para ALB e CloudFront
+# 11) ROUTE 53 — registros DNS
 # =============================================================================
 
 resource "aws_route53_record" "api" {
@@ -885,7 +891,7 @@ resource "aws_sns_topic_subscription" "alerts_email" {
 
 resource "aws_cloudwatch_metric_alarm" "alb_5xx" {
   alarm_name          = "${local.name_prefix}-alb-5xx"
-  alarm_description   = "Mais de 10 erros 5xx do servidor em 5 minutos"
+  alarm_description   = "Mais de 10 erros 5xx em 5 minutos"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 1
   metric_name         = "HTTPCode_Target_5XX_Count"
@@ -894,16 +900,14 @@ resource "aws_cloudwatch_metric_alarm" "alb_5xx" {
   statistic           = "Sum"
   threshold           = 10
   treat_missing_data  = "notBreaching"
-  dimensions = {
-    LoadBalancer = aws_lb.main.arn_suffix
-  }
-  alarm_actions = [aws_sns_topic.alerts.arn]
-  ok_actions    = [aws_sns_topic.alerts.arn]
+  dimensions          = { LoadBalancer = aws_lb.main.arn_suffix }
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+  ok_actions          = [aws_sns_topic.alerts.arn]
 }
 
 resource "aws_cloudwatch_metric_alarm" "no_healthy_hosts" {
   alarm_name          = "${local.name_prefix}-sem-hosts-saudaveis"
-  alarm_description   = "O servidor nao tem nenhuma instancia saudavel atras do ALB"
+  alarm_description   = "Sem instâncias saudáveis no ALB"
   comparison_operator = "LessThanThreshold"
   evaluation_periods  = 2
   metric_name         = "HealthyHostCount"
@@ -922,18 +926,48 @@ resource "aws_cloudwatch_metric_alarm" "no_healthy_hosts" {
 
 resource "aws_cloudwatch_metric_alarm" "ecs_cpu" {
   alarm_name          = "${local.name_prefix}-ecs-cpu-alta"
-  alarm_description   = "Uso de CPU do servidor acima de 85% por 15 minutos"
+  alarm_description   = "CPU do servidor acima de 80% por 15 minutos"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 3
   metric_name         = "CPUUtilization"
   namespace           = "AWS/ECS"
   period              = 300
   statistic           = "Average"
-  threshold           = 85
+  threshold           = 80
   treat_missing_data  = "notBreaching"
   dimensions = {
     ClusterName = aws_ecs_cluster.main.name
     ServiceName = aws_ecs_service.server.name
   }
   alarm_actions = [aws_sns_topic.alerts.arn]
+}
+
+resource "aws_cloudwatch_metric_alarm" "rds_cpu" {
+  alarm_name          = "${local.name_prefix}-rds-cpu-alta"
+  alarm_description   = "CPU do banco acima de 80% por 15 minutos"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 3
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/RDS"
+  period              = 300
+  statistic           = "Average"
+  threshold           = 80
+  treat_missing_data  = "notBreaching"
+  dimensions          = { DBInstanceIdentifier = aws_db_instance.main.identifier }
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+}
+
+resource "aws_cloudwatch_metric_alarm" "rds_storage" {
+  alarm_name          = "${local.name_prefix}-rds-storage-baixo"
+  alarm_description   = "Menos de 5 GB livres no banco"
+  comparison_operator = "LessThanThreshold"
+  evaluation_periods  = 1
+  metric_name         = "FreeStorageSpace"
+  namespace           = "AWS/RDS"
+  period              = 300
+  statistic           = "Average"
+  threshold           = 5368709120  # 5 GB em bytes
+  treat_missing_data  = "notBreaching"
+  dimensions          = { DBInstanceIdentifier = aws_db_instance.main.identifier }
+  alarm_actions       = [aws_sns_topic.alerts.arn]
 }

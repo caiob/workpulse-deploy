@@ -1,46 +1,77 @@
 #!/usr/bin/env bash
 # =============================================================================
-# WorkPulse — Etapa 2 de 3: Deploy da infraestrutura
+# WorkPulse — Etapa 2 de 3: Deploy da infraestrutura (PostgreSQL edition)
 # =============================================================================
-# 1. Instala o Terraform (se necessário)
-# 2. Inicializa o Terraform com o estado remoto no S3
-# 3. Cria o repositório de imagens (ECR) e o CodeBuild
-# 4. Builda a imagem Docker do servidor e envia ao ECR
-# 5. Cria toda a infraestrutura restante (VPC, ECS, ALB, EFS, CloudFront...)
-# 6. Aguarda o servidor ficar saudável
 #
-# Pode rodar novamente com segurança — o Terraform só aplica o que faltar.
-# Leva cerca de 15 a 25 minutos (CloudFront e certificados são os mais lentos).
+# ORDEM DE EXECUÇÃO CORRETA:
+#
+#   Se você está MIGRANDO de SQLite/EFS para PostgreSQL:
+#     bash scripts/2-deploy.sh          ← este script faz TUDO na ordem certa:
+#                                          Fase A) cria RDS + constrói imagem
+#                                          Fase B) migra os dados (SQLite → PG)
+#                                          Fase C) troca o ECS + destrói EFS
+#     bash scripts/3-publicar-site.sh
+#
+#   Se é uma instalação NOVA (sem dados para migrar):
+#     bash scripts/2-deploy.sh --novo
+#     bash scripts/3-publicar-site.sh
+#
+# Por quê três fases?
+#   O terraform apply completo destroi o EFS. Precisamos criar o RDS ANTES
+#   de migrar os dados, e só depois trocar o ECS e destruir o EFS.
+#
 # =============================================================================
 set -euo pipefail
 
 REGION="us-east-1"
 LOCK_TABLE="workpulse-tf-locks"
 TF_VERSION="1.9.8"
+MODO_NOVO="${1:-}"   # passe --novo para pular a migração
 export AWS_DEFAULT_REGION="$REGION"
 
 echo "============================================================"
-echo " WorkPulse — Etapa 2 de 3: Deploy"
+echo " WorkPulse — Etapa 2 de 3: Deploy (PostgreSQL)"
 echo "============================================================"
 
-# --- Localiza as pastas do kit ----------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KIT_ROOT="$(dirname "$SCRIPT_DIR")"
 INFRA_DIR="$KIT_ROOT/infra"
 SERVER_DIR="$KIT_ROOT/server"
 
-# --- Identifica a conta -----------------------------------------------------
 ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
 STATE_BUCKET="workpulse-tfstate-${ACCOUNT_ID}"
 DEPLOY_BUCKET="workpulse-deploy-${ACCOUNT_ID}"
+ECR_URI="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/workpulse-prod-server"
+CODEBUILD_PROJECT="workpulse-prod-image-build"
 echo "Conta AWS: $ACCOUNT_ID"
 
-# --- Instala o Terraform se não estiver presente ----------------------------
+# Detecta se existe EFS com dados (instalação anterior)
+EFS_EXISTENTE="$(aws efs describe-file-systems \
+  --query "FileSystems[?Tags[?Key=='Name' && Value=='workpulse-prod-data']].FileSystemId | [0]" \
+  --output text 2>/dev/null || echo '')"
+
+if [ "$EFS_EXISTENTE" = "None" ] || [ -z "$EFS_EXISTENTE" ]; then
+  EFS_EXISTENTE=""
+fi
+
+if [ -n "$EFS_EXISTENTE" ] && [ "$MODO_NOVO" != "--novo" ]; then
+  echo
+  echo "  EFS detectado ($EFS_EXISTENTE) — modo MIGRAÇÃO ativado."
+  echo "  O script irá:"
+  echo "    Fase A) Criar o RDS e construir a nova imagem"
+  echo "    Fase B) Migrar os dados do SQLite para o PostgreSQL"
+  echo "    Fase C) Atualizar o ECS para PostgreSQL e destruir o EFS"
+  MIGRAR=true
+else
+  echo
+  echo "  Nenhum EFS detectado (ou --novo passado) — modo INSTALAÇÃO NOVA."
+  MIGRAR=false
+fi
+
+# --- Instala o Terraform se necessário -------------------------------------
 echo
 echo ">> Verificando o Terraform..."
-if [ -x "$HOME/bin/terraform" ]; then
-  export PATH="$HOME/bin:$PATH"
-fi
+if [ -x "$HOME/bin/terraform" ]; then export PATH="$HOME/bin:$PATH"; fi
 if ! command -v terraform >/dev/null 2>&1; then
   echo "  - Instalando o Terraform ${TF_VERSION}..."
   mkdir -p "$HOME/bin"
@@ -52,9 +83,9 @@ if ! command -v terraform >/dev/null 2>&1; then
 fi
 echo "  - Terraform: $(terraform version | head -1)"
 
-# --- Inicializa o Terraform -------------------------------------------------
+# --- Inicializa o Terraform ------------------------------------------------
 echo
-echo ">> Inicializando o Terraform (estado remoto no S3)..."
+echo ">> Inicializando o Terraform..."
 cd "$INFRA_DIR"
 terraform init -input=false -reconfigure \
   -backend-config="bucket=${STATE_BUCKET}" \
@@ -63,30 +94,41 @@ terraform init -input=false -reconfigure \
   -backend-config="dynamodb_table=${LOCK_TABLE}" \
   -backend-config="encrypt=true"
 
-# --- Passo 1: cria apenas ECR + CodeBuild -----------------------------------
+# ===========================================================================
+# FASE A — Cria apenas: ECR, CodeBuild, RDS e secrets novos
+#           NÃO toca no ECS (que ainda usa EFS), NÃO destrói EFS
+# ===========================================================================
 echo
-echo ">> [1/3] Criando o repositório de imagens (ECR) e o CodeBuild..."
+echo ">> [FASE A] Criando ECR, CodeBuild, RDS e secrets..."
 terraform apply -input=false -auto-approve \
   -target=aws_ecr_repository.server \
-  -target=aws_codebuild_project.server
+  -target=aws_ecr_lifecycle_policy.server \
+  -target=aws_codebuild_project.server \
+  -target=aws_iam_role.codebuild \
+  -target=aws_iam_role_policy.codebuild \
+  -target=aws_db_instance.main \
+  -target=aws_db_subnet_group.main \
+  -target=aws_security_group.rds \
+  -target=random_password.db_password \
+  -target=aws_secretsmanager_secret.db_password \
+  -target=aws_secretsmanager_secret_version.db_password \
+  -target=aws_secretsmanager_secret.license_key \
+  -target=aws_secretsmanager_secret_version.license_key \
+  -target=aws_secretsmanager_secret.admin_token \
+  -target=aws_secretsmanager_secret_version.admin_token \
+  -target=random_password.admin_token
+echo "  - RDS e secrets criados."
 
-# Nomes determinísticos (não dependem de 'terraform output' após apply parcial).
-ECR_URI="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/workpulse-prod-server"
-CODEBUILD_PROJECT="workpulse-prod-image-build"
-echo "  - ECR: $ECR_URI"
-
-# --- Passo 2: envia o código-fonte e builda a imagem ------------------------
+# Constrói a nova imagem (que inclui migration.py)
 echo
-echo ">> [2/3] Construindo a imagem Docker do servidor..."
+echo ">> [FASE A] Construindo a nova imagem Docker..."
 rm -f /tmp/server-src.zip
-( cd "$SERVER_DIR" && zip -j -q /tmp/server-src.zip main.py requirements.txt Dockerfile )
+( cd "$SERVER_DIR" && zip -j -q /tmp/server-src.zip main.py migration.py requirements.txt Dockerfile )
 aws s3 cp /tmp/server-src.zip "s3://${DEPLOY_BUCKET}/server-src.zip"
-echo "  - Código-fonte enviado. Iniciando o build no CodeBuild..."
 
 BUILD_ID="$(aws codebuild start-build --project-name "$CODEBUILD_PROJECT" \
   --query 'build.id' --output text)"
 echo "  - Build: $BUILD_ID (aguardando — leva 2 a 4 minutos)"
-
 while true; do
   STATUS="$(aws codebuild batch-get-builds --ids "$BUILD_ID" \
     --query 'builds[0].buildStatus' --output text)"
@@ -95,21 +137,32 @@ while true; do
   sleep 15
 done
 echo
-
 if [ "$STATUS" != "SUCCEEDED" ]; then
-  echo "  ERRO: o build da imagem falhou (status: $STATUS)."
-  echo "  Veja os logs em: Console AWS -> CodeBuild -> $CODEBUILD_PROJECT"
+  echo "  ERRO: o build falhou (status: $STATUS)."
   exit 1
 fi
-echo "  - Imagem construída e publicada no ECR com sucesso."
+echo "  - Nova imagem publicada no ECR."
 
-# --- Passo 3: cria toda a infraestrutura restante ---------------------------
+# ===========================================================================
+# FASE B — Migra os dados (só se havia EFS)
+# ===========================================================================
+if [ "$MIGRAR" = "true" ]; then
+  echo
+  echo ">> [FASE B] Migrando dados SQLite → PostgreSQL..."
+  bash "$SCRIPT_DIR/migrar-dados.sh"
+  echo "  - Migração concluída."
+fi
+
+# ===========================================================================
+# FASE C — Apply completo: atualiza ECS para PostgreSQL, destroi EFS
+# ===========================================================================
 echo
-echo ">> [3/3] Criando a infraestrutura completa..."
-echo "   (VPC, ECS, ALB, EFS, certificados, CloudFront — pode levar ~15 min)"
+echo ">> [FASE C] Aplicando a infraestrutura completa..."
+echo "   (atualiza ECS para PostgreSQL, remove EFS, cria ALB/CloudFront se necessário)"
+echo "   Pode levar de 10 a 20 minutos..."
 terraform apply -input=false -auto-approve
 
-# --- Aguarda o servidor ficar saudável --------------------------------------
+# --- Aguarda o servidor ficar saudável -------------------------------------
 echo
 echo ">> Aguardando o servidor ficar saudável..."
 CLUSTER="$(terraform output -raw ecs_cluster_name)"
@@ -117,19 +170,20 @@ SERVICE="$(terraform output -raw ecs_service_name)"
 if aws ecs wait services-stable --cluster "$CLUSTER" --services "$SERVICE"; then
   echo "  - Servidor no ar e estável."
 else
-  echo "  AVISO: o servidor ainda não estabilizou. Verifique no Console AWS"
-  echo "  -> ECS -> $CLUSTER -> $SERVICE -> aba 'Logs'."
+  echo "  AVISO: servidor ainda não estabilizou."
+  echo "  Verifique: Console AWS → ECS → $CLUSTER → $SERVICE → aba 'Logs'"
 fi
 
-# --- Resumo -----------------------------------------------------------------
+# --- Resumo ----------------------------------------------------------------
 API_URL="$(terraform output -raw api_url)"
 SITE_URL="$(terraform output -raw site_url)"
+
 echo
 echo "============================================================"
 echo " Etapa 2 concluída."
 echo
-echo "   API   : $API_URL"
-echo "   Site  : $SITE_URL"
+echo "   API  : $API_URL"
+echo "   Site : $SITE_URL"
 echo
 echo " Token de admin (guarde em local seguro):"
 echo "   $(terraform output -raw admin_token)"

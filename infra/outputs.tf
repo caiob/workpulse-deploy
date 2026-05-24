@@ -1,9 +1,6 @@
 # =============================================================================
 # WorkPulse — Saídas do Terraform
 # =============================================================================
-# Estes valores são exibidos ao final de `terraform apply` e usados pelos
-# scripts de deploy.
-# =============================================================================
 
 output "api_url" {
   description = "URL pública da API do WorkPulse."
@@ -21,7 +18,7 @@ output "alb_dns_name" {
 }
 
 output "cloudfront_domain" {
-  description = "Domínio do CloudFront (caso precise apontar o DNS manualmente)."
+  description = "Domínio do CloudFront."
   value       = aws_cloudfront_distribution.site.domain_name
 }
 
@@ -36,12 +33,12 @@ output "ecr_repository_url" {
 }
 
 output "codebuild_project_name" {
-  description = "Nome do projeto CodeBuild que constrói a imagem."
+  description = "Nome do projeto CodeBuild."
   value       = aws_codebuild_project.server.name
 }
 
 output "site_bucket_name" {
-  description = "Bucket S3 onde os arquivos do site são publicados."
+  description = "Bucket S3 do site."
   value       = aws_s3_bucket.site.bucket
 }
 
@@ -51,12 +48,27 @@ output "ecs_cluster_name" {
 }
 
 output "ecs_service_name" {
-  description = "Nome do serviço ECS do servidor."
+  description = "Nome do serviço ECS."
   value       = aws_ecs_service.server.name
+}
+
+output "rds_endpoint" {
+  description = "Endpoint do PostgreSQL (host:port) — acessível apenas de dentro da VPC."
+  value       = "${aws_db_instance.main.address}:${aws_db_instance.main.port}"
+}
+
+output "rds_identifier" {
+  description = "Identificador da instância RDS."
+  value       = aws_db_instance.main.identifier
 }
 
 output "admin_token" {
   description = "Token de administração — necessário para entrar nos dashboards."
   value       = random_password.admin_token.result
   sensitive   = true
+}
+
+output "license_key_secret_arn" {
+  description = "ARN do secret da chave de licença (usado pelo script de migração)."
+  value       = aws_secretsmanager_secret.license_key.arn
 }

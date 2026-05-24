@@ -1,10 +1,6 @@
 # =============================================================================
 # WorkPulse — Variáveis do Terraform
 # =============================================================================
-# Os valores reais ficam em terraform.tfvars. Os defaults abaixo já são os
-# valores corretos para este deploy; normalmente não é preciso alterar nada
-# aqui — edite terraform.tfvars se precisar.
-# =============================================================================
 
 variable "aws_region" {
   description = "Região da AWS onde tudo será criado."
@@ -19,7 +15,7 @@ variable "environment" {
 }
 
 variable "owner" {
-  description = "Responsável pelo projeto (apenas para tags de organização/custo)."
+  description = "Responsável pelo projeto (usado para tags de custo)."
   type        = string
   default     = "Caio"
 }
@@ -31,25 +27,43 @@ variable "public_domain" {
 }
 
 variable "fargate_cpu" {
-  description = "CPU da task ECS Fargate (512 = 0,5 vCPU)."
+  description = "CPU da task ECS Fargate (1024 = 1 vCPU). Mínimo recomendado com PostgreSQL."
   type        = string
-  default     = "512"
+  default     = "1024"
 }
 
 variable "fargate_memory" {
   description = "Memória da task ECS Fargate em MB."
   type        = string
-  default     = "1024"
+  default     = "2048"
 }
 
 variable "ecs_desired_count" {
-  description = "Quantidade de instâncias do servidor. Mantenha 1 (SQLite não suporta múltiplos gravadores)."
+  description = "Quantidade de instâncias do servidor. PostgreSQL suporta múltiplos gravadores."
   type        = number
   default     = 1
 }
 
 variable "alert_email" {
-  description = "E-mail que recebe os alertas do CloudWatch (latência, erros, etc.)."
+  description = "E-mail que recebe os alertas do CloudWatch."
   type        = string
   default     = "caiob@hotmail.com"
+}
+
+variable "db_instance_class" {
+  description = "Classe da instância RDS PostgreSQL. db.t3.micro (~$15/mês) é suficiente para início."
+  type        = string
+  default     = "db.t3.micro"
+}
+
+variable "db_name" {
+  description = "Nome do banco de dados PostgreSQL."
+  type        = string
+  default     = "workpulse"
+}
+
+variable "db_username" {
+  description = "Usuário master do PostgreSQL."
+  type        = string
+  default     = "workpulse"
 }
