@@ -56,6 +56,8 @@ import sqlite3
 import secrets
 import datetime as dt
 import base64
+import time
+import threading
 from contextlib import contextmanager, asynccontextmanager
 from typing import Annotated, Any
 
@@ -165,12 +167,13 @@ CREATE TABLE IF NOT EXISTS productivity_rules (
     category    TEXT NOT NULL,
     created_at  TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_events_tenant_ts  ON events(tenant_id, ts);
-CREATE INDEX IF NOT EXISTS idx_events_user_ts    ON events(tenant_id, user_id, ts);
-CREATE INDEX IF NOT EXISTS idx_events_bucket     ON events(bucket);
-CREATE INDEX IF NOT EXISTS idx_licenses_tenant   ON licenses(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_audit_ts          ON audit_log(ts);
-CREATE INDEX IF NOT EXISTS idx_prod_rules_tenant ON productivity_rules(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_events_tenant_ts     ON events(tenant_id, ts);
+CREATE INDEX IF NOT EXISTS idx_events_user_ts       ON events(tenant_id, user_id, ts);
+CREATE INDEX IF NOT EXISTS idx_events_bucket        ON events(bucket);
+CREATE INDEX IF NOT EXISTS idx_events_bucket_ts     ON events(tenant_id, bucket, ts);
+CREATE INDEX IF NOT EXISTS idx_licenses_tenant      ON licenses(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_audit_ts             ON audit_log(ts);
+CREATE INDEX IF NOT EXISTS idx_prod_rules_tenant    ON productivity_rules(tenant_id);
 """
 
 
@@ -197,6 +200,36 @@ def init_db():
         cols = [r["name"] for r in c.execute("PRAGMA table_info(tenants)").fetchall()]
         if "dash_token" not in cols:
             c.execute("ALTER TABLE tenants ADD COLUMN dash_token TEXT")
+
+
+# ---------------------------------------------------------------------------
+# In-memory TTL cache (shared across requests, same process)
+# Prevents repeated heavy SQL for the same tenant/period within 90 seconds.
+# ---------------------------------------------------------------------------
+_CACHE: dict[str, tuple[float, Any]] = {}
+_CACHE_LOCK = threading.Lock()
+_CACHE_TTL = 90  # seconds
+
+
+def _cache_get(key: str) -> Any | None:
+    with _CACHE_LOCK:
+        entry = _CACHE.get(key)
+        if entry and (time.monotonic() - entry[0]) < _CACHE_TTL:
+            return entry[1]
+    return None
+
+
+def _cache_set(key: str, val: Any) -> None:
+    with _CACHE_LOCK:
+        _CACHE[key] = (time.monotonic(), val)
+
+
+def _cache_bust(tenant: str) -> None:
+    """Invalidate all cached results for a tenant (called on each ingest)."""
+    with _CACHE_LOCK:
+        stale = [k for k in _CACHE if k.startswith(f"{tenant}:")]
+        for k in stale:
+            del _CACHE[k]
 
 
 def audit(actor: str, action: str, target: str | None = None,
@@ -495,7 +528,9 @@ def ingest(
     token = parse_bearer(authorization)
     claims = validate_agent_token(token, x_tenant)
 
-    user_id = payload.user_id or f"{x_tenant}:{x_device or payload.device}"
+    # Use the machine hostname as user_id when the agent doesn't provide one.
+    # The tenant scope is always enforced via tenant_id, so no prefix needed.
+    user_id = payload.user_id or (x_device or payload.device)
     device_id = x_device or payload.device
     now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
 
@@ -550,6 +585,8 @@ def ingest(
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
             rows,
         )
+    # Invalidate cached aggregations so the dashboard reflects new data promptly.
+    _cache_bust(claims["tenant"])
     return {"accepted": len(payload.events)}
 
 
@@ -695,6 +732,11 @@ def user_summary(user_id: str, tenant: str, days: int = 7):
 
 @app.get("/v1/team/summary", dependencies=[Depends(require_tenant_scope)])
 def team_summary(tenant: str, days: int = 7):
+    cache_key = f"{tenant}:team_summary:{days}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).isoformat()
     with db() as c:
         per_user = c.execute(
@@ -717,11 +759,13 @@ def team_summary(tenant: str, days: int = 7):
                GROUP BY app ORDER BY seconds DESC LIMIT 15""",
             (tenant, since),
         ).fetchall()
-    return {
+    result = {
         "tenant": tenant, "since": since,
         "users": [dict(r) for r in per_user],
         "top_apps": [dict(r) for r in global_top],
     }
+    _cache_set(cache_key, result)
+    return result
 
 
 @app.get("/v1/events", dependencies=[Depends(require_tenant_scope)])
@@ -758,6 +802,11 @@ def search_events(
 @app.get("/v1/workforce/overview", dependencies=[Depends(require_tenant_scope)])
 def workforce_overview(tenant: str, days: int = 7):
     """Aggregate metrics for the workforce dashboard."""
+    cache_key = f"{tenant}:overview:{days}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     now = dt.datetime.now(dt.timezone.utc)
     since = (now - dt.timedelta(days=days)).isoformat()
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
@@ -848,7 +897,7 @@ def workforce_overview(tenant: str, days: int = 7):
                               "display_name": r["display_name"],
                               "avg_day_hours": round(avg_h, 1)})
 
-    return {
+    result = {
         "tenant": tenant, "since": since, "days": days,
         "totals": {
             "total_users": totals["total_users"] or 0,
@@ -862,6 +911,8 @@ def workforce_overview(tenant: str, days: int = 7):
         "by_department": [dict(r) for r in by_dept],
         "alerts": {"overwork": overwork[:10], "underwork": underwork[:10]},
     }
+    _cache_set(cache_key, result)
+    return result
 
 
 @app.get("/v1/workforce/timeseries", dependencies=[Depends(require_tenant_scope)])
@@ -1174,342 +1225,33 @@ def admin_stats():
         plan_dist = c.execute(
             "SELECT plan, COUNT(*) AS n FROM tenants GROUP BY plan"
         ).fetchall()
-        os_dist = c.execute(
-            """SELECT COALESCE(os,'unknown') AS os, COUNT(*) AS n
-               FROM devices GROUP BY os"""
-        ).fetchall()
-
     return {
-        "counts": dict(counts),
-        "events_last_24h": events_24h,
-        "events_last_7d": events_7d,
         "db_size_bytes": db_size,
-        "ingest_per_hour": [dict(r) for r in ingest_hourly],
+        "counts": dict(counts),
+        "events_24h": events_24h,
+        "events_7d": events_7d,
+        "ingest_by_hour": [dict(r) for r in ingest_hourly],
         "plan_distribution": [dict(r) for r in plan_dist],
-        "os_distribution": [dict(r) for r in os_dist],
-        "server_time": now.isoformat(),
-        "version": APP_VERSION,
     }
 
 
 @app.get("/v1/admin/audit", dependencies=[Depends(require_admin)])
-def admin_audit_log(limit: int = Query(100, le=500)):
+def admin_audit_log(limit: int = Query(100, le=1000), offset: int = 0):
     with db() as c:
         rows = c.execute(
-            "SELECT * FROM audit_log ORDER BY ts DESC LIMIT ?",
-            (limit,),
+            "SELECT * FROM audit_log ORDER BY ts DESC LIMIT ? OFFSET ?",
+            (limit, offset),
         ).fetchall()
-    return {"entries": [dict(r) for r in rows]}
+    return {"count": len(rows), "log": [dict(r) for r in rows]}
 
 
 # ---------------------------------------------------------------------------
-# CLI entrypoint: `python -m server.main`
-# ---------------------------------------------------------------------------
-def serve():
-    import uvicorn
-    host, _, port = LISTEN_ADDR.rpartition(":")
-    uvicorn.run(app, host=host or "0.0.0.0", port=int(port or 8080))
-
-
-if __name__ == "__main__":
-    serve()
-def delete_productivity_rule(rule_id: int, tenant: str):
-    with db() as c:
-        cur = c.execute(
-            "DELETE FROM productivity_rules WHERE id=? AND tenant_id=?",
-            (rule_id, tenant),
-        )
-        if cur.rowcount == 0:
-            raise HTTPException(status_code=404, detail="rule not found")
-    return {"deleted": rule_id}
-
-
-@app.get("/v1/productivity/internet", dependencies=[Depends(require_tenant_scope)])
-def productivity_internet(
-    tenant: str,
-    days: int = Query(7, le=90),
-    user_id: str | None = None,
-):
-    """Aggregated browser/internet usage with productivity classification."""
-    since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).isoformat()
-
-    with db() as c:
-        rules = [dict(r) for r in c.execute(
-            "SELECT * FROM productivity_rules WHERE tenant_id=? ORDER BY created_at",
-            (tenant,),
-        ).fetchall()]
-
-        sql = (
-            "SELECT user_id, json_extract(data_json,'$.app') AS app,"
-            " json_extract(data_json,'$.title') AS title,"
-            " SUM(duration_sec) AS total_sec, COUNT(*) AS events,"
-            " substr(MIN(ts),1,10) AS first_day, substr(MAX(ts),1,10) AS last_day"
-            " FROM events"
-            " WHERE tenant_id=? AND bucket='window' AND ts>=?"
-        )
-        args: list = [tenant, since]
-        if user_id:
-            sql += " AND user_id=?"
-            args.append(user_id)
-        sql += " GROUP BY user_id, app, title ORDER BY total_sec DESC"
-        raw_rows = c.execute(sql, args).fetchall()
-
-        daily_sql = (
-            "SELECT substr(ts,1,10) AS day,"
-            " json_extract(data_json,'$.app') AS app,"
-            " json_extract(data_json,'$.title') AS title,"
-            " SUM(duration_sec) AS total_sec"
-            " FROM events"
-            " WHERE tenant_id=? AND bucket='window' AND ts>=?"
-        )
-        daily_args: list = [tenant, since]
-        if user_id:
-            daily_sql += " AND user_id=?"
-            daily_args.append(user_id)
-        daily_sql += " GROUP BY day, app, title ORDER BY day"
-        daily_raw = c.execute(daily_sql, daily_args).fetchall()
-
-    site_agg: dict[str, dict] = {}
-    for row in raw_rows:
-        app = row["app"] or ""
-        if not _is_browser(app):
-            continue
-        site_name = _clean_title(row["title"] or "")
-        category = _apply_rules(site_name, app, rules)
-        key = site_name
-        if key not in site_agg:
-            site_agg[key] = {
-                "site_name": site_name,
-                "category": category,
-                "total_sec": 0.0,
-                "event_count": 0,
-                "users": set(),
-                "per_user": {},
-            }
-        entry = site_agg[key]
-        entry["total_sec"] += row["total_sec"] or 0.0
-        entry["event_count"] += row["events"] or 0
-        entry["users"].add(row["user_id"])
-        uid = row["user_id"]
-        entry["per_user"][uid] = entry["per_user"].get(uid, 0.0) + (row["total_sec"] or 0.0)
-
-    totals: dict[str, float] = {
-        "productive": 0.0, "unproductive": 0.0,
-        "neutral": 0.0, "uncategorized": 0.0, "total": 0.0,
-    }
-    sites = []
-    for entry in sorted(site_agg.values(), key=lambda x: x["total_sec"], reverse=True):
-        cat = entry["category"]
-        totals[cat] = totals.get(cat, 0.0) + entry["total_sec"]
-        totals["total"] += entry["total_sec"]
-        sites.append({
-            "site_name": entry["site_name"],
-            "category": cat,
-            "total_sec": round(entry["total_sec"], 1),
-            "event_count": entry["event_count"],
-            "user_count": len(entry["users"]),
-            "users": list(entry["users"]),
-            "per_user": {k: round(v, 1) for k, v in entry["per_user"].items()},
-        })
-
-    daily_agg: dict[str, dict[str, float]] = {}
-    for row in daily_raw:
-        app = row["app"] or ""
-        if not _is_browser(app):
-            continue
-        day = row["day"]
-        site_name = _clean_title(row["title"] or "")
-        category = _apply_rules(site_name, app, rules)
-        if day not in daily_agg:
-            daily_agg[day] = {
-                "productive": 0.0, "unproductive": 0.0,
-                "neutral": 0.0, "uncategorized": 0.0,
-            }
-        daily_agg[day][category] = daily_agg[day].get(category, 0.0) + (row["total_sec"] or 0.0)
-
-    daily = [
-        {
-            "day": day,
-            "productive":    round(v.get("productive",    0.0), 1),
-            "unproductive":  round(v.get("unproductive",  0.0), 1),
-            "neutral":       round(v.get("neutral",       0.0), 1),
-            "uncategorized": round(v.get("uncategorized", 0.0), 1),
-        }
-        for day, v in sorted(daily_agg.items())
-    ]
-
-    return {
-        "tenant": tenant, "since": since, "days": days,
-        "totals": {k: round(v, 1) for k, v in totals.items()},
-        "sites": sites[:300],
-        "daily": daily,
-    }
-
-
-@app.get("/v1/productivity/apps", dependencies=[Depends(require_tenant_scope)])
-def productivity_apps(
-    tenant: str,
-    days: int = Query(30, le=90),
-):
-    """All apps seen in the period with productivity classification."""
-    since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).isoformat()
-    with db() as c:
-        rules = [dict(r) for r in c.execute(
-            "SELECT * FROM productivity_rules WHERE tenant_id=? ORDER BY created_at",
-            (tenant,),
-        ).fetchall()]
-        rows = c.execute(
-            """SELECT json_extract(data_json,'$.app') AS app,
-                      SUM(duration_sec) AS total_sec,
-                      COUNT(DISTINCT user_id) AS user_count
-               FROM events WHERE tenant_id=? AND bucket='window' AND ts>=?
-               GROUP BY app ORDER BY total_sec DESC LIMIT 150""",
-            (tenant, since),
-        ).fetchall()
-
-    apps = []
-    for row in rows:
-        app = row["app"] or "(desconhecido)"
-        category = _apply_rules("", app, rules)
-        apps.append({
-            "app": app,
-            "is_browser": _is_browser(app),
-            "category": category,
-            "total_sec": round(row["total_sec"] or 0.0, 1),
-            "user_count": row["user_count"] or 0,
-        })
-    return {"tenant": tenant, "since": since, "apps": apps}
-
-
-# -- Platform admin (super-admin) endpoints --------------------------------
-
-@app.post("/v1/admin/tenant-token", dependencies=[Depends(require_admin)])
-def admin_tenant_token(tenant: str, request: Request):
-    """Gera (ou renova) o token de painel de um tenant existente."""
-    new_token = secrets.token_hex(16)
-    with db() as c:
-        row = c.execute("SELECT id FROM tenants WHERE id = ?", (tenant,)).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="tenant nao encontrado")
-        c.execute("UPDATE tenants SET dash_token = ? WHERE id = ?", (new_token, tenant))
-    audit("admin", "tenant.token", target=tenant,
-          ip=request.client.host if request.client else None)
-    return {"tenant_id": tenant, "dash_token": new_token}
-
-
-@app.get("/v1/admin/tenants", dependencies=[Depends(require_admin)])
-def admin_list_tenants():
-    with db() as c:
-        rows = c.execute(
-            """SELECT t.id, t.name, t.plan, t.status, t.created_at,
-                      (SELECT COUNT(*) FROM users u WHERE u.tenant_id=t.id) AS users,
-                      (SELECT COUNT(*) FROM devices d WHERE d.tenant_id=t.id) AS devices,
-                      (SELECT COUNT(*) FROM licenses l WHERE l.tenant_id=t.id AND l.revoked=0) AS active_licenses,
-                      (SELECT MAX(last_seen) FROM users u WHERE u.tenant_id=t.id) AS last_activity
-               FROM tenants t ORDER BY t.created_at DESC"""
-        ).fetchall()
-    return {"tenants": [dict(r) for r in rows]}
-
-
-@app.get("/v1/admin/licenses", dependencies=[Depends(require_admin)])
-def admin_list_licenses(tenant: str | None = None, status: str = "all"):
-    sql = """SELECT l.lic_id, l.tenant_id, t.name AS tenant_name,
-                    l.plan, l.seats, l.issued, l.expires, l.revoked, l.revoked_at
-             FROM licenses l LEFT JOIN tenants t ON t.id=l.tenant_id WHERE 1=1"""
-    args: list = []
-    if tenant:
-        sql += " AND l.tenant_id=?"; args.append(tenant)
-    if status == "active":
-        sql += " AND l.revoked=0"
-    elif status == "revoked":
-        sql += " AND l.revoked=1"
-    sql += " ORDER BY l.issued DESC"
-    with db() as c:
-        rows = c.execute(sql, args).fetchall()
-    now = dt.datetime.now(dt.timezone.utc)
-    enriched = []
-    for r in rows:
-        d = dict(r)
-        try:
-            exp = dt.datetime.fromisoformat(d["expires"].replace("Z", "+00:00"))
-            d["days_remaining"] = (exp - now).days
-            d["expired"] = exp < now
-        except Exception:  # noqa: BLE001
-            d["days_remaining"] = None
-            d["expired"] = False
-        enriched.append(d)
-    return {"licenses": enriched}
-
-
-@app.get("/v1/admin/stats", dependencies=[Depends(require_admin)])
-def admin_stats():
-    """System-wide stats: counts, ingestion rate, DB size."""
-    now = dt.datetime.now(dt.timezone.utc)
-    last_24h = (now - dt.timedelta(hours=24)).isoformat()
-    last_7d = (now - dt.timedelta(days=7)).isoformat()
-
-    db_size = os.path.getsize(DB_PATH) if os.path.exists(DB_PATH) else 0
-
-    with db() as c:
-        counts = c.execute(
-            """SELECT
-                 (SELECT COUNT(*) FROM tenants) AS tenants,
-                 (SELECT COUNT(*) FROM users) AS users,
-                 (SELECT COUNT(*) FROM devices) AS devices,
-                 (SELECT COUNT(*) FROM licenses WHERE revoked=0) AS active_licenses,
-                 (SELECT COUNT(*) FROM licenses WHERE revoked=1) AS revoked_licenses,
-                 (SELECT COUNT(*) FROM events) AS total_events"""
-        ).fetchone()
-        events_24h = c.execute(
-            "SELECT COUNT(*) AS n FROM events WHERE ts>=?", (last_24h,),
-        ).fetchone()["n"]
-        events_7d = c.execute(
-            "SELECT COUNT(*) AS n FROM events WHERE ts>=?", (last_7d,),
-        ).fetchone()["n"]
-        ingest_hourly = c.execute(
-            """SELECT substr(ts,1,13) AS hour, COUNT(*) AS events
-               FROM events WHERE ts>=?
-               GROUP BY hour ORDER BY hour""",
-            (last_24h,),
-        ).fetchall()
-        plan_dist = c.execute(
-            "SELECT plan, COUNT(*) AS n FROM tenants GROUP BY plan"
-        ).fetchall()
-        os_dist = c.execute(
-            """SELECT COALESCE(os,'unknown') AS os, COUNT(*) AS n
-               FROM devices GROUP BY os"""
-        ).fetchall()
-
-    return {
-        "counts": dict(counts),
-        "events_last_24h": events_24h,
-        "events_last_7d": events_7d,
-        "db_size_bytes": db_size,
-        "ingest_per_hour": [dict(r) for r in ingest_hourly],
-        "plan_distribution": [dict(r) for r in plan_dist],
-        "os_distribution": [dict(r) for r in os_dist],
-        "server_time": now.isoformat(),
-        "version": APP_VERSION,
-    }
-
-
-@app.get("/v1/admin/audit", dependencies=[Depends(require_admin)])
-def admin_audit_log(limit: int = Query(100, le=500)):
-    with db() as c:
-        rows = c.execute(
-            "SELECT * FROM audit_log ORDER BY ts DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
-    return {"entries": [dict(r) for r in rows]}
-
-
-# ---------------------------------------------------------------------------
-# CLI entrypoint: `python -m server.main`
+# Entry point
 # ---------------------------------------------------------------------------
 def serve():
     import uvicorn
-    host, _, port = LISTEN_ADDR.rpartition(":")
-    uvicorn.run(app, host=host or "0.0.0.0", port=int(port or 8080))
+    host, _, port_s = LISTEN_ADDR.rpartition(":")
+    uvicorn.run(app, host=host or "0.0.0.0", port=int(port_s or 8080))
 
 
 if __name__ == "__main__":

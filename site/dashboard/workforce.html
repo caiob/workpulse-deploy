@@ -845,20 +845,56 @@ function ptDate(iso) {
   const d = new Date(iso);
   return d.toLocaleDateString('pt-BR', { day:'2-digit', month:'short' });
 }
+// Strips the legacy "TENANTID:HOSTNAME" prefix — shows only the hostname part.
+function cleanUserId(uid) {
+  if (!uid) return '—';
+  const i = uid.indexOf(':');
+  return i >= 0 ? uid.slice(i + 1) : uid;
+}
+// Best display name: explicit display_name → clean user_id → fallback
+function displayName(u) {
+  return (u && (u.display_name || cleanUserId(u.user_id))) || '—';
+}
 
-async function api(path) {
-  const r = await fetch(state.url + path, { headers: { 'X-Admin-Token': state.token } });
-  if (!r.ok) {
-    const t = await r.text().catch(()=>r.statusText);
-    throw new Error(`${r.status}: ${t}`);
+// Abort controller para cancelar requests em voo ao trocar de aba
+let _tabAbort = null;
+function _cancelPending() {
+  if (_tabAbort) { _tabAbort.abort(); }
+  _tabAbort = new AbortController();
+  return _tabAbort.signal;
+}
+
+async function api(path, signal) {
+  // Timeout de 30s — evita travar o browser esperando o ALB dar 504
+  const timeout = new AbortController();
+  const tid = setTimeout(() => timeout.abort(), 30000);
+  // Combina o signal de aba com o de timeout
+  const combined = signal
+    ? AbortSignal.any ? AbortSignal.any([signal, timeout.signal]) : timeout.signal
+    : timeout.signal;
+  try {
+    const r = await fetch(state.url + path, {
+      headers: { 'X-Admin-Token': state.token },
+      signal: combined,
+    });
+    clearTimeout(tid);
+    if (!r.ok) {
+      const t = await r.text().catch(()=>r.statusText);
+      throw new Error(`${r.status}: ${t}`);
+    }
+    return r.json();
+  } catch(e) {
+    clearTimeout(tid);
+    if (e.name === 'AbortError') throw new Error('Tempo esgotado ou aba trocada');
+    throw e;
   }
-  return r.json();
 }
 
 // ---------- Tabs ----------
 const TABS = ['overview','people','departments','alerts','trends','events','internet','config'];
 
 function switchTab(name) {
+  _cancelPending(); // cancela requests da aba anterior
   document.querySelectorAll('nav.tabs button').forEach(b =>
     b.classList.toggle('active', b.dataset.tab === name));
   TABS.forEach(t => {
@@ -1000,12 +1036,13 @@ async function loadPeople() {
 
 function renderPeopleTable() {
   const q = (document.getElementById('peopleFilter').value || '').toLowerCase();
-  const rows = state.people.filter(u =>
-    !q || (u.display_name||'').toLowerCase().includes(q)
+  const rows = state.people.filter(u => {
+    const dn = displayName(u).toLowerCase();
+    return !q || dn.includes(q)
        || (u.user_id||'').toLowerCase().includes(q)
        || (u.email||'').toLowerCase().includes(q)
-       || (u.department||'').toLowerCase().includes(q)
-  );
+       || (u.department||'').toLowerCase().includes(q);
+  });
   const tb = document.querySelector('#peopleTable tbody');
   if (rows.length === 0) {
     tb.innerHTML = `<tr><td colspan="7" class="empty-state">Nenhum colaborador no período.</td></tr>`;
@@ -1014,7 +1051,7 @@ function renderPeopleTable() {
   tb.innerHTML = rows.map(u => {
     const total = (u.active||0) + (u.afk||0);
     const adh = total > 0 ? Math.round((u.active||0)/total*100) : 0;
-    const name = u.display_name || u.user_id;
+    const name = displayName(u);
     return `<tr>
       <td>${avatar(name)} <strong>${name}</strong></td>
       <td>${u.department || '<span style="color:var(--text-muted)">—</span>'}</td>
@@ -1094,7 +1131,8 @@ async function drillUser(uid, name) {
 // ---------- Departments ----------
 async function loadDepartments() {
   try {
-    const data = await api(`/v1/workforce/overview?tenant=${encodeURIComponent(state.tenant)}&days=7`);
+    const days = +(document.getElementById('rangeDays')?.value || 7);
+    const data = state.lastOverview || await api(`/v1/workforce/overview?tenant=${encodeURIComponent(state.tenant)}&days=${days}`);
     const depts = data.by_department || [];
     if (state.charts.dept) state.charts.dept.destroy();
     state.charts.dept = new Chart(document.getElementById('chartDept').getContext('2d'), {
@@ -1144,7 +1182,8 @@ async function loadDepartments() {
 // ---------- Alerts ----------
 async function loadAlerts() {
   try {
-    const data = await api(`/v1/workforce/overview?tenant=${encodeURIComponent(state.tenant)}&days=7`);
+    const days = +(document.getElementById('rangeDays')?.value || 7);
+    const data = state.lastOverview || await api(`/v1/workforce/overview?tenant=${encodeURIComponent(state.tenant)}&days=${days}`);
     const over = data.alerts.overwork || [];
     const under = data.alerts.underwork || [];
     document.getElementById('overworkList').innerHTML = over.length ? over.map(p => `
@@ -1208,7 +1247,7 @@ function drawTrend(canvasId, series, color, label) {
 // ---------- Charts: Users & Apps (Visao Geral) ----------
 function drawUsersChart(users) {
   const top = users.slice(0, 12);
-  const labels = top.map(u => u.display_name || u.user_id);
+  const labels = top.map(u => displayName(u));
   if (state.charts.users) state.charts.users.destroy();
   state.charts.users = new Chart(document.getElementById('chartUsers').getContext('2d'), {
     type: 'bar',
@@ -1470,32 +1509,50 @@ async function loadEvents() {
   if (until) params.set('until', new Date(until).toISOString());
   params.set('limit', '200');
   try {
-    const data = await api('/v1/events?' + params.toString());
-    document.querySelector('#eventsTable tbody').innerHTML =
-      (data.events || []).map(e =>
-        '<tr>' +
-        '<td>' + new Date(e.ts).toLocaleString('pt-BR') + '</td>' +
-        '<td>' + e.user_id + '</td>' +
-        '<td><span class="pill">' + e.bucket + '</span></td>' +
-        '<td>' + (e.duration_sec||0).toFixed(1) + '</td>' +
-        '<td><code style="color:var(--text-dim)">' + JSON.stringify(e.data).slice(0,150) + '</code></td>' +
-        '</tr>'
-      ).join('') || '<tr><td colspan="5" class="empty-state">Sem resultados.</td></tr>';
-  } catch (e) { toast('Erro ao buscar eventos: '+e.message); }
+    const sig = _tabAbort ? _tabAbort.signal : undefined;
+    const data = await api('/v1/events?' + params.toString(), sig);
+    const tb = document.querySelector('#eventsTable tbody');
+    if (!data.events || data.events.length === 0) {
+      tb.innerHTML = `<tr><td colspan="5" class="empty-state">Nenhum evento encontrado com estes filtros.</td></tr>`;
+      return;
+    }
+    tb.innerHTML = data.events.map(e => {
+      const d = e.data || {};
+      const info = d.app
+        ? `<strong>${d.app}</strong>${d.title ? ' — ' + d.title.slice(0,80) : ''}`
+        : JSON.stringify(d).slice(0, 120);
+      return `<tr>
+        <td style="white-space:nowrap">${new Date(e.ts).toLocaleString('pt-BR')}</td>
+        <td>${cleanUserId(e.user_id)}</td>
+        <td><code>${e.bucket}</code></td>
+        <td>${fmtSec(e.duration_sec)}</td>
+        <td style="max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${(d.title||'').replace(/"/g,'&quot;')}">${info}</td>
+      </tr>`;
+    }).join('');
+  } catch (e) {
+    if (!e.message.includes('trocada')) toast('Erro ao buscar eventos: ' + e.message);
+  }
 }
 
-// ---------- Bootstrap ----------
-if (state.token && state.tenant && state.url) {
-  document.getElementById('login').classList.add('hide');
-  document.getElementById('tenantPill').textContent = state.tenant;
-  loadOverview();
-  setInterval(() => {
-    if (!document.getElementById('tab-overview').classList.contains('hide')) loadOverview();
-  }, 60000);
-} else {
-  document.getElementById('loginUrl').value = state.url;
-  document.getElementById('loginTenant').value = state.tenant;
-}
+// =====================================================================
+// Bootstrap — restaura sessão salva e inicializa
+// =====================================================================
+(function() {
+  const url    = localStorage.getItem('wp_url');
+  const tenant = localStorage.getItem('wp_tenant');
+  const token  = localStorage.getItem('wp_token');
+  if (url && tenant && token) {
+    document.getElementById('loginUrl').value    = url;
+    document.getElementById('loginTenant').value = tenant;
+    document.getElementById('loginToken').value  = token;
+    state.url    = url;
+    state.tenant = tenant;
+    state.token  = token;
+    document.getElementById('login').classList.add('hide');
+    document.getElementById('tenantPill').textContent = tenant;
+    loadOverview();
+  }
+})();
 </script>
 </body>
 </html>
