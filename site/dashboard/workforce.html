@@ -684,7 +684,7 @@
         </select>
       </div>
       <div><label>Usuário</label>
-        <input id="evUser" placeholder="todos os usuários" style="min-width:180px">
+        <select id="evUser" style="min-width:180px"><option value="">Todos os usuários</option></select>
       </div>
       <div><label>Bucket</label>
         <select id="evBucket">
@@ -762,7 +762,7 @@
         </select>
       </div>
       <div><label>Usuário</label>
-        <input id="intUser" placeholder="todos os usuários" style="min-width:200px">
+        <select id="intUser" style="min-width:200px"><option value="">Todos os usuários</option></select>
       </div>
       <div class="spacer"></div>
       <button class="ghost" onclick="loadInternet()">↻ Atualizar</button>
@@ -1241,6 +1241,27 @@ async function loadPeople() {
   } catch (e) { toast('Erro ao carregar pessoas: '+e.message); }
 }
 
+// Populate a user <select> lazily — uses state.people if warm, else fetches /v1/users
+async function _populateUserDropdown(selectId) {
+  const sel = document.getElementById(selectId);
+  if (!sel || sel.options.length > 1) return; // already populated
+  let users = state.people;
+  if (!users.length) {
+    try {
+      const data = await api(`/v1/users?tenant=${encodeURIComponent(state.tenant)}`);
+      users = data.users || [];
+    } catch (_) { return; }
+  }
+  // Sort by display name
+  const sorted = [...users].sort((a,b) => displayName(a).localeCompare(displayName(b)));
+  sorted.forEach(u => {
+    const opt = document.createElement('option');
+    opt.value = cleanUserId(u.user_id);
+    opt.textContent = displayName(u);
+    sel.appendChild(opt);
+  });
+}
+
 function renderPeopleTable() {
   const q = (document.getElementById('peopleFilter').value || '').toLowerCase();
   const rows = state.people.filter(u => {
@@ -1518,6 +1539,7 @@ const CAT_COLORS = {
 };
 
 async function loadInternet() {
+  await _populateUserDropdown('intUser');
   const days = document.getElementById('intDays').value;
   const user = document.getElementById('intUser').value.trim();
   const params = new URLSearchParams({ tenant: state.tenant, days });
@@ -1710,6 +1732,7 @@ function quickRule(pattern, field) {
 // EVENTOS — coleta completa com categorias
 // =====================================================================
 async function loadEvents() {
+  await _populateUserDropdown('evUser');
   const days   = document.getElementById('evDays').value;
   const user   = document.getElementById('evUser').value.trim();
   const bucket = document.getElementById('evBucket').value;

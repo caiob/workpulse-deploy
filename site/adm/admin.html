@@ -683,7 +683,7 @@ function doLogin() {
   localStorage.setItem('wp_admin_url', state.url);
   localStorage.setItem('wp_admin_token', state.token);
   document.getElementById('login').classList.add('hide');
-  bootstrap();
+  loadAll();
 }
 function logout() {
   localStorage.removeItem('wp_admin_token');
@@ -1110,11 +1110,11 @@ function renderAudit() {
   const token = localStorage.getItem('wp_admin_token');
   const url   = localStorage.getItem('wp_admin_url');
   if (token && url) {
-    document.getElementById('adminToken').value = token;
-    document.getElementById('adminUrl').value   = url;
+    document.getElementById('loginToken').value = token;
+    document.getElementById('loginUrl').value   = url;
     state.token = token;
     state.url   = url;
-    document.getElementById('loginBox').classList.add('hide');
+    document.getElementById('login').classList.add('hide');
     loadAll();
   }
 })();
