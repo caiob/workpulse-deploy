@@ -775,27 +775,137 @@ def search_events(
     bucket: str | None = None,
     since: str | None = None,
     until: str | None = None,
-    limit: int = Query(100, le=1000),
+    days: int | None = None,
+    limit: int = Query(200, le=1000),
     offset: int = 0,
 ):
     sql = ["SELECT * FROM events WHERE tenant_id = ?"]
     args: list = [tenant]
     if user_id:
         sql.append("AND user_id = ?"); args.append(user_id)
-    if bucket:
-        sql.append("AND bucket = ?"); args.append(bucket)
+    # If `bucket` not specified, default to window events (raw log view)
+    sql.append("AND bucket = ?"); args.append(bucket or "window")
+    if days:
+        since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=int(days))).isoformat()
     if since:
         sql.append("AND ts >= ?"); args.append(since)
     if until:
         sql.append("AND ts <= ?"); args.append(until)
     sql.append("ORDER BY ts DESC LIMIT ? OFFSET ?")
     args.extend([limit, offset])
+
     with db() as c:
         rows = c.execute(" ".join(sql), args).fetchall()
-    return {
-        "count": len(rows),
-        "events": [{**dict(r), "data": json.loads(r["data_json"])} for r in rows],
+        rules = [dict(r) for r in c.execute(
+            "SELECT * FROM productivity_rules WHERE tenant_id=? ORDER BY created_at",
+            (tenant,),
+        ).fetchall()]
+
+    events = []
+    for r in rows:
+        data = json.loads(r["data_json"])
+        app_name = data.get("app", "")
+        title = _clean_title(data.get("title", ""))
+        category = _apply_rules(title, app_name, rules) if r["bucket"] == "window" else "neutral"
+        events.append({**dict(r), "data": data, "category": category})
+
+    return {"count": len(events), "events": events}
+
+
+@app.get("/v1/productivity/events_summary", dependencies=[Depends(require_tenant_scope)])
+def productivity_events_summary(
+    tenant: str,
+    days: int = Query(7, le=90),
+    user_id: str | None = None,
+    bucket: str | None = None,
+):
+    """Totals + daily breakdown with productivity classification for ALL window events."""
+    _bucket = bucket or "window"
+    cache_key = f"{tenant}:events_summary:{days}:{user_id or ''}:{_bucket}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).isoformat()
+
+    with db() as c:
+        rules = [dict(r) for r in c.execute(
+            "SELECT * FROM productivity_rules WHERE tenant_id=? ORDER BY created_at",
+            (tenant,),
+        ).fetchall()]
+
+        # Aggregate by app+title to limit Python-side iteration
+        agg_sql = (
+            "SELECT json_extract(data_json,'$.app') AS app,"
+            " json_extract(data_json,'$.title') AS title,"
+            " SUM(duration_sec) AS total_sec"
+            " FROM events WHERE tenant_id=? AND bucket=? AND ts>=?"
+        )
+        agg_args: list = [tenant, _bucket, since]
+        if user_id:
+            agg_sql += " AND user_id=?"; agg_args.append(user_id)
+        agg_sql += " GROUP BY app, title"
+        agg_rows = c.execute(agg_sql, agg_args).fetchall()
+
+        # Daily breakdown for chart
+        day_sql = (
+            "SELECT substr(ts,1,10) AS day,"
+            " json_extract(data_json,'$.app') AS app,"
+            " json_extract(data_json,'$.title') AS title,"
+            " SUM(duration_sec) AS total_sec"
+            " FROM events WHERE tenant_id=? AND bucket=? AND ts>=?"
+        )
+        day_args: list = [tenant, _bucket, since]
+        if user_id:
+            day_sql += " AND user_id=?"; day_args.append(user_id)
+        day_sql += " GROUP BY day, app, title ORDER BY day"
+        day_raw = c.execute(day_sql, day_args).fetchall()
+
+    # Totals
+    totals: dict[str, float] = {
+        "productive": 0.0, "unproductive": 0.0,
+        "neutral": 0.0, "uncategorized": 0.0, "total": 0.0,
     }
+    for row in agg_rows:
+        app_name = row["app"] or ""
+        title = _clean_title(row["title"] or "")
+        cat = _apply_rules(title, app_name, rules)
+        sec = row["total_sec"] or 0.0
+        totals[cat] = totals.get(cat, 0.0) + sec
+        totals["total"] += sec
+
+    # Daily
+    daily_agg: dict[str, dict[str, float]] = {}
+    for row in day_raw:
+        day = row["day"]
+        app_name = row["app"] or ""
+        title = _clean_title(row["title"] or "")
+        cat = _apply_rules(title, app_name, rules)
+        if day not in daily_agg:
+            daily_agg[day] = {
+                "productive": 0.0, "unproductive": 0.0,
+                "neutral": 0.0, "uncategorized": 0.0,
+            }
+        daily_agg[day][cat] = daily_agg[day].get(cat, 0.0) + (row["total_sec"] or 0.0)
+
+    daily = [
+        {
+            "day": day,
+            "productive":    round(v.get("productive",    0.0), 1),
+            "unproductive":  round(v.get("unproductive",  0.0), 1),
+            "neutral":       round(v.get("neutral",       0.0), 1),
+            "uncategorized": round(v.get("uncategorized", 0.0), 1),
+        }
+        for day, v in sorted(daily_agg.items())
+    ]
+
+    result = {
+        "tenant": tenant, "since": since, "days": days,
+        "totals": {k: round(v, 1) for k, v in totals.items()},
+        "daily": daily,
+    }
+    _cache_set(cache_key, result)
+    return result
 
 
 # -- Workforce dashboard endpoints -----------------------------------------
@@ -1152,43 +1262,25 @@ def admin_list_tenants():
     with db() as c:
         rows = c.execute(
             """SELECT t.id, t.name, t.plan, t.status, t.created_at,
-                      (SELECT COUNT(*) FROM users u WHERE u.tenant_id=t.id) AS users,
-                      (SELECT COUNT(*) FROM devices d WHERE d.tenant_id=t.id) AS devices,
-                      (SELECT COUNT(*) FROM licenses l WHERE l.tenant_id=t.id AND l.revoked=0) AS active_licenses,
-                      (SELECT MAX(last_seen) FROM users u WHERE u.tenant_id=t.id) AS last_activity
-               FROM tenants t ORDER BY t.created_at DESC"""
+                      COUNT(DISTINCT l.lic_id) AS licenses,
+                      COUNT(DISTINCT u.user_id) AS users
+               FROM tenants t
+               LEFT JOIN licenses l ON l.tenant_id = t.id AND l.revoked = 0
+               LEFT JOIN users u ON u.tenant_id = t.id
+               GROUP BY t.id ORDER BY t.created_at DESC""",
         ).fetchall()
     return {"tenants": [dict(r) for r in rows]}
 
 
 @app.get("/v1/admin/licenses", dependencies=[Depends(require_admin)])
-def admin_list_licenses(tenant: str | None = None, status: str = "all"):
-    sql = """SELECT l.lic_id, l.tenant_id, t.name AS tenant_name,
-                    l.plan, l.seats, l.issued, l.expires, l.revoked, l.revoked_at
-             FROM licenses l LEFT JOIN tenants t ON t.id=l.tenant_id WHERE 1=1"""
-    args: list = []
-    if tenant:
-        sql += " AND l.tenant_id=?"; args.append(tenant)
-    if status == "active":
-        sql += " AND l.revoked=0"
-    elif status == "revoked":
-        sql += " AND l.revoked=1"
-    sql += " ORDER BY l.issued DESC"
+def admin_list_licenses():
     with db() as c:
-        rows = c.execute(sql, args).fetchall()
-    now = dt.datetime.now(dt.timezone.utc)
-    enriched = []
-    for r in rows:
-        d = dict(r)
-        try:
-            exp = dt.datetime.fromisoformat(d["expires"].replace("Z", "+00:00"))
-            d["days_remaining"] = (exp - now).days
-            d["expired"] = exp < now
-        except Exception:  # noqa: BLE001
-            d["days_remaining"] = None
-            d["expired"] = False
-        enriched.append(d)
-    return {"licenses": enriched}
+        rows = c.execute(
+            """SELECT l.*, t.name AS tenant_name
+               FROM licenses l LEFT JOIN tenants t ON t.id = l.tenant_id
+               ORDER BY l.issued DESC""",
+        ).fetchall()
+    return {"licenses": [dict(r) for r in rows]}
 
 
 @app.get("/v1/admin/stats", dependencies=[Depends(require_admin)])
@@ -1196,7 +1288,7 @@ def admin_stats():
     """System-wide stats: counts, ingestion rate, DB size."""
     now = dt.datetime.now(dt.timezone.utc)
     last_24h = (now - dt.timedelta(hours=24)).isoformat()
-    last_7d = (now - dt.timedelta(days=7)).isoformat()
+    last_7d  = (now - dt.timedelta(days=7)).isoformat()
 
     db_size = os.path.getsize(DB_PATH) if os.path.exists(DB_PATH) else 0
 

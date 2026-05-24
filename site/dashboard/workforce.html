@@ -605,30 +605,80 @@
     </div>
   </section>
 
-  <!-- EVENTOS (consulta bruta de atividade) -->
+  <!-- EVENTOS — coleta completa com categorias de produtividade -->
   <section id="tab-events" class="hide">
     <h1 class="page-title">Eventos de <span class="em">atividade</span>.</h1>
-    <p class="page-sub">Consulta detalhada de eventos — útil para auditoria e diagnóstico. Filtre por bucket, usuário e período.</p>
+    <p class="page-sub">Coleta completa de atividade — todos os aplicativos usados, com classificação por categoria de produtividade. Clique em <em>Categorizar</em> para criar uma regra rapidamente.</p>
 
     <div class="toolbar">
-      <div><label>Bucket</label>
-        <select id="evBucket">
-          <option value="">todos</option>
-          <option value="window">window</option>
-          <option value="afk">afk</option>
-          <option value="browser">browser</option>
+      <div><label>Período</label>
+        <select id="evDays" onchange="loadEvents()">
+          <option value="1">Hoje</option>
+          <option value="7" selected>Últimos 7 dias</option>
+          <option value="15">15 dias</option>
+          <option value="30">30 dias</option>
+          <option value="60">60 dias</option>
         </select>
       </div>
-      <div><label>Usuário</label><input id="evUser" placeholder="user_id (opcional)"></div>
-      <div><label>Desde</label><input type="datetime-local" id="evSince"></div>
-      <div><label>Até</label><input type="datetime-local" id="evUntil"></div>
+      <div><label>Usuário</label>
+        <input id="evUser" placeholder="todos os usuários" style="min-width:180px">
+      </div>
+      <div><label>Bucket</label>
+        <select id="evBucket">
+          <option value="">window (padrão)</option>
+          <option value="afk">afk</option>
+        </select>
+      </div>
       <div class="spacer"></div>
-      <button class="ghost" onclick="loadEvents()">Buscar</button>
+      <button class="ghost" onclick="loadEvents()">↻ Buscar</button>
     </div>
 
+    <!-- KPIs -->
+    <div class="kpi-row">
+      <div class="kpi-card" style="border-top: 3px solid var(--primary)">
+        <div class="kpi-val" id="kpiEvTotal">—</div>
+        <div class="kpi-label">Tempo total ativo</div>
+      </div>
+      <div class="kpi-card" style="border-top: 3px solid #4ade80">
+        <div class="kpi-val" id="kpiEvProd">—</div>
+        <div class="kpi-label">Produtivo</div>
+      </div>
+      <div class="kpi-card" style="border-top: 3px solid #f87171">
+        <div class="kpi-val" id="kpiEvUnprod">—</div>
+        <div class="kpi-label">Não-produtivo</div>
+      </div>
+      <div class="kpi-card" style="border-top: 3px solid var(--warn)">
+        <div class="kpi-val" id="kpiEvUncat">—</div>
+        <div class="kpi-label">Não categorizado</div>
+      </div>
+    </div>
+
+    <!-- Gráfico diário por categoria -->
+    <div class="card no-bar" style="margin-bottom: 18px">
+      <h3>Atividade por categoria — por dia</h3>
+      <p style="font-size:12px;color:var(--text-dim);margin:4px 0 14px">Tempo ativo por dia dividido por categoria de produtividade. Configure as categorias na aba <em>Configurações</em>.</p>
+      <div style="height: 240px"><canvas id="chartEvDaily"></canvas></div>
+    </div>
+
+    <!-- Tabela de eventos -->
     <div class="card no-bar">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+        <div>
+          <h3 style="margin:0">Eventos recentes <span id="evCountLabel" style="color:var(--text-muted);font-weight:400;font-size:11px;margin-left:6px"></span></h3>
+          <p style="font-size:12px;color:var(--text-dim);margin:4px 0 0">Últimos 200 eventos do período. Clique em <em>Categorizar</em> para criar uma regra de produtividade.</p>
+        </div>
+      </div>
       <table id="eventsTable">
-        <thead><tr><th>Quando</th><th>Usuário</th><th>Bucket</th><th>Duração (s)</th><th>Dados</th></tr></thead>
+        <thead>
+          <tr>
+            <th>Quando</th>
+            <th>Usuário</th>
+            <th>Duração</th>
+            <th>Aplicativo / Título</th>
+            <th>Categoria</th>
+            <th></th>
+          </tr>
+        </thead>
         <tbody></tbody>
       </table>
     </div>
@@ -1497,41 +1547,103 @@ function quickRule(pattern, field) {
 }
 
 // =====================================================================
-// EVENTOS (raw)
+// EVENTOS — coleta completa com categorias
 // =====================================================================
 async function loadEvents() {
-  const params = new URLSearchParams({ tenant: state.tenant });
-  const b = document.getElementById('evBucket').value; if (b) params.set('bucket', b);
-  const u = document.getElementById('evUser').value;   if (u) params.set('user_id', u);
-  const since = document.getElementById('evSince').value;
-  const until = document.getElementById('evUntil').value;
-  if (since) params.set('since', new Date(since).toISOString());
-  if (until) params.set('until', new Date(until).toISOString());
-  params.set('limit', '200');
+  const days   = document.getElementById('evDays').value;
+  const user   = document.getElementById('evUser').value.trim();
+  const bucket = document.getElementById('evBucket').value;
+  const sig    = _tabAbort ? _tabAbort.signal : undefined;
+
+  const base      = `tenant=${encodeURIComponent(state.tenant)}&days=${days}`;
+  const userParam = user   ? `&user_id=${encodeURIComponent(user)}` : '';
+  const bktParam  = bucket ? `&bucket=${encodeURIComponent(bucket)}` : '';
+
   try {
-    const sig = _tabAbort ? _tabAbort.signal : undefined;
-    const data = await api('/v1/events?' + params.toString(), sig);
+    const [summary, evData] = await Promise.all([
+      api(`/v1/productivity/events_summary?${base}${userParam}${bktParam}`, sig),
+      api(`/v1/events?${base}${userParam}${bktParam}&limit=200`, sig),
+    ]);
+
+    // ---- KPIs ----
+    const t     = summary.totals || {};
+    const total = t.total || 0;
+    const pctOf = v => total > 0 ? ' <small>' + (v / total * 100).toFixed(0) + '%</small>' : '';
+    document.getElementById('kpiEvTotal').innerHTML  = fmtSec(total);
+    document.getElementById('kpiEvProd').innerHTML   = fmtSec(t.productive   || 0) + pctOf(t.productive   || 0);
+    document.getElementById('kpiEvUnprod').innerHTML = fmtSec(t.unproductive || 0) + pctOf(t.unproductive || 0);
+    document.getElementById('kpiEvUncat').innerHTML  = fmtSec(t.uncategorized|| 0) + pctOf(t.uncategorized|| 0);
+
+    // ---- Chart ----
+    drawEvDailyChart(summary.daily || []);
+
+    // ---- Table ----
+    const events = evData.events || [];
+    const label  = document.getElementById('evCountLabel');
+    if (label) label.textContent = events.length ? `— ${events.length} eventos` : '';
+
     const tb = document.querySelector('#eventsTable tbody');
-    if (!data.events || data.events.length === 0) {
-      tb.innerHTML = `<tr><td colspan="5" class="empty-state">Nenhum evento encontrado com estes filtros.</td></tr>`;
+    if (!events.length) {
+      tb.innerHTML = '<tr><td colspan="6" class="empty-state">Nenhum evento encontrado com estes filtros.</td></tr>';
       return;
     }
-    tb.innerHTML = data.events.map(e => {
-      const d = e.data || {};
-      const info = d.app
-        ? `<strong>${d.app}</strong>${d.title ? ' — ' + d.title.slice(0,80) : ''}`
-        : JSON.stringify(d).slice(0, 120);
+
+    tb.innerHTML = events.map(e => {
+      const d   = e.data || {};
+      const app = d.app || '';
+      const ttl = (d.title || '').slice(0, 75);
+      const appLabel   = app ? `<strong>${app}</strong>` : '';
+      const titleLabel = ttl ? `<span style="color:var(--text-dim)"> — ${ttl}</span>` : '';
+      const cat        = e.category || 'uncategorized';
+      const pill       = CAT_PILLS[cat] || CAT_PILLS.uncategorized;
+
+      // Build quickRule params — prefer app field, fallback to title
+      const pattern   = (app || d.title || '').replace(/'/g, "\\'").slice(0, 60);
+      const ruleField = app ? 'app' : 'title';
+
       return `<tr>
-        <td style="white-space:nowrap">${new Date(e.ts).toLocaleString('pt-BR')}</td>
+        <td style="white-space:nowrap;font-size:12px">${new Date(e.ts).toLocaleString('pt-BR')}</td>
         <td>${cleanUserId(e.user_id)}</td>
-        <td><code>${e.bucket}</code></td>
         <td>${fmtSec(e.duration_sec)}</td>
-        <td style="max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${(d.title||'').replace(/"/g,'&quot;')}">${info}</td>
+        <td style="max-width:380px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+            title="${(d.title || '').replace(/"/g, '&quot;')}">${appLabel}${titleLabel}</td>
+        <td>${pill}</td>
+        <td><button class="cat-btn" onclick="quickRule('${pattern}','${ruleField}')">Categorizar</button></td>
       </tr>`;
     }).join('');
+
   } catch (e) {
     if (!e.message.includes('trocada')) toast('Erro ao buscar eventos: ' + e.message);
   }
+}
+
+function drawEvDailyChart(daily) {
+  if (state.charts.evDaily) state.charts.evDaily.destroy();
+  if (!daily.length) return;
+  const ctx = document.getElementById('chartEvDaily').getContext('2d');
+  state.charts.evDaily = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: daily.map(d => ptDate(d.day + 'T00:00:00Z')),
+      datasets: [
+        { label: 'Produtivo',        data: daily.map(d => +(d.productive   /3600).toFixed(2)), backgroundColor: CAT_COLORS.productive,    borderRadius: 4, stack: 'a' },
+        { label: 'Não-produtivo',    data: daily.map(d => +(d.unproductive /3600).toFixed(2)), backgroundColor: CAT_COLORS.unproductive,  borderRadius: 4, stack: 'a' },
+        { label: 'Neutro',           data: daily.map(d => +(d.neutral      /3600).toFixed(2)), backgroundColor: CAT_COLORS.neutral,        borderRadius: 4, stack: 'a' },
+        { label: 'Não categorizado', data: daily.map(d => +(d.uncategorized/3600).toFixed(2)), backgroundColor: CAT_COLORS.uncategorized,  borderRadius: 4, stack: 'a' },
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { labels: { color: '#8c97c4', font: { size: 11 }, boxWidth: 12 } },
+        tooltip: { callbacks: { label: c => ' ' + c.dataset.label + ': ' + c.parsed.y.toFixed(1) + 'h' } }
+      },
+      scales: {
+        x: { stacked: true, ticks: { color: '#8c97c4' }, grid: { color: 'rgba(255,255,255,.04)' } },
+        y: { stacked: true, ticks: { color: '#8c97c4', callback: v => v + 'h' }, grid: { color: 'rgba(255,255,255,.04)' } }
+      }
+    }
+  });
 }
 
 // =====================================================================
