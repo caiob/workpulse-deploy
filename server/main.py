@@ -49,6 +49,7 @@ Run:
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re as _re
 import json
@@ -99,13 +100,24 @@ if not ADMIN_TOKEN or len(ADMIN_TOKEN) < 32:
 # ---------------------------------------------------------------------------
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS tenants (
-    id            TEXT PRIMARY KEY,
-    name          TEXT NOT NULL,
-    plan          TEXT NOT NULL DEFAULT 'starter',
-    status        TEXT NOT NULL DEFAULT 'active',
-    created_at    TEXT NOT NULL,
-    dash_token    TEXT
+    id             TEXT PRIMARY KEY,
+    name           TEXT NOT NULL,
+    plan           TEXT NOT NULL DEFAULT 'starter',
+    status         TEXT NOT NULL DEFAULT 'active',
+    created_at     TEXT NOT NULL,
+    dash_token     TEXT,
+    retention_days INTEGER DEFAULT NULL
 );
+CREATE TABLE IF NOT EXISTS daily_summaries (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id   TEXT NOT NULL,
+    user_id     TEXT NOT NULL,
+    day         TEXT NOT NULL,
+    active_sec  REAL NOT NULL DEFAULT 0,
+    afk_sec     REAL NOT NULL DEFAULT 0,
+    UNIQUE(tenant_id, user_id, day)
+);
+CREATE INDEX IF NOT EXISTS idx_daily_tenant_day ON daily_summaries(tenant_id, day);
 CREATE TABLE IF NOT EXISTS licenses (
     lic_id        TEXT PRIMARY KEY,
     tenant_id     TEXT NOT NULL,
@@ -174,6 +186,14 @@ CREATE INDEX IF NOT EXISTS idx_events_bucket_ts     ON events(tenant_id, bucket,
 CREATE INDEX IF NOT EXISTS idx_licenses_tenant      ON licenses(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_audit_ts             ON audit_log(ts);
 CREATE INDEX IF NOT EXISTS idx_prod_rules_tenant    ON productivity_rules(tenant_id);
+CREATE TABLE IF NOT EXISTS tenant_departments (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id  TEXT NOT NULL,
+    name       TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(tenant_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_dept_tenant ON tenant_departments(tenant_id);
 """
 
 
@@ -196,10 +216,25 @@ def db():
 def init_db():
     with db() as c:
         c.executescript(SCHEMA)
-        # Migracao: garante a coluna dash_token em bancos ja existentes.
+        # Migrações incrementais para bancos já existentes
         cols = [r["name"] for r in c.execute("PRAGMA table_info(tenants)").fetchall()]
         if "dash_token" not in cols:
             c.execute("ALTER TABLE tenants ADD COLUMN dash_token TEXT")
+        if "retention_days" not in cols:
+            c.execute("ALTER TABLE tenants ADD COLUMN retention_days INTEGER DEFAULT NULL")
+        user_cols = [r["name"] for r in c.execute("PRAGMA table_info(users)").fetchall()]
+        if "login_user" not in user_cols:
+            c.execute("ALTER TABLE users ADD COLUMN login_user TEXT")
+        # Tabela de departamentos por tenant (cria se não existir)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS tenant_departments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tenant_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(tenant_id, name)
+            )""")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_dept_tenant ON tenant_departments(tenant_id)")
 
 
 # ---------------------------------------------------------------------------
@@ -313,7 +348,17 @@ class IngestPayload(BaseModel):
     os_version: str | None = None
     agent_version: str | None = None
     user_id: str | None = None
+    # login_user: nome do usuário autenticado no SO (USERNAME/USER env var)
+    # Enviado pelo agente; auto-preenche display_name se ainda não definido.
+    login_user: str | None = None
     events: list[IngestEvent]
+
+
+class UserUpdate(BaseModel):
+    display_name: str | None = None
+    email: str | None = None
+    department: str | None = None
+    role: str | None = None
 
 
 class LicenseIssueRequest(BaseModel):
@@ -479,13 +524,76 @@ def validate_agent_token(token: str, tenant_header: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Background retention worker
+# ---------------------------------------------------------------------------
+_DEFAULT_RETENTION_DAYS = 90
+
+
+async def _retention_worker():
+    """Runs every 24 h. Archives old events into daily_summaries then deletes them."""
+    while True:
+        try:
+            with db() as c:
+                tenants = c.execute(
+                    "SELECT id, COALESCE(retention_days, ?) AS days FROM tenants WHERE status='active'",
+                    (_DEFAULT_RETENTION_DAYS,),
+                ).fetchall()
+
+            for t in tenants:
+                tid = t["id"]
+                days = int(t["days"])
+                cutoff = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).date().isoformat()
+
+                with db() as c:
+                    # Aggregate active/afk seconds per (tenant, user, day) for events older than cutoff
+                    old_rows = c.execute(
+                        """SELECT user_id,
+                                  substr(ts,1,10) AS day,
+                                  SUM(CASE WHEN bucket='window' THEN duration_sec ELSE 0 END) AS active_sec,
+                                  SUM(CASE WHEN bucket='afk' AND json_extract(data_json,'$.status')='afk'
+                                           THEN duration_sec ELSE 0 END) AS afk_sec
+                           FROM events
+                           WHERE tenant_id=? AND ts < ?
+                           GROUP BY user_id, day""",
+                        (tid, cutoff),
+                    ).fetchall()
+
+                    if old_rows:
+                        c.executemany(
+                            """INSERT INTO daily_summaries (tenant_id, user_id, day, active_sec, afk_sec)
+                               VALUES (?, ?, ?, ?, ?)
+                               ON CONFLICT(tenant_id, user_id, day) DO UPDATE SET
+                                   active_sec = daily_summaries.active_sec + excluded.active_sec,
+                                   afk_sec    = daily_summaries.afk_sec    + excluded.afk_sec""",
+                            [(tid, r["user_id"], r["day"], r["active_sec"], r["afk_sec"])
+                             for r in old_rows],
+                        )
+                        c.execute(
+                            "DELETE FROM events WHERE tenant_id=? AND ts < ?",
+                            (tid, cutoff),
+                        )
+        except Exception as exc:  # noqa: BLE001
+            # Non-fatal — log and continue next cycle
+            print(f"[retention_worker] error: {exc}")
+
+        # Sleep 24 hours before next run
+        await asyncio.sleep(86400)
+
+
+# ---------------------------------------------------------------------------
 # FastAPI app + lifespan (modern; replaces deprecated @app.on_event)
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
     load_or_create_keypair()
+    task = asyncio.create_task(_retention_worker())
     yield
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
 
 
 app = FastAPI(title="WorkPulse Server", version=APP_VERSION, lifespan=lifespan)
@@ -546,6 +654,18 @@ def ingest(
                ON CONFLICT(tenant_id, user_id) DO UPDATE SET last_seen = excluded.last_seen""",
             (user_id, claims["tenant"], now_iso, now_iso),
         )
+        # Persistir login_user e auto-preencher display_name se ainda não definido pelo admin.
+        if payload.login_user:
+            c.execute(
+                """UPDATE users
+                   SET login_user = ?,
+                       display_name = CASE
+                           WHEN (display_name IS NULL OR display_name = '') THEN ?
+                           ELSE display_name
+                       END
+                   WHERE tenant_id = ? AND user_id = ?""",
+                (payload.login_user, payload.login_user, claims["tenant"], user_id),
+            )
         c.execute(
             """INSERT INTO devices (device_id, user_id, tenant_id, hostname, os, os_version, agent_version, last_seen)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -1262,6 +1382,7 @@ def admin_list_tenants():
     with db() as c:
         rows = c.execute(
             """SELECT t.id, t.name, t.plan, t.status, t.created_at,
+                      t.retention_days,
                       COUNT(DISTINCT l.lic_id) AS licenses,
                       COUNT(DISTINCT u.user_id) AS users
                FROM tenants t
@@ -1335,6 +1456,135 @@ def admin_audit_log(limit: int = Query(100, le=1000), offset: int = 0):
             (limit, offset),
         ).fetchall()
     return {"count": len(rows), "log": [dict(r) for r in rows]}
+
+
+# -- User management -------------------------------------------------------
+@app.patch("/v1/users/{user_id}", dependencies=[Depends(require_tenant_scope)])
+def update_user(user_id: str, body: UserUpdate, tenant: str, request: Request):
+    """Atualiza metadados de um colaborador (nome, e-mail, depto, função)."""
+    fields: list[str] = []
+    values: list[Any] = []
+    if body.display_name is not None:
+        fields.append("display_name = ?")
+        values.append(body.display_name)
+    if body.email is not None:
+        fields.append("email = ?")
+        values.append(body.email)
+    if body.department is not None:
+        fields.append("department = ?")
+        values.append(body.department)
+    if body.role is not None:
+        fields.append("role = ?")
+        values.append(body.role)
+    if not fields:
+        raise HTTPException(status_code=422, detail="no fields to update")
+    values.extend([tenant, user_id])
+    with db() as c:
+        cur = c.execute(
+            f"UPDATE users SET {', '.join(fields)} WHERE tenant_id = ? AND user_id = ?",
+            values,
+        )
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="user not found")
+    audit("admin", "user.update", target=user_id,
+          detail=f"tenant={tenant} fields={list(body.model_dump(exclude_none=True).keys())}",
+          ip=request.client.host if request.client else None)
+    _cache_bust(tenant)
+    return {"status": "updated", "user_id": user_id}
+
+
+
+# -- Departments -----------------------------------------------------------
+class DepartmentCreate(BaseModel):
+    name: str
+
+
+@app.get("/v1/departments", dependencies=[Depends(require_tenant_scope)])
+def list_departments(tenant: str):
+    """Lista departamentos do tenant com contagem de usuários."""
+    with db() as c:
+        depts = c.execute(
+            "SELECT id, name, created_at FROM tenant_departments WHERE tenant_id=? ORDER BY name",
+            (tenant,),
+        ).fetchall()
+        result = []
+        for d in depts:
+            count = c.execute(
+                "SELECT COUNT(*) AS n FROM users WHERE tenant_id=? AND department=?",
+                (tenant, d["name"]),
+            ).fetchone()["n"]
+            users = c.execute(
+                """SELECT user_id, display_name, login_user, last_seen
+                   FROM users WHERE tenant_id=? AND department=? ORDER BY last_seen DESC""",
+                (tenant, d["name"]),
+            ).fetchall()
+            result.append({
+                "id": d["id"],
+                "name": d["name"],
+                "created_at": d["created_at"],
+                "user_count": count,
+                "users": [dict(u) for u in users],
+            })
+    return {"departments": result}
+
+
+@app.post("/v1/departments", dependencies=[Depends(require_tenant_scope)])
+def create_department(body: DepartmentCreate, tenant: str, request: Request):
+    """Cria um novo departamento para o tenant."""
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="name required")
+    now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
+    with db() as c:
+        try:
+            c.execute(
+                "INSERT INTO tenant_departments (tenant_id, name, created_at) VALUES (?, ?, ?)",
+                (tenant, name, now_iso),
+            )
+        except sqlite3.IntegrityError:
+            raise HTTPException(status_code=409, detail="department already exists")
+    audit("admin", "dept.create", target=name,
+          detail=f"tenant={tenant}",
+          ip=request.client.host if request.client else None)
+    return {"status": "created", "name": name}
+
+
+@app.delete("/v1/departments/{dept_name}", dependencies=[Depends(require_tenant_scope)])
+def delete_department(dept_name: str, tenant: str, request: Request):
+    """Exclui departamento e limpa o campo department dos usuários vinculados."""
+    with db() as c:
+        cur = c.execute(
+            "DELETE FROM tenant_departments WHERE tenant_id=? AND name=?",
+            (tenant, dept_name),
+        )
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="department not found")
+        c.execute(
+            "UPDATE users SET department=NULL WHERE tenant_id=? AND department=?",
+            (tenant, dept_name),
+        )
+    _cache_bust(tenant)
+    audit("admin", "dept.delete", target=dept_name,
+          detail=f"tenant={tenant}",
+          ip=request.client.host if request.client else None)
+    return {"status": "deleted", "name": dept_name}
+
+
+# -- Tenant retention policy -----------------------------------------------
+@app.put("/v1/admin/tenants/{tenant_id}/retention", dependencies=[Depends(require_admin)])
+def set_tenant_retention(tenant_id: str, days: int = Query(..., ge=1, le=3650), request: Request = None):
+    """Define a política de retenção de dados (em dias) para um tenant."""
+    with db() as c:
+        cur = c.execute(
+            "UPDATE tenants SET retention_days = ? WHERE id = ?",
+            (days, tenant_id),
+        )
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="tenant not found")
+    audit("admin", "tenant.retention", target=tenant_id,
+          detail=f"retention_days={days}",
+          ip=request.client.host if request.client else None)
+    return {"status": "updated", "tenant_id": tenant_id, "retention_days": days}
 
 
 # ---------------------------------------------------------------------------

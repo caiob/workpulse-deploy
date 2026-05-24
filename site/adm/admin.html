@@ -518,7 +518,7 @@
             <th>ID</th><th>Nome</th><th>Plano</th><th>Status</th>
             <th class="num">Usuários</th><th class="num">Devices</th>
             <th class="num">Licenças</th><th>Criado em</th><th>Última atividade</th>
-            <th>Acesso ao painel</th>
+            <th class="num">Retenção</th><th>Acesso ao painel</th>
           </tr>
         </thead>
         <tbody></tbody>
@@ -875,8 +875,12 @@ function renderTenants() {
       <td class="num">${fmtNum(t.active_licenses)}</td>
       <td>${fmtDate(t.created_at)}</td>
       <td>${relTime(t.last_activity)}</td>
+      <td class="num">
+        <span style="color:var(--text-dim);font-size:12px">${t.retention_days != null ? t.retention_days + 'd' : '90d ⚙'}</span>
+        <button class="ghost" style="margin-left:4px;font-size:11px;padding:2px 6px" onclick="setRetention('${t.id}', ${t.retention_days || 90})">✎</button>
+      </td>
       <td><button class="ghost" onclick="genTenantAccess('${t.id}')">gerar acesso</button></td>
-    </tr>`).join('') : `<tr><td colspan="10" class="empty">Nenhum tenant encontrado.</td></tr>`;
+    </tr>`).join('') : `<tr><td colspan="11" class="empty">Nenhum tenant encontrado.</td></tr>`;
 }
 
 // ---------- Criar empresa ----------
@@ -926,6 +930,21 @@ async function genTenantAccess(tenantId) {
   } catch (e) {
     toast('Erro: ' + e.message);
   }
+}
+
+async function setRetention(tenantId, currentDays) {
+  const input = prompt(
+    `Retenção de dados para "${tenantId}" (em dias).\nDigite um número entre 1 e 3650.\nAtual: ${currentDays} dias`,
+    currentDays
+  );
+  if (input === null) return;  // cancelled
+  const days = parseInt(input, 10);
+  if (!days || days < 1 || days > 3650) { toast('Valor inválido. Use entre 1 e 3650.'); return; }
+  try {
+    await api(`/v1/admin/tenants/${encodeURIComponent(tenantId)}/retention?days=${days}`, { method: 'PUT' });
+    toast(`Retenção de ${tenantId} definida para ${days} dias.`);
+    loadTenants();
+  } catch (e) { toast('Erro: ' + e.message); }
 }
 
 function copyLicKey()   { copyFrom('ncLicKey', 'Licença copiada'); }
@@ -1062,36 +1081,38 @@ function renderAudit() {
     !q || (a.actor||'').toLowerCase().includes(q)
        || (a.action||'').toLowerCase().includes(q)
        || (a.target||'').toLowerCase().includes(q)
+    !q || (a.actor||'').toLowerCase().includes(q)
+       || (a.action||'').toLowerCase().includes(q)
+       || (a.target||'').toLowerCase().includes(q)
        || (a.ip||'').toLowerCase().includes(q)
   );
-  document.getElementById('auditCount').textContent = `${rows.length} de ${state.audit.length}`;
-
-  document.getElementById('auditFeed').innerHTML = rows.length ? rows.map(a => `
-    <div class="feed-row">
-      <span class="when">${fmtDateTime(a.ts)}</span>
-      <span class="what">${a.action}</span>
-      <div class="who">
-        <strong>${a.actor}</strong> ${a.target ? '→ <code>'+a.target+'</code>' : ''}
-        <small>${a.detail || ''} ${a.ip ? '· '+a.ip : ''}</small>
-      </div>
-    </div>
-  `).join('') : '<div class="empty">Sem eventos de auditoria registrados.</div>';
+  document.getElementById('auditCount').textContent = `${rows.length} registros`;
+  document.querySelector('#auditTable tbody').innerHTML = rows.length ? rows.map(a => `
+    <tr>
+      <td class="mono" style="font-size:11px">${fmtDateTime(a.ts)}</td>
+      <td class="mono">${a.actor || '—'}</td>
+      <td><span class="badge ${a.action.startsWith('license') ? 'ok' : a.action.startsWith('tenant') ? 'warn' : 'muted'}">${a.action}</span></td>
+      <td class="mono">${a.target || '—'}</td>
+      <td style="color:var(--text-dim);font-size:12px;max-width:280px;overflow:hidden;text-overflow:ellipsis">${a.detail || ''}</td>
+      <td class="mono" style="font-size:11px;color:var(--text-dim)">${a.ip || '—'}</td>
+    </tr>`).join('') : `<tr><td colspan="6" class="empty">Nenhum registro encontrado.</td></tr>`;
 }
 
-// ---------- Bootstrap ----------
-function bootstrap() {
-  loadOverview();
-  setInterval(() => {
-    if (!document.getElementById('tab-overview').classList.contains('hide')) loadOverview();
-  }, 30000);
-}
-
-if (state.token && state.url) {
-  document.getElementById('login').classList.add('hide');
-  bootstrap();
-} else {
-  document.getElementById('loginUrl').value = state.url;
-}
+// =====================================================================
+// Bootstrap
+// =====================================================================
+(function() {
+  const token = localStorage.getItem('wp_admin_token');
+  const url   = localStorage.getItem('wp_admin_url');
+  if (token && url) {
+    document.getElementById('adminToken').value = token;
+    document.getElementById('adminUrl').value   = url;
+    state.token = token;
+    state.url   = url;
+    document.getElementById('loginBox').classList.add('hide');
+    loadAll();
+  }
+})();
 </script>
 </body>
 </html>
