@@ -1585,6 +1585,75 @@ def set_tenant_retention(tenant_id: str, days: int = Query(..., ge=1, le=3650), 
     return {"status": "updated", "tenant_id": tenant_id, "retention_days": days}
 
 
+
+# ---------------------------------------------------------------------------
+# Admin: data summary + purge (homologação / reset de testes)
+# ---------------------------------------------------------------------------
+@app.get("/v1/admin/data-summary", dependencies=[Depends(require_admin)])
+def admin_data_summary(tenant: str | None = None):
+    """Returns row counts per tenant for users/devices/events/daily_summaries."""
+    with db() as c:
+        if tenant:
+            tenants = c.execute(
+                "SELECT id, name FROM tenants WHERE id=?", (tenant,)
+            ).fetchall()
+        else:
+            tenants = c.execute(
+                "SELECT id, name FROM tenants ORDER BY name"
+            ).fetchall()
+
+        results = []
+        for t in tenants:
+            tid = t["id"]
+            users   = c.execute("SELECT COUNT(*) FROM users          WHERE tenant_id=?", (tid,)).fetchone()[0]
+            devices = c.execute("SELECT COUNT(*) FROM devices         WHERE tenant_id=?", (tid,)).fetchone()[0]
+            events  = c.execute("SELECT COUNT(*) FROM events          WHERE tenant_id=?", (tid,)).fetchone()[0]
+            sums    = c.execute("SELECT COUNT(*) FROM daily_summaries WHERE tenant_id=?", (tid,)).fetchone()[0]
+            oldest  = c.execute("SELECT MIN(ts)  FROM events          WHERE tenant_id=?", (tid,)).fetchone()[0]
+            newest  = c.execute("SELECT MAX(ts)  FROM events          WHERE tenant_id=?", (tid,)).fetchone()[0]
+            results.append({
+                "tenant_id": tid, "tenant_name": t["name"],
+                "users": users, "devices": devices,
+                "events": events, "daily_summaries": sums,
+                "oldest_event": oldest, "newest_event": newest,
+            })
+    return {"tenants": results}
+
+
+@app.post("/v1/admin/purge-data", dependencies=[Depends(require_admin)])
+def admin_purge_data(
+    request: Request,
+    tenant: str | None = None,
+):
+    """Delete collected data (events/devices/users/daily_summaries).
+    Keeps tenants, licenses, productivity_rules, tenant_departments, audit_log.
+    Pass ?tenant=<id> to scope to one tenant, omit for all tenants.
+    """
+    with db() as c:
+        where = "WHERE tenant_id = ?" if tenant else ""
+        args: list = [tenant] if tenant else []
+        deleted: dict[str, int] = {}
+        for tbl in ["events", "daily_summaries", "devices", "users"]:
+            cur = c.execute(f"DELETE FROM {tbl} {where}", args)
+            deleted[tbl] = cur.rowcount
+
+        audit(
+            actor="admin/purge-data",
+            action="data_purge",
+            target=tenant or "ALL",
+            detail=str(deleted),
+            ip=request.client.host if request.client else None,
+        )
+
+    # Bust cache for affected tenant(s)
+    if tenant:
+        _cache_bust(tenant)
+    else:
+        with _CACHE_LOCK:
+            _CACHE.clear()
+
+    return {"status": "ok", "scope": tenant or "ALL", "deleted": deleted}
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
