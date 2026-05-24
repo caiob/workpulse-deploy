@@ -61,6 +61,12 @@
     background: linear-gradient(135deg, var(--primary), var(--accent));
     box-shadow: 0 0 12px rgba(108,140,255,.6);
   }
+  .brand-logo {
+    height: 32px; width: 32px;
+    border-radius: 8px;
+    object-fit: contain;
+    flex-shrink: 0;
+  }
   .brand .role {
     font-family: var(--mono); font-size: 11px;
     background: rgba(108,140,255,.13); color: var(--primary);
@@ -320,6 +326,7 @@
   }
   button.primary-btn:hover { filter: brightness(1.1); }
 </style>
+<link rel="icon" type="image/jpeg" href="../assets/logo-workpulse.jpeg">
 </head>
 <body>
 
@@ -338,7 +345,8 @@
 
 <header class="topbar">
   <div class="brand">
-    <span class="dot"></span> WorkPulse
+    <img src="../assets/logo-workpulse.jpeg" alt="WorkPulse" class="brand-logo">
+    WorkPulse
     <span class="role">PLATFORM ADMIN</span>
   </div>
   <nav class="tabs">
