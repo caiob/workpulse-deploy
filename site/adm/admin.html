@@ -1106,6 +1106,10 @@ function renderAudit() {
 // =====================================================================
 // Bootstrap
 // =====================================================================
+function loadAll() {
+  loadOverview();   // default tab; other tabs load on click
+}
+
 (function() {
   const token = localStorage.getItem('wp_admin_token');
   const url   = localStorage.getItem('wp_admin_url');

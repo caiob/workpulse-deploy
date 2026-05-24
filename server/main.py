@@ -207,6 +207,9 @@ def db():
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA synchronous = NORMAL")
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA cache_size = -65536")   # 64 MB page cache (reduces EFS round-trips)
+    conn.execute("PRAGMA temp_store = MEMORY")   # temp tables in RAM
+    conn.execute("PRAGMA mmap_size = 134217728") # 128 MB memory-mapped I/O
     try:
         yield conn
     finally:
@@ -1043,27 +1046,24 @@ def workforce_overview(tenant: str, days: int = 7):
     online_threshold = (now - dt.timedelta(minutes=10)).isoformat()
 
     with db() as c:
+        # Single pass for totals + today_active (reduces EFS round-trips)
         totals = c.execute(
             """SELECT
                  COUNT(DISTINCT user_id) AS total_users,
                  SUM(CASE WHEN bucket='window' THEN duration_sec END) AS active,
                  SUM(CASE WHEN bucket='afk' AND json_extract(data_json,'$.status')='afk'
-                          THEN duration_sec END) AS afk
+                          THEN duration_sec END) AS afk,
+                 SUM(CASE WHEN bucket='window' AND ts>=? THEN duration_sec END) AS today_active
                FROM events WHERE tenant_id=? AND ts>=?""",
-            (tenant, since),
+            (today_start, tenant, since),
         ).fetchone()
+        today_active = totals["today_active"] or 0
 
         online = c.execute(
             """SELECT COUNT(*) AS n FROM users
                WHERE tenant_id=? AND last_seen>=?""",
             (tenant, online_threshold),
         ).fetchone()["n"]
-
-        today_active = c.execute(
-            """SELECT SUM(duration_sec) AS s FROM events
-               WHERE tenant_id=? AND ts>=? AND bucket='window'""",
-            (tenant, today_start),
-        ).fetchone()["s"] or 0
 
         # Hourly distribution
         hourly = c.execute(
@@ -1098,30 +1098,28 @@ def workforce_overview(tenant: str, days: int = 7):
             (since, tenant),
         ).fetchall()
 
-        # Risk flags (overwork / under-engagement)
+        # Risk flags — flat per-user aggregation (faster than double GROUP BY)
         risk = c.execute(
             """SELECT u.user_id, u.display_name,
-                      MAX(daily.active) AS max_day_active,
-                      AVG(daily.active) AS avg_day_active
+                      COALESCE(e.total_sec, 0) AS total_active
                FROM users u
                LEFT JOIN (
-                 SELECT user_id, substr(ts,1,10) AS d, SUM(duration_sec) AS active
+                 SELECT user_id, SUM(duration_sec) AS total_sec
                  FROM events WHERE tenant_id=? AND ts>=? AND bucket='window'
-                 GROUP BY user_id, d
-               ) daily ON daily.user_id = u.user_id
-               WHERE u.tenant_id=?
-               GROUP BY u.user_id""",
+                 GROUP BY user_id
+               ) e ON e.user_id = u.user_id
+               WHERE u.tenant_id=?""",
             (tenant, since, tenant),
         ).fetchall()
 
     overwork, underwork = [], []
     for r in risk:
-        max_h = (r["max_day_active"] or 0) / 3600
-        avg_h = (r["avg_day_active"] or 0) / 3600
-        if max_h > 10:
+        total_h = (r["total_active"] or 0) / 3600
+        avg_h   = total_h / max(days, 1)
+        if total_h / max(days, 1) > 10:   # avg > 10h/day
             overwork.append({"user_id": r["user_id"],
                              "display_name": r["display_name"],
-                             "max_day_hours": round(max_h, 1)})
+                             "max_day_hours": round(avg_h, 1)})
         if 0 < avg_h < 2:
             underwork.append({"user_id": r["user_id"],
                               "display_name": r["display_name"],
@@ -1594,6 +1592,7 @@ def serve():
     import uvicorn
     host, _, port_s = LISTEN_ADDR.rpartition(":")
     uvicorn.run(app, host=host or "0.0.0.0", port=int(port_s or 8080))
+
 
 
 if __name__ == "__main__":

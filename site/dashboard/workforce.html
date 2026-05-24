@@ -434,10 +434,27 @@
   }
   .del-btn:hover { background: rgba(239,68,68,.1); }
 
+
+  /* ── Global loading bar ── */
+  .global-loader {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    height: 3px;
+    background: linear-gradient(90deg, var(--primary) 0%, #34d399 50%, var(--primary) 100%);
+    background-size: 200% 100%;
+    animation: loaderMove 1.4s linear infinite;
+    z-index: 9999;
+    pointer-events: none;
+  }
+  @keyframes loaderMove {
+    0%   { background-position: 100% 0; }
+    100% { background-position: -100% 0; }
+  }
 </style>
 <link rel="icon" type="image/jpeg" href="../assets/logo-workpulse.jpeg">
 </head>
 <body>
+<div id="globalLoader" class="global-loader hide"></div>
 
 <div id="login" class="login-shade">
   <div class="login-box">
@@ -1059,14 +1076,28 @@ function _cancelPending() {
   return _tabAbort.signal;
 }
 
+// ── Global loading indicator ──
+let _loaderCount = 0;
+function _showLoader() {
+  if (++_loaderCount === 1)
+    document.getElementById('globalLoader').classList.remove('hide');
+}
+function _hideLoader() {
+  if (--_loaderCount <= 0) {
+    _loaderCount = 0;
+    document.getElementById('globalLoader').classList.add('hide');
+  }
+}
+
 async function api(path, signal) {
-  // Timeout de 30s — evita travar o browser esperando o ALB dar 504
+  // Timeout de 90s — queries pesadas no EFS levam mais tempo
   const timeout = new AbortController();
-  const tid = setTimeout(() => timeout.abort(), 30000);
+  const tid = setTimeout(() => timeout.abort(), 90000);
   // Combina o signal de aba com o de timeout
   const combined = signal
     ? AbortSignal.any ? AbortSignal.any([signal, timeout.signal]) : timeout.signal
     : timeout.signal;
+  _showLoader();
   try {
     const r = await fetch(state.url + path, {
       headers: { 'X-Admin-Token': state.token },
@@ -1082,6 +1113,8 @@ async function api(path, signal) {
     clearTimeout(tid);
     if (e.name === 'AbortError') throw new Error('Tempo esgotado ou aba trocada');
     throw e;
+  } finally {
+    _hideLoader();
   }
 }
 
@@ -2028,13 +2061,18 @@ async function removeUserFromDept(uid, deptName) {
 
 // Helper: fetch com método e body JSON
 async function apiFetch(method, path, body) {
-  const r = await fetch(state.url + path, {
-    method,
-    headers: { 'X-Admin-Token': state.token, 'Content-Type': 'application/json' },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (!r.ok) { const t = await r.text(); throw new Error(t); }
-  return r.json().catch(() => ({}));
+  _showLoader();
+  try {
+    const r = await fetch(state.url + path, {
+      method,
+      headers: { 'X-Admin-Token': state.token, 'Content-Type': 'application/json' },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    if (!r.ok) { const t = await r.text(); throw new Error(t); }
+    return r.json().catch(() => ({}));
+  } finally {
+    _hideLoader();
+  }
 }
 
 // =====================================================================
