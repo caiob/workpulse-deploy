@@ -1089,9 +1089,6 @@ function renderAudit() {
     !q || (a.actor||'').toLowerCase().includes(q)
        || (a.action||'').toLowerCase().includes(q)
        || (a.target||'').toLowerCase().includes(q)
-    !q || (a.actor||'').toLowerCase().includes(q)
-       || (a.action||'').toLowerCase().includes(q)
-       || (a.target||'').toLowerCase().includes(q)
        || (a.ip||'').toLowerCase().includes(q)
   );
   document.getElementById('auditCount').textContent = `${rows.length} registros`;
