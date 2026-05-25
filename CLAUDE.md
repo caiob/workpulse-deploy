@@ -82,40 +82,17 @@ There are no automated tests. Validation = `py_compile` + manual curl/browser ch
 All commands run in **AWS CloudShell** (`us-east-1`), inside the `workpulse-deploy/` folder.
 
 ```bash
-# After changing server/main.py — rebuilds Docker image via CodeBuild, rolling zero-downtime deploy
-bash scripts/redeploy.sh          # ~5 min, zero downtime (new task healthy before old one stops)
+# After changing server/main.py — rebuilds Docker image via CodeBuild, rolls ECS
+bash scripts/redeploy.sh          # ~5 min, brief downtime during swap
 
 # After changing any site HTML
 bash scripts/3-publicar-site.sh   # uploads to S3, invalidates CloudFront
 
 # Full infrastructure redeploy (rarely needed)
-bash scripts/2-deploy.sh          # auto-detects migration mode vs fresh install
-bash scripts/2-deploy.sh --novo   # force fresh install (skip data migration)
+bash scripts/2-deploy.sh
 ```
 
-**Infrastructure (v2 — PostgreSQL edition):**
-- ECS Fargate: 1 vCPU / 2 GB RAM, `WEB_CONCURRENCY=2` uvicorn workers
-- Database: PostgreSQL 15 on RDS `db.t3.micro` (replaces SQLite/EFS)
-- Rolling deployments: `minimum_healthy_percent=100`, `maximum_percent=200` — zero downtime
-- **Multiple replicas are now safe** — PostgreSQL supports concurrent writers
-- Stateful resource: RDS instance `workpulse-prod-pg` (encrypted, 7-day backups)
-- License key: stored in Secrets Manager (`workpulse-prod/license-key-b64`), not on disk
-
-**`2-deploy.sh` — 3-phase migration logic:**
-- FASE A: Creates RDS + builds Docker image (targeted `terraform apply`)
-- FASE B: Migrates data SQLite → PostgreSQL (only if EFS detected, via `migrar-dados.sh`)
-- FASE C: Full `terraform apply` — updates ECS to PostgreSQL, destroys EFS
-
-**Terraform init required** before running `terraform` commands directly in `infra/`:
-```bash
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-terraform init -reconfigure \
-  -backend-config="bucket=workpulse-tfstate-${ACCOUNT_ID}" \
-  -backend-config="key=prod/terraform.tfstate" \
-  -backend-config="region=us-east-1" \
-  -backend-config="dynamodb_table=workpulse-tf-locks" \
-  -backend-config="encrypt=true"
-```
+**Infrastructure:** Single ECS Fargate task (1 instance) → SQLite on EFS. Never run multiple replicas — SQLite does not support concurrent writers. The EFS volume at `/data/workpulse.db` is the only stateful resource.
 
 ---
 
@@ -142,57 +119,36 @@ _CACHE_TTL = 90  # seconds
 
 Cache keys are namespaced `"{tenant}:{endpoint}:{params}"`. Call `_cache_bust(tenant)` after any write (ingest, PATCH, DELETE) to invalidate. Heavy endpoints (`workforce_overview`, `team_summary`) check/set cache. Do not cache admin-only endpoints.
 
-### Database patterns (PostgreSQL / psycopg2)
+### Database patterns
 
-The database is **PostgreSQL 15 on RDS**. The `db()` context manager uses a `ThreadedConnectionPool` (minconn=2, maxconn=10) and yields a `_PGConn` wrapper that mimics the sqlite3 cursor API:
-
+Always use the `db()` context manager — it opens/closes connection and sets WAL mode:
 ```python
 with db() as c:
-    rows = c.execute("SELECT ...", (param,)).fetchall()  # returns list of RealDictRow
+    rows = c.execute("SELECT ...", (param,)).fetchall()
     return [dict(r) for r in rows]
 ```
 
-**SQL differences from SQLite:**
-
-| SQLite | PostgreSQL |
-|---|---|
-| `?` placeholders | `%s` placeholders |
-| `json_extract(data_json,'$.app')` | `data_json->>'app'` |
-| `INSERT OR IGNORE` | `INSERT ... ON CONFLICT (col) DO NOTHING` |
-| `last_insert_rowid()` | `RETURNING id` |
-| `INTEGER PRIMARY KEY` | `BIGSERIAL PRIMARY KEY` |
-| `TEXT` for JSON | `JSONB` (indexed, queryable) |
-
-**Schema changes** go in `_SCHEMA_STMTS` list in `init_db()`. Each statement runs independently. For `ALTER TABLE` on existing databases, wrap with a `DO $$ BEGIN ... EXCEPTION WHEN duplicate_column THEN NULL; END $$;` block.
-
-**JSONB expression indexes** (critical for performance — replaces full table scans):
-```sql
-CREATE INDEX IF NOT EXISTS idx_events_app   ON events((data_json->>'app'));
-CREATE INDEX IF NOT EXISTS idx_events_title ON events((data_json->>'title'));
+**Schema migrations** go in `init_db()` with `PRAGMA table_info` guards:
+```python
+cols = [r["name"] for r in c.execute("PRAGMA table_info(table_name)").fetchall()]
+if "new_col" not in cols:
+    c.execute("ALTER TABLE table_name ADD COLUMN new_col TYPE DEFAULT val")
 ```
+
+New tables also go into the `SCHEMA` constant (for fresh installs) **and** as `CREATE TABLE IF NOT EXISTS` in `init_db()` (for existing databases).
 
 ### Adding a new endpoint — checklist
 
 1. Add Pydantic model if needed (after `DepartmentCreate`)
 2. Add route function with correct `Depends()`
-3. Use `%s` placeholders and `data_json->>'field'` for JSONB queries
-4. Call `_cache_bust(tenant)` if the endpoint writes data
-5. Call `audit(actor, action, target, detail, ip)` for any destructive or sensitive operation
-6. Place before `# Entry point` section
-7. Validate with `python3 -m py_compile server/main.py`
+3. Call `_cache_bust(tenant)` if the endpoint writes data
+4. Call `audit(actor, action, target, detail, ip)` for any destructive or sensitive operation
+5. Place before `# Entry point` section
+6. Validate with `python3 -m py_compile`
 
 ### Background worker
 
 `_retention_worker()` runs as an asyncio task started in `lifespan`. It sleeps 24 h between runs. Archives old events to `daily_summaries` then deletes them, per-tenant retention policy (`tenants.retention_days`, default 90).
-
-### License key management
-
-The Ed25519 private key is loaded once at startup by `load_or_create_keypair()` and **cached in `_cached_privkey`** (module-level). Priority:
-1. Reads from Secrets Manager directly (`workpulse-prod/license-key-b64`) — source of truth
-2. Falls back to env var `WORKPULSE_LICENSE_PRIVKEY_B64` (injected at ECS task launch)
-3. Generates a new key on first boot and stores in Secrets Manager
-
-The task IAM role needs both `GetSecretValue` and `PutSecretValue` on the license key secret (already configured in `aws_iam_role_policy.ecs_task_secrets`).
 
 ---
 
@@ -204,16 +160,13 @@ The task IAM role needs both `GetSecretValue` and `PutSecretValue` on the licens
 | `licenses` | Ed25519-signed tokens issued to agents. `revoked` flag |
 | `users` | One row per `(tenant_id, user_id)`. `user_id` = hostname. Has `display_name`, `login_user`, `department`, `role` |
 | `devices` | One row per device (hostname + OS metadata) |
-| `events` | Raw activity events. `bucket` ∈ `{window, afk}`. `data_json JSONB` holds `{app, title}` or `{status}` |
+| `events` | Raw activity events. `bucket` ∈ `{window, afk}`. `data_json` holds `{app, title}` or `{status}` |
 | `productivity_rules` | Pattern-matching rules per tenant. Evaluated in `created_at` order, first match wins |
 | `tenant_departments` | Department names per tenant. UNIQUE(tenant_id, name) |
 | `daily_summaries` | Archived aggregates for events older than retention cutoff |
 | `audit_log` | Admin action audit trail |
 
-**Key indexes:**
-- `idx_events_tenant_bucket_ts ON events(tenant_id, bucket, ts)` — hot path for dashboard queries
-- `idx_events_app ON events((data_json->>'app'))` — JSONB expression index, eliminates full table scans
-- `idx_events_title ON events((data_json->>'title'))` — same for title-based queries
+**Key indexes:** `(tenant_id, bucket, ts)` is the hot path for most dashboard queries.
 
 **user_id convention:** Since Session 7 — stored as bare hostname (e.g., `DESKTOP-ABC`). Legacy records may have `TENANTID:HOSTNAME` format; `cleanUserId()` in the frontend strips the prefix client-side.
 
@@ -427,31 +380,11 @@ Headers: `Authorization: Bearer <license_token>`, `X-Tenant: <tenant_id>`, `X-De
 
 ## Infra Quick Reference
 
-| Resource | Value |
-|---|---|
-| ECS Cluster | `workpulse-prod` |
-| ECS Service | `workpulse-prod-server` |
-| RDS Identifier | `workpulse-prod-pg` |
-| RDS Engine | PostgreSQL 15, `db.t3.micro`, 20 GB gp2 |
-| CloudWatch Logs | `/aws/ecs/workpulse-prod-server` |
-| Image Build | CodeBuild `workpulse-prod-image-build` |
-| Admin token | `cd infra && terraform output -raw admin_token` |
-| DB password | AWS Secrets Manager → `workpulse-prod/db-password` |
-| License key | AWS Secrets Manager → `workpulse-prod/license-key-b64` |
-| ECS CPU/RAM | 1024 CPU units (1 vCPU) / 2048 MB |
-| Workers | 2 uvicorn workers (`WEB_CONCURRENCY=2`) |
+- **ECS Cluster:** `workpulse-prod` / Service: `workpulse-prod-server`
+- **SQLite path in container:** `/data/workpulse.db` (EFS mount)
+- **Logs:** CloudWatch → `/aws/ecs/workpulse-prod-server`
+- **Image build:** CodeBuild project `workpulse-prod-image-build`
+- **Admin token:** `cd infra && terraform output -raw admin_token`
+- **Single instance only** — SQLite cannot handle concurrent writes; never scale above 1 task
 
-**Scaling:** Multiple ECS tasks are safe — PostgreSQL supports concurrent writers. The ECS service is configured with `minimum_healthy_percent=100`, `maximum_percent=200` for zero-downtime rolling deploys.
-
-**Get RDS endpoint:**
-```bash
-cd workpulse-deploy/infra && terraform output -raw rds_endpoint
-```
-
-**Connect to RDS for debugging** (from a bastion or via ECS Exec):
-```bash
-# Enable ECS Exec
-aws ecs update-service --cluster workpulse-prod --service workpulse-prod-server --enable-execute-command
-TASK=$(aws ecs list-tasks --cluster workpulse-prod --service-name workpulse-prod-server --query 'taskArns[0]' --output text)
-aws ecs execute-command --cluster workpulse-prod --task "$TASK" --container server --interactive --command "python3 -c \"import os,psycopg2; c=psycopg2.connect(host=os.environ['DB_HOST'],dbname='workpulse',user='workpulse',password=os.environ['DB_PASSWORD']); print(c.cursor().execute('SELECT count(*) FROM tenants').fetchone())\""
-```
+To migrate to PostgreSQL later, the schema is compatible. The `db()` context manager is the only place to change.

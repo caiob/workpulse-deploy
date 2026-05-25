@@ -918,4 +918,59 @@ resource "aws_cloudwatch_metric_alarm" "no_healthy_hosts" {
   period              = 60
   statistic           = "Minimum"
   threshold           = 1
-  treat_missing_data  = "breachi
+  treat_missing_data  = "breaching"
+  dimensions = {
+    LoadBalancer = aws_lb.main.arn_suffix
+    TargetGroup  = aws_lb_target_group.server.arn_suffix
+  }
+  alarm_actions = [aws_sns_topic.alerts.arn]
+  ok_actions    = [aws_sns_topic.alerts.arn]
+}
+
+resource "aws_cloudwatch_metric_alarm" "ecs_cpu" {
+  alarm_name          = "${local.name_prefix}-ecs-cpu-alta"
+  alarm_description   = "CPU do servidor acima de 80% por 15 minutos"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 3
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/ECS"
+  period              = 300
+  statistic           = "Average"
+  threshold           = 80
+  treat_missing_data  = "notBreaching"
+  dimensions = {
+    ClusterName = aws_ecs_cluster.main.name
+    ServiceName = aws_ecs_service.server.name
+  }
+  alarm_actions = [aws_sns_topic.alerts.arn]
+}
+
+resource "aws_cloudwatch_metric_alarm" "rds_cpu" {
+  alarm_name          = "${local.name_prefix}-rds-cpu-alta"
+  alarm_description   = "CPU do banco acima de 80% por 15 minutos"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 3
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/RDS"
+  period              = 300
+  statistic           = "Average"
+  threshold           = 80
+  treat_missing_data  = "notBreaching"
+  dimensions          = { DBInstanceIdentifier = aws_db_instance.main.identifier }
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+}
+
+resource "aws_cloudwatch_metric_alarm" "rds_storage" {
+  alarm_name          = "${local.name_prefix}-rds-storage-baixo"
+  alarm_description   = "Menos de 5 GB livres no banco"
+  comparison_operator = "LessThanThreshold"
+  evaluation_periods  = 1
+  metric_name         = "FreeStorageSpace"
+  namespace           = "AWS/RDS"
+  period              = 300
+  statistic           = "Average"
+  threshold           = 5368709120  # 5 GB em bytes
+  treat_missing_data  = "notBreaching"
+  dimensions          = { DBInstanceIdentifier = aws_db_instance.main.identifier }
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+}

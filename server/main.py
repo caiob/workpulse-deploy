@@ -1314,6 +1314,7 @@ def create_productivity_rule(tenant: str, rule: ProductivityRuleCreate):
         ).fetchone()
         row_id = row["id"]
 
+    _cache_bust(tenant)
     return {"id": row_id, "tenant_id": tenant, **rule.model_dump(), "created_at": now_iso}
 
 
@@ -1326,6 +1327,7 @@ def delete_productivity_rule(rule_id: int, tenant: str):
         )
         if cur.rowcount == 0:
             raise HTTPException(status_code=404, detail="rule not found")
+    _cache_bust(tenant)
     return {"deleted": rule_id}
 
 
