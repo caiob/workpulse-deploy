@@ -943,7 +943,9 @@ def user_summary(user_id: str, tenant: str, days: int = 7):
 
         daily = c.execute(
             """SELECT substr(ts, 1, 10) AS day,
-                      SUM(CASE WHEN bucket='window' THEN duration_sec ELSE 0 END) AS active
+                      SUM(CASE WHEN bucket='window' THEN duration_sec ELSE 0 END) AS active,
+                      SUM(CASE WHEN bucket='afk' AND data_json->>'status'='afk'
+                               THEN duration_sec ELSE 0 END) AS afk
                FROM events WHERE tenant_id=%s AND user_id=%s AND ts>=%s
                GROUP BY day ORDER BY day""",
             (tenant, user_id, since),
@@ -956,6 +958,7 @@ def user_summary(user_id: str, tenant: str, days: int = 7):
         "afk_seconds":    totals["afk"]    or 0,
         "top_apps": [dict(r) for r in top_apps],
         "daily":    [dict(r) for r in daily],
+        "by_day":   [dict(r) for r in daily],
     }
 
 
@@ -1556,11 +1559,14 @@ def admin_list_tenants():
     with db() as c:
         rows = c.execute(
             """SELECT t.id, t.name, t.plan, t.status, t.created_at, t.retention_days,
-                      COUNT(DISTINCT l.lic_id) AS licenses,
-                      COUNT(DISTINCT u.user_id) AS users
+                      COUNT(DISTINCT l.lic_id)    AS active_licenses,
+                      COUNT(DISTINCT u.user_id)   AS users,
+                      COUNT(DISTINCT d.device_id) AS devices,
+                      MAX(u.last_seen)            AS last_activity
                FROM tenants t
                LEFT JOIN licenses l ON l.tenant_id = t.id AND l.revoked = 0
-               LEFT JOIN users u ON u.tenant_id = t.id
+               LEFT JOIN users    u ON u.tenant_id = t.id
+               LEFT JOIN devices  d ON d.tenant_id = t.id
                GROUP BY t.id, t.name, t.plan, t.status, t.created_at, t.retention_days
                ORDER BY t.created_at DESC""",
         ).fetchall()
@@ -1575,20 +1581,72 @@ def admin_list_licenses():
                FROM licenses l LEFT JOIN tenants t ON t.id = l.tenant_id
                ORDER BY l.issued DESC""",
         ).fetchall()
-    return {"licenses": [dict(r) for r in rows]}
+    now = dt.datetime.now(dt.timezone.utc)
+    licenses = []
+    for r in rows:
+        d = dict(r)
+        try:
+            exp = dt.datetime.fromisoformat(str(d["expires"]).replace("Z", "+00:00"))
+            delta = exp - now
+            d["days_remaining"] = delta.days
+            d["expired"] = delta.total_seconds() < 0
+        except Exception:
+            d["days_remaining"] = None
+            d["expired"] = False
+        licenses.append(d)
+    return {"licenses": licenses}
 
 
 @app.get("/v1/admin/stats", dependencies=[Depends(require_admin)])
 def admin_stats():
+    now = dt.datetime.now(dt.timezone.utc)
+    h24 = (now - dt.timedelta(hours=24)).isoformat()
+    d7  = (now - dt.timedelta(days=7)).isoformat()
     with db() as c:
-        tenants  = c.execute("SELECT COUNT(*) AS n FROM tenants").fetchone()["n"]
-        users    = c.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
-        events   = c.execute("SELECT COUNT(*) AS n FROM events").fetchone()["n"]
-        licenses = c.execute("SELECT COUNT(*) AS n FROM licenses WHERE revoked=0").fetchone()["n"]
-        devices  = c.execute("SELECT COUNT(*) AS n FROM devices").fetchone()["n"]
+        tenants = c.execute("SELECT COUNT(*) AS n FROM tenants").fetchone()["n"]
+        users   = c.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
+        devices = c.execute("SELECT COUNT(*) AS n FROM devices").fetchone()["n"]
+        events  = c.execute("SELECT COUNT(*) AS n FROM events").fetchone()["n"]
+        lic_act = c.execute("SELECT COUNT(*) AS n FROM licenses WHERE revoked=0").fetchone()["n"]
+        lic_rev = c.execute("SELECT COUNT(*) AS n FROM licenses WHERE revoked=1").fetchone()["n"]
+        ev_24h  = c.execute("SELECT COUNT(*) AS n FROM events WHERE ts>=%s", (h24,)).fetchone()["n"]
+        ev_7d   = c.execute("SELECT COUNT(*) AS n FROM events WHERE ts>=%s", (d7,)).fetchone()["n"]
+        per_hour = c.execute(
+            """SELECT substr(ts,1,13) AS hour, COUNT(*) AS events
+               FROM events WHERE ts>=%s GROUP BY hour ORDER BY hour""",
+            (h24,),
+        ).fetchall()
+        os_dist = c.execute(
+            """SELECT COALESCE(os,'desconhecido') AS os, COUNT(*) AS n
+               FROM devices GROUP BY os ORDER BY n DESC""",
+        ).fetchall()
+        plan_dist = c.execute(
+            """SELECT COALESCE(plan,'starter') AS plan, COUNT(*) AS n
+               FROM tenants GROUP BY plan ORDER BY n DESC""",
+        ).fetchall()
+        try:
+            db_size = c.execute(
+                "SELECT pg_database_size(current_database()) AS n"
+            ).fetchone()["n"]
+        except Exception:
+            db_size = 0
     return {
-        "tenants": tenants, "users": users, "events": events,
-        "active_licenses": licenses, "devices": devices,
+        "version":      APP_VERSION,
+        "server_time":  now.isoformat(),
+        "db_size_bytes": db_size or 0,
+        "counts": {
+            "tenants":          tenants,
+            "users":            users,
+            "devices":          devices,
+            "total_events":     events,
+            "active_licenses":  lic_act,
+            "revoked_licenses": lic_rev,
+        },
+        "events_last_24h": ev_24h,
+        "events_last_7d":  ev_7d,
+        "ingest_per_hour": [{"hour": r["hour"], "events": r["events"]} for r in per_hour],
+        "os_distribution":   [dict(r) for r in os_dist],
+        "plan_distribution": [dict(r) for r in plan_dist],
     }
 
 
