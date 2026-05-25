@@ -60,4 +60,4 @@ aws ecs wait services-stable --cluster "$CLUSTER" --services "$SERVICE"
 echo
 echo "============================================================"
 echo " Servidor atualizado com sucesso (sem downtime)."
-echo "============================================================"
+echo "==================================

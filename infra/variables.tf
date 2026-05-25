@@ -59,11 +59,4 @@ variable "db_instance_class" {
 variable "db_name" {
   description = "Nome do banco de dados PostgreSQL."
   type        = string
-  default     = "workpulse"
-}
-
-variable "db_username" {
-  description = "Usuário master do PostgreSQL."
-  type        = string
-  default     = "workpulse"
-}
+  defaul

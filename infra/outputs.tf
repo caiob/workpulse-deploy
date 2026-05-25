@@ -64,11 +64,4 @@ output "rds_identifier" {
 
 output "admin_token" {
   description = "Token de administração — necessário para entrar nos dashboards."
-  value       = random_password.admin_token.result
-  sensitive   = true
-}
-
-output "license_key_secret_arn" {
-  description = "ARN do secret da chave de licença (usado pelo script de migração)."
-  value       = aws_secretsmanager_secret.license_key.arn
-}
+  value       = random_password.

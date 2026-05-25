@@ -67,7 +67,7 @@ import sys
 import threading
 import time
 from contextlib import asynccontextmanager, contextmanager
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 import psycopg2
 import psycopg2.errors
@@ -371,16 +371,53 @@ def _store_license_key_in_sm(pem: bytes) -> None:
         print(f"[license] AVISO: não foi possível gravar no Secrets Manager: {exc}", flush=True)
 
 
-def load_or_create_keypair() -> Ed25519PrivateKey:
-    """Carrega a chave de licença da variável de ambiente; gera uma nova no 1º boot."""
-    key_b64 = LICENSE_KEY_B64.strip()
+# Cache em memória — cada processo worker carrega a chave UMA vez no startup.
+_cached_privkey: "Ed25519PrivateKey | None" = None
 
-    # Placeholder do Terraform — tratar como ausente
+
+def load_or_create_keypair() -> "Ed25519PrivateKey":
+    """Carrega a chave de licença.
+
+    Prioridade:
+      1. Cache em memória (evita regeneração a cada request)
+      2. Secrets Manager diretamente (env var pode ter sido injetada com placeholder)
+      3. Variável de ambiente WORKPULSE_LICENSE_PRIVKEY_B64
+      4. Gera nova chave e grava no SM (único boot sem chave prévia)
+    """
+    global _cached_privkey
+    if _cached_privkey is not None:
+        return _cached_privkey
+
+    # 1. Secrets Manager — fonte autoritativa; ignora env var stale
+    if LICENSE_KEY_SECRET_ARN:
+        try:
+            import boto3
+            sm_client = boto3.client("secretsmanager")
+            resp = sm_client.get_secret_value(SecretId=LICENSE_KEY_SECRET_ARN)
+            sm_b64 = resp.get("SecretString", "").strip()
+            if sm_b64 and sm_b64 != "PLACEHOLDER":
+                pem = base64.b64decode(sm_b64)
+                _cached_privkey = cast(
+                    "Ed25519PrivateKey",
+                    serialization.load_pem_private_key(pem, password=None),
+                )
+                print("[license] Chave de licença carregada do Secrets Manager.", flush=True)
+                return _cached_privkey
+        except Exception as exc:
+            print(f"[license] AVISO: não foi possível ler chave do SM: {exc}", flush=True)
+
+    # 2. Variável de ambiente (fallback para testes/dev)
+    key_b64 = LICENSE_KEY_B64.strip()
     if key_b64 and key_b64 != "PLACEHOLDER":
         pem = base64.b64decode(key_b64)
-        return serialization.load_pem_private_key(pem, password=None)
+        _cached_privkey = cast(
+            "Ed25519PrivateKey",
+            serialization.load_pem_private_key(pem, password=None),
+        )
+        print("[license] Chave de licença carregada da variável de ambiente.", flush=True)
+        return _cached_privkey
 
-    # Gera nova chave (instalação limpa ou migração ainda não executada)
+    # 3. Gera nova chave (único boot real sem chave prévia)
     priv = Ed25519PrivateKey.generate()
     pem = priv.private_bytes(
         encoding=serialization.Encoding.PEM,
@@ -395,6 +432,7 @@ def load_or_create_keypair() -> Ed25519PrivateKey:
         file=sys.stderr, flush=True,
     )
     _store_license_key_in_sm(pem)
+    _cached_privkey = priv
     return priv
 
 

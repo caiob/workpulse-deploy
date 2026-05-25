@@ -530,13 +530,16 @@ resource "aws_iam_role" "ecs_task" {
 }
 
 resource "aws_iam_role_policy" "ecs_task_secrets" {
-  name = "license-key-write"
+  name = "license-key-readwrite"
   role = aws_iam_role.ecs_task.id
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Effect   = "Allow"
-      Action   = ["secretsmanager:PutSecretValue"]
+      Effect = "Allow"
+      Action = [
+        "secretsmanager:GetSecretValue",
+        "secretsmanager:PutSecretValue",
+      ]
       Resource = [aws_secretsmanager_secret.license_key.arn]
     }]
   })
@@ -719,8 +722,8 @@ resource "aws_acm_certificate" "cdn" {
 resource "aws_route53_record" "cert_validation" {
   for_each = {
     for dvo in concat(
-      aws_acm_certificate.alb.domain_validation_options,
-      aws_acm_certificate.cdn.domain_validation_options,
+      tolist(aws_acm_certificate.alb.domain_validation_options),
+      tolist(aws_acm_certificate.cdn.domain_validation_options),
     ) : dvo.domain_name => {
       name   = dvo.resource_record_name
       record = dvo.resource_record_value
@@ -915,59 +918,4 @@ resource "aws_cloudwatch_metric_alarm" "no_healthy_hosts" {
   period              = 60
   statistic           = "Minimum"
   threshold           = 1
-  treat_missing_data  = "breaching"
-  dimensions = {
-    LoadBalancer = aws_lb.main.arn_suffix
-    TargetGroup  = aws_lb_target_group.server.arn_suffix
-  }
-  alarm_actions = [aws_sns_topic.alerts.arn]
-  ok_actions    = [aws_sns_topic.alerts.arn]
-}
-
-resource "aws_cloudwatch_metric_alarm" "ecs_cpu" {
-  alarm_name          = "${local.name_prefix}-ecs-cpu-alta"
-  alarm_description   = "CPU do servidor acima de 80% por 15 minutos"
-  comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = 3
-  metric_name         = "CPUUtilization"
-  namespace           = "AWS/ECS"
-  period              = 300
-  statistic           = "Average"
-  threshold           = 80
-  treat_missing_data  = "notBreaching"
-  dimensions = {
-    ClusterName = aws_ecs_cluster.main.name
-    ServiceName = aws_ecs_service.server.name
-  }
-  alarm_actions = [aws_sns_topic.alerts.arn]
-}
-
-resource "aws_cloudwatch_metric_alarm" "rds_cpu" {
-  alarm_name          = "${local.name_prefix}-rds-cpu-alta"
-  alarm_description   = "CPU do banco acima de 80% por 15 minutos"
-  comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = 3
-  metric_name         = "CPUUtilization"
-  namespace           = "AWS/RDS"
-  period              = 300
-  statistic           = "Average"
-  threshold           = 80
-  treat_missing_data  = "notBreaching"
-  dimensions          = { DBInstanceIdentifier = aws_db_instance.main.identifier }
-  alarm_actions       = [aws_sns_topic.alerts.arn]
-}
-
-resource "aws_cloudwatch_metric_alarm" "rds_storage" {
-  alarm_name          = "${local.name_prefix}-rds-storage-baixo"
-  alarm_description   = "Menos de 5 GB livres no banco"
-  comparison_operator = "LessThanThreshold"
-  evaluation_periods  = 1
-  metric_name         = "FreeStorageSpace"
-  namespace           = "AWS/RDS"
-  period              = 300
-  statistic           = "Average"
-  threshold           = 5368709120  # 5 GB em bytes
-  treat_missing_data  = "notBreaching"
-  dimensions          = { DBInstanceIdentifier = aws_db_instance.main.identifier }
-  alarm_actions       = [aws_sns_topic.alerts.arn]
-}
+  treat_missing_data  = "breachi
