@@ -709,6 +709,10 @@
           <option value="afk">afk</option>
         </select>
       </div>
+      <div style="display:flex;align-items:center;gap:8px;margin-left:4px">
+        <input type="checkbox" id="evCollapse" checked style="accent-color:var(--primary);width:15px;height:15px;cursor:pointer">
+        <label for="evCollapse" style="color:var(--text-dim);font-size:13px;cursor:pointer;user-select:none">Agrupar sessões</label>
+      </div>
       <div class="spacer"></div>
       <button class="ghost" onclick="loadEvents()">↻ Buscar</button>
     </div>
@@ -1764,6 +1768,35 @@ function quickRule(pattern, field) {
 // =====================================================================
 // EVENTOS — coleta completa com categorias
 // =====================================================================
+
+// Agrupa eventos consecutivos com mesmo user_id + app + title em uma
+// única linha de sessão, somando a duração. Eventos chegam ordenados
+// por ts DESC (mais recente primeiro), então o último item de cada
+// grupo é o início real da sessão — usado como timestamp exibido.
+function collapseEvents(events) {
+  if (!events.length) return events;
+  const merged = [];
+  let cur = { ...events[0], _count: 1, _ts_display: events[0].ts };
+
+  for (let i = 1; i < events.length; i++) {
+    const e = events[i];
+    const sameUser  = cur.user_id === e.user_id;
+    const sameApp   = ((cur.data || {}).app   || '') === ((e.data || {}).app   || '');
+    const sameTitle = ((cur.data || {}).title || '') === ((e.data || {}).title || '');
+
+    if (sameUser && sameApp && sameTitle) {
+      cur.duration_sec = (cur.duration_sec || 0) + (e.duration_sec || 0);
+      cur._count++;
+      cur._ts_display = e.ts; // timestamp mais antigo = início da sessão
+    } else {
+      merged.push(cur);
+      cur = { ...e, _count: 1, _ts_display: e.ts };
+    }
+  }
+  merged.push(cur);
+  return merged;
+}
+
 async function loadEvents() {
   await _populateUserDropdown('evUser');
   const days   = document.getElementById('evDays').value;
@@ -1794,9 +1827,20 @@ async function loadEvents() {
     drawEvDailyChart(summary.daily || []);
 
     // ---- Table ----
-    const events = evData.events || [];
-    const label  = document.getElementById('evCountLabel');
-    if (label) label.textContent = events.length ? `— ${events.length} eventos` : '';
+    const rawEvents = evData.events || [];
+    const doCollapse = document.getElementById('evCollapse')?.checked !== false;
+    const events = doCollapse ? collapseEvents(rawEvents) : rawEvents;
+
+    const label = document.getElementById('evCountLabel');
+    if (label) {
+      if (!rawEvents.length) {
+        label.textContent = '';
+      } else if (doCollapse && events.length < rawEvents.length) {
+        label.textContent = `— ${events.length} sessões (${rawEvents.length} eventos agrupados)`;
+      } else {
+        label.textContent = `— ${rawEvents.length} eventos`;
+      }
+    }
 
     const tb = document.querySelector('#eventsTable tbody');
     if (!events.length) {
@@ -1813,12 +1857,20 @@ async function loadEvents() {
       const cat        = e.category || 'uncategorized';
       const pill       = CAT_PILLS[cat] || CAT_PILLS.uncategorized;
 
+      // Timestamp: se colapsado, mostra início da sessão; senão, ts original
+      const tsDisplay = e._ts_display || e.ts;
+
+      // Badge de sessão agrupada
+      const countBadge = (e._count > 1)
+        ? `<span style="margin-left:6px;font-size:10px;color:var(--text-muted);background:var(--bg-2);border:1px solid var(--border-soft);border-radius:999px;padding:1px 7px">${e._count}×</span>`
+        : '';
+
       // Build quickRule params — prefer app field, fallback to title
       const pattern   = (app || d.title || '').replace(/'/g, "\\'").slice(0, 60);
       const ruleField = app ? 'app' : 'title';
 
       return `<tr>
-        <td style="white-space:nowrap;font-size:12px">${new Date(e.ts).toLocaleString('pt-BR')}</td>
+        <td style="white-space:nowrap;font-size:12px">${new Date(tsDisplay).toLocaleString('pt-BR')}${countBadge}</td>
         <td>${cleanUserId(e.user_id)}</td>
         <td>${fmtSec(e.duration_sec)}</td>
         <td style="max-width:380px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"

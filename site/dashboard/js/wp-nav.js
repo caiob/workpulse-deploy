@@ -1,0 +1,103 @@
+// =====================================================================
+// wp-nav.js — Navegação por abas com dropdowns
+//
+// Estrutura:
+//   Visão Geral  |  [Coletas ▾]  |  [Análises ▾]
+//   Coletas  → Pessoas, Departamentos, Eventos, Internet
+//   Análises → Alertas, Tendências
+//
+//   ACTIONS (topo direito):
+//   status • tenant • [⚙ ▾ → Configurações / Sair]
+// =====================================================================
+
+const TABS = ['overview', 'people', 'departments', 'alerts', 'trends', 'events', 'internet', 'config'];
+
+// Mapeamento tab → grupo de dropdown (null = standalone)
+const TAB_GROUP = {
+  people:      'coletas',
+  departments: 'coletas',
+  events:      'coletas',
+  internet:    'coletas',
+  alerts:      'analises',
+  trends:      'analises',
+};
+
+function switchTab(name) {
+  _cancelPending();
+
+  // Oculta todas as seções
+  TABS.forEach(t => {
+    const sec = document.getElementById('tab-' + t);
+    if (sec) sec.classList.add('hide');
+  });
+
+  // Exibe a seção alvo
+  const target = document.getElementById('tab-' + name);
+  if (target) target.classList.remove('hide');
+
+  // Atualiza botões standalone
+  document.querySelectorAll('nav.tabs > button[data-tab]').forEach(b => {
+    b.classList.toggle('active', b.dataset.tab === name);
+  });
+
+  // Atualiza triggers de dropdown e itens ativos dentro deles
+  document.querySelectorAll('.nav-dropdown[data-group]').forEach(dd => {
+    const group     = dd.dataset.group;
+    const isActive  = TAB_GROUP[name] === group;
+    const trigger   = dd.querySelector('.nav-dd-trigger');
+    if (trigger) trigger.classList.toggle('active', isActive);
+    dd.querySelectorAll('.nav-dropdown-menu button[data-tab]').forEach(b => {
+      b.classList.toggle('active-item', b.dataset.tab === name);
+    });
+  });
+
+  // Fecha qualquer dropdown aberto
+  document.querySelectorAll('.nav-dropdown.open').forEach(d => d.classList.remove('open'));
+
+  // Carrega conteúdo da aba
+  const loaders = {
+    overview:    loadOverview,
+    people:      loadPeople,
+    departments: loadDepartments,
+    alerts:      loadAlerts,
+    trends:      loadTrends,
+    internet:    loadInternet,
+    config:      loadConfig,
+  };
+  if (loaders[name]) loaders[name]();
+}
+
+// ---- Wiring dos botões ----
+// (scripts com defer: DOM já disponível ao executar)
+(function initNav() {
+  // Botões de aba (standalone e dentro de dropdowns)
+  document.querySelectorAll('[data-tab]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const tab = btn.dataset.tab;
+      if (tab) switchTab(tab);
+    });
+  });
+
+  // Click nos triggers de dropdown abre/fecha o menu
+  document.querySelectorAll('.nav-dd-trigger').forEach(trigger => {
+    trigger.addEventListener('click', e => {
+      e.stopPropagation();
+      const dd     = trigger.closest('.nav-dropdown');
+      if (!dd) return;
+      const isOpen = dd.classList.contains('open');
+      // Fecha todos antes de abrir outro
+      document.querySelectorAll('.nav-dropdown.open').forEach(d => d.classList.remove('open'));
+      if (!isOpen) dd.classList.add('open');
+    });
+  });
+
+  // Click fora fecha todos os dropdowns
+  document.addEventListener('click', () => {
+    document.querySelectorAll('.nav-dropdown.open').forEach(d => d.classList.remove('open'));
+  });
+
+  // Previne que clique dentro do menu feche o dropdown
+  document.querySelectorAll('.nav-dropdown-menu').forEach(menu => {
+    menu.addEventListener('click', e => e.stopPropagation());
+  });
+})();

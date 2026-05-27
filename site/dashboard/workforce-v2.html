@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WorkPulse — Painel do Cliente</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<link rel="stylesheet" href="css/workforce.css">
+<link rel="icon" type="image/jpeg" href="../assets/logo-workpulse.jpeg">
+</head>
+<body>
+
+<!-- Barra de loading global -->
+<div id="globalLoader" class="global-loader hide"></div>
+
+<!-- ===== MODAL DE LOGIN ===== -->
+<div id="login" class="login-shade">
+  <div class="login-box">
+    <h2>Painel do Cliente</h2>
+    <p>Acesso de gestor para acompanhar saúde, ritmo e atividade da equipe.</p>
+    <label>Endpoint da API</label>
+    <input id="loginUrl" value="https://api.workpulse.com.br" placeholder="https://api.workpulse.com.br">
+    <label>Tenant</label>
+    <input id="loginTenant" placeholder="acme-corp">
+    <label>Token de acesso</label>
+    <input id="loginToken" type="password" placeholder="token do painel (fornecido pelo administrador)"
+           onkeydown="if(event.key==='Enter') doLogin()">
+    <!-- Mensagem de erro (oculta inicialmente) -->
+    <div id="loginError" class="login-error"></div>
+    <div style="margin-top: 20px">
+      <button class="primary" style="width:100%" onclick="doLogin()">Entrar</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== TOPBAR ===== -->
+<header class="topbar">
+
+  <!-- Marca -->
+  <div class="brand">
+    <img src="../assets/logo-workpulse.jpeg" alt="WorkPulse" class="brand-logo">
+    WorkPulse
+    <span class="product">Painel</span>
+  </div>
+
+  <!-- Navegação principal com dropdowns -->
+  <nav class="tabs">
+
+    <!-- Standalone: Visão Geral -->
+    <button class="active" data-tab="overview">Visão Geral</button>
+
+    <!-- Dropdown: Coletas -->
+    <div class="nav-dropdown" data-group="coletas">
+      <button class="nav-dd-trigger">
+        Coletas <span class="dd-arrow">▾</span>
+      </button>
+      <div class="nav-dropdown-menu">
+        <button data-tab="people">👥 Pessoas</button>
+        <button data-tab="departments">🏢 Departamentos</button>
+        <button data-tab="events">⚡ Eventos</button>
+        <button data-tab="internet">🌐 Internet</button>
+      </div>
+    </div>
+
+    <!-- Dropdown: Análises -->
+    <div class="nav-dropdown" data-group="analises">
+      <button class="nav-dd-trigger">
+        Análises <span class="dd-arrow">▾</span>
+      </button>
+      <div class="nav-dropdown-menu">
+        <button data-tab="alerts">🔔 Alertas</button>
+        <button data-tab="trends">📈 Tendências</button>
+      </div>
+    </div>
+
+  </nav>
+
+  <!-- Ações (status + dropdown de conta) -->
+  <div class="actions">
+    <span><span class="led"></span><span id="apiStatus">conectado</span></span>
+    <span id="tenantPill" class="pill">tenant</span>
+
+    <!-- Dropdown de conta -->
+    <div class="nav-dropdown actions-dd">
+      <button class="actions-trigger nav-dd-trigger">
+        ⚙ <span class="dd-arrow">▾</span>
+      </button>
+      <div class="nav-dropdown-menu">
+        <button onclick="switchTab('config')">⚙ Configurações</button>
+        <hr class="menu-separator">
+        <button onclick="logout()">↩ Sair</button>
+      </div>
+    </div>
+  </div>
+
+</header>
+
+<!-- ===== CONTEÚDO PRINCIPAL ===== -->
+<main>
+
+  <!-- ── VISÃO GERAL ── -->
+  <section id="tab-overview">
+    <h1 class="page-title">Como sua <span class="em">equipe</span> está trabalhando.</h1>
+    <p class="page-sub">Visão consolidada de presença, foco e padrões de trabalho. Atualizado a cada minuto.</p>
+
+    <div class="toolbar">
+      <div><label>Período</label>
+        <select id="rangeDays" onchange="loadOverview()">
+          <option value="1">Hoje</option>
+          <option value="7" selected>Últimos 7 dias</option>
+          <option value="14">Últimas 2 semanas</option>
+          <option value="30">Últimos 30 dias</option>
+        </select>
+      </div>
+      <div class="spacer"></div>
+      <span id="lastRefreshLabel" style="color:var(--text-dim);font-size:12px;align-self:center"></span>
+      <div><label>Auto-refresh</label>
+        <select id="autoRefreshSel" onchange="setAutoRefresh()">
+          <option value="0" selected>Desativado</option>
+          <option value="120">2 min</option>
+          <option value="300">5 min</option>
+          <option value="600">10 min</option>
+        </select>
+      </div>
+      <button class="ghost" onclick="loadOverview()">↻ Atualizar</button>
+    </div>
+
+    <div class="grid">
+      <div class="card span-3"><h3>Online agora</h3>
+        <div class="stat" id="kpiOnline">—<small>pessoas</small></div>
+        <div class="stat-trend" id="kpiOnlineSub">—</div>
+      </div>
+      <div class="card span-3"><h3>Tempo ativo total</h3>
+        <div class="stat" id="kpiActive">—<small>h</small></div>
+        <div class="stat-trend" id="kpiActiveSub">—</div>
+      </div>
+      <div class="card span-3"><h3>Tempo de foco hoje</h3>
+        <div class="stat" id="kpiToday">—<small>h</small></div>
+        <div class="stat-trend">média do tenant</div>
+      </div>
+      <div class="card span-3"><h3>Aderência</h3>
+        <div class="stat" id="kpiAdh">—<small>%</small></div>
+        <div class="stat-trend">ativo / (ativo + AFK)</div>
+      </div>
+
+      <div class="card span-8 no-bar">
+        <h3>Horas trabalhadas por dia</h3>
+        <div style="height:260px"><canvas id="chartDaily"></canvas></div>
+      </div>
+      <div class="card span-4 no-bar">
+        <h3>Distribuição por departamento</h3>
+        <div id="deptList" style="margin-top:8px"></div>
+      </div>
+
+      <div class="card span-8 no-bar">
+        <h3>Tempo ativo por colaborador</h3>
+        <div style="height:260px"><canvas id="chartUsers"></canvas></div>
+      </div>
+      <div class="card span-4 no-bar">
+        <h3>Top aplicações</h3>
+        <div style="height:260px"><canvas id="chartApps"></canvas></div>
+      </div>
+
+      <div class="card span-12 no-bar">
+        <h3>Quando a equipe trabalha</h3>
+        <p style="font-size:12px;color:var(--text-dim);margin:4px 0 16px">
+          Distribuição agregada por hora do dia (UTC). Cores mais saturadas indicam concentração de atividade.
+        </p>
+        <div id="heatmap"></div>
+        <div class="heat-legend">
+          <span>menos</span>
+          <span class="swatch" style="background:rgba(108,140,255,.10)"></span>
+          <span class="swatch" style="background:rgba(108,140,255,.30)"></span>
+          <span class="swatch" style="background:rgba(108,140,255,.55)"></span>
+          <span class="swatch" style="background:rgba(108,140,255,.80)"></span>
+          <span class="swatch" style="background:rgba(108,140,255,1)"></span>
+          <span>mais</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── PESSOAS ── -->
+  <section id="tab-people" class="hide">
+    <h1 class="page-title">Cada <span class="em">pessoa</span>, em detalhe.</h1>
+    <p class="page-sub">Ranking de horas ativas, AFK e aderência. Clique em alguém para ver o desdobramento individual de 30 dias.</p>
+
+    <div class="toolbar">
+      <div style="flex:1"><label>Buscar</label>
+        <input id="peopleFilter" oninput="renderPeopleTable()" placeholder="nome, e-mail ou departamento" style="width:100%;max-width:360px">
+      </div>
+      <div><label>Período</label>
+        <select id="peopleRange" onchange="loadPeople()">
+          <option value="7" selected>Últimos 7 dias</option>
+          <option value="14">2 semanas</option>
+          <option value="30">30 dias</option>
+        </select>
+      </div>
+      <button class="ghost" onclick="loadPeople()">↻ Atualizar</button>
+    </div>
+
+    <div class="card no-bar">
+      <table id="peopleTable">
+        <thead>
+          <tr>
+            <th>Colaborador</th><th>Departamento</th><th>Ativo</th>
+            <th>AFK</th><th>Aderência</th><th>Última atividade</th><th></th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div id="drill" class="hide"></div>
+  </section>
+
+  <!-- ── DEPARTAMENTOS ── -->
+  <section id="tab-departments" class="hide">
+    <h1 class="page-title">Equilíbrio entre <span class="em">áreas</span>.</h1>
+    <p class="page-sub">Compare carga e ritmo entre departamentos. Útil para identificar áreas sobrecarregadas ou sub-equipadas.</p>
+
+    <div class="grid">
+      <div class="card span-7 no-bar">
+        <h3>Horas ativas por departamento (período atual)</h3>
+        <div style="height:320px"><canvas id="chartDept"></canvas></div>
+      </div>
+      <div class="card span-5 no-bar">
+        <h3>Resumo</h3>
+        <div id="deptSummary" style="margin-top:12px"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── ALERTAS ── -->
+  <section id="tab-alerts" class="hide">
+    <h1 class="page-title"><span class="em">Sinais</span> que merecem atenção.</h1>
+    <p class="page-sub">Identificamos automaticamente padrões de sobrecarga (&gt;10h/dia) e baixo engajamento (média &lt;2h/dia). Use como ponto de partida para conversas, não como veredicto.</p>
+
+    <div class="grid">
+      <div class="card span-6">
+        <h3 style="display:flex;align-items:center;gap:8px"><span class="pill danger">Sobrecarga</span> Possíveis casos de excesso</h3>
+        <p style="color:var(--text-dim);font-size:12px;margin:6px 0 14px">Pessoas que registraram pelo menos um dia com mais de 10h ativas no período.</p>
+        <div id="overworkList"></div>
+      </div>
+      <div class="card span-6">
+        <h3 style="display:flex;align-items:center;gap:8px"><span class="pill warn">Atenção</span> Possível baixo engajamento</h3>
+        <p style="color:var(--text-dim);font-size:12px;margin:6px 0 14px">Pessoas com média diária abaixo de 2h ativas. Pode indicar dificuldade técnica, perfil de função ou agentes desligados.</p>
+        <div id="underworkList"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── TENDÊNCIAS ── -->
+  <section id="tab-trends" class="hide">
+    <h1 class="page-title">A <span class="em">tendência</span> ao longo do tempo.</h1>
+    <p class="page-sub">Como a saúde da equipe evolui semana a semana — uma leitura mais lenta que a visão diária.</p>
+
+    <div class="toolbar">
+      <div><label>Período</label>
+        <select id="trendDays" onchange="loadTrends()">
+          <option value="14">2 semanas</option>
+          <option value="30" selected>30 dias</option>
+          <option value="90">90 dias</option>
+        </select>
+      </div>
+      <div class="spacer"></div>
+      <button class="ghost" onclick="loadTrends()">↻ Atualizar</button>
+    </div>
+
+    <div class="grid">
+      <div class="card span-12 no-bar">
+        <h3>Tempo ativo total da empresa</h3>
+        <div style="height:280px"><canvas id="chartTrendActive"></canvas></div>
+      </div>
+      <div class="card span-12 no-bar">
+        <h3>Tempo AFK (referência negativa)</h3>
+        <div style="height:240px"><canvas id="chartTrendAfk"></canvas></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── EVENTOS ── -->
+  <section id="tab-events" class="hide">
+    <h1 class="page-title">Eventos de <span class="em">atividade</span>.</h1>
+    <p class="page-sub">Coleta completa de atividade — todos os aplicativos usados, com classificação por categoria de produtividade. Clique em <em>Categorizar</em> para criar uma regra rapidamente.</p>
+
+    <div class="toolbar">
+      <div><label>Período</label>
+        <select id="evDays" onchange="loadEvents()">
+          <option value="1">Hoje</option>
+          <option value="7" selected>Últimos 7 dias</option>
+          <option value="15">15 dias</option>
+          <option value="30">30 dias</option>
+          <option value="60">60 dias</option>
+        </select>
+      </div>
+      <div><label>Usuário</label>
+        <select id="evUser" style="min-width:180px"><option value="">Todos os usuários</option></select>
+      </div>
+      <div><label>Bucket</label>
+        <select id="evBucket">
+          <option value="">window (padrão)</option>
+          <option value="afk">afk</option>
+        </select>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;margin-left:4px">
+        <input type="checkbox" id="evCollapse" checked style="accent-color:var(--primary);width:15px;height:15px;cursor:pointer">
+        <label for="evCollapse" style="color:var(--text-dim);font-size:13px;cursor:pointer;user-select:none">Agrupar sessões</label>
+      </div>
+      <div class="spacer"></div>
+      <button class="ghost" onclick="loadEvents()">↻ Buscar</button>
+    </div>
+
+    <div class="kpi-row">
+      <div class="kpi-card" style="border-top:3px solid var(--primary)">
+        <div class="kpi-val" id="kpiEvTotal">—</div><div class="kpi-label">Tempo total ativo</div>
+      </div>
+      <div class="kpi-card" style="border-top:3px solid #4ade80">
+        <div class="kpi-val" id="kpiEvProd">—</div><div class="kpi-label">Produtivo</div>
+      </div>
+      <div class="kpi-card" style="border-top:3px solid #f87171">
+        <div class="kpi-val" id="kpiEvUnprod">—</div><div class="kpi-label">Não-produtivo</div>
+      </div>
+      <div class="kpi-card" style="border-top:3px solid var(--warn)">
+        <div class="kpi-val" id="kpiEvUncat">—</div><div class="kpi-label">Não categorizado</div>
+      </div>
+    </div>
+
+    <div class="card no-bar" style="margin-bottom:18px">
+      <h3>Atividade por categoria — por dia</h3>
+      <p style="font-size:12px;color:var(--text-dim);margin:4px 0 14px">Tempo ativo por dia dividido por categoria de produtividade. Configure as categorias na aba <em>Configurações</em>.</p>
+      <div style="height:240px"><canvas id="chartEvDaily"></canvas></div>
+    </div>
+
+    <div class="card no-bar">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+        <div>
+          <h3 style="margin:0">Eventos recentes <span id="evCountLabel" style="color:var(--text-muted);font-weight:400;font-size:11px;margin-left:6px"></span></h3>
+          <p style="font-size:12px;color:var(--text-dim);margin:4px 0 0">Últimos 200 eventos do período.</p>
+        </div>
+      </div>
+      <table id="eventsTable">
+        <thead>
+          <tr><th>Quando</th><th>Usuário</th><th>Duração</th><th>Aplicativo / Título</th><th>Categoria</th><th></th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ── INTERNET ── -->
+  <section id="tab-internet" class="hide">
+    <h1 class="page-title">Acesso à <span class="em">Internet</span>.</h1>
+    <p class="page-sub">Análise de navegação — sites mais acessados, tempo por categoria e distribuição diária. Baseado no título das janelas do browser.</p>
+
+    <div class="toolbar">
+      <div><label>Período</label>
+        <select id="intDays" onchange="loadInternet()">
+          <option value="7" selected>Últimos 7 dias</option>
+          <option value="15">15 dias</option>
+          <option value="30">30 dias</option>
+          <option value="90">90 dias</option>
+        </select>
+      </div>
+      <div><label>Usuário</label>
+        <select id="intUser" style="min-width:200px"><option value="">Todos os usuários</option></select>
+      </div>
+      <div class="spacer"></div>
+      <button class="ghost" onclick="loadInternet()">↻ Atualizar</button>
+    </div>
+
+    <div class="kpi-row">
+      <div class="kpi-card" style="border-top:3px solid var(--primary)">
+        <div class="kpi-val" id="kpiIntTotal">—</div><div class="kpi-label">Tempo total no browser</div>
+      </div>
+      <div class="kpi-card" style="border-top:3px solid #4ade80">
+        <div class="kpi-val" id="kpiIntProd">—</div><div class="kpi-label">Produtivo</div>
+      </div>
+      <div class="kpi-card" style="border-top:3px solid #f87171">
+        <div class="kpi-val" id="kpiIntUnprod">—</div><div class="kpi-label">Não-produtivo</div>
+      </div>
+      <div class="kpi-card" style="border-top:3px solid var(--warn)">
+        <div class="kpi-val" id="kpiIntUncat">—</div><div class="kpi-label">Não categorizado</div>
+      </div>
+    </div>
+
+    <div class="card no-bar" style="margin-bottom:18px">
+      <h3>Navegação por categoria — por dia</h3>
+      <p style="font-size:12px;color:var(--text-dim);margin:4px 0 14px">Tempo total em browsers por dia, dividido por categoria de produtividade.</p>
+      <div style="height:240px"><canvas id="chartIntDaily"></canvas></div>
+    </div>
+
+    <div class="card no-bar">
+      <h3>Sites mais acessados</h3>
+      <p style="font-size:12px;color:var(--text-dim);margin:4px 0 14px">Extraído do título da janela do browser. Clique em <em>Categorizar</em> para criar uma regra rapidamente.</p>
+      <table id="intSitesTable">
+        <thead>
+          <tr><th>Site / Página</th><th>Categoria</th><th>Tempo total</th><th>% do browser</th><th>Usuários</th><th></th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ── CONFIGURAÇÕES ── -->
+  <section id="tab-config" class="hide">
+    <h1 class="page-title"><span class="em">Configurações</span>.</h1>
+    <p class="page-sub">Produtividade, departamentos, colaboradores e preferências de aparência.</p>
+
+    <!-- Card: Aparência / Tema -->
+    <div class="card no-bar" style="margin-bottom:18px">
+      <h3>Aparência</h3>
+      <div class="theme-toggle-card">
+        <button id="themeToggleBtn" class="theme-toggle-btn" onclick="toggleTheme()">☀️ Tema Claro</button>
+        <span style="color:var(--text-dim);font-size:13px">Alterna entre modo escuro e claro. Preferência salva automaticamente.</span>
+      </div>
+    </div>
+
+    <!-- Nova Regra -->
+    <div class="card no-bar" style="margin-bottom:18px">
+      <h3>Nova Regra de Produtividade</h3>
+      <p style="font-size:12px;color:var(--text-dim);margin:4px 0 16px">
+        Para sites: campo <em>Título do site</em> com padrão como <code>WhatsApp</code> ou <code>YouTube</code>.<br>
+        Para aplicativos: campo <em>Aplicativo</em> com o nome do executável como <code>teams.exe</code> ou <code>word.exe</code>.
+      </p>
+      <div class="config-form">
+        <div>
+          <label>Rótulo (nome amigável)</label>
+          <input id="ruleLabel" placeholder="ex: WhatsApp Web" style="min-width:200px">
+        </div>
+        <div>
+          <label>Campo</label>
+          <select id="ruleField">
+            <option value="title">Título do site</option>
+            <option value="app">Aplicativo (exe)</option>
+          </select>
+        </div>
+        <div>
+          <label>Padrão</label>
+          <input id="rulePattern" placeholder="ex: WhatsApp" style="min-width:180px">
+        </div>
+        <div>
+          <label>Tipo de busca</label>
+          <select id="ruleType">
+            <option value="contains">Contém</option>
+            <option value="exact">Exato</option>
+            <option value="startswith">Começa com</option>
+          </select>
+        </div>
+        <div>
+          <label>Categoria</label>
+          <select id="ruleCategory">
+            <option value="productive">✅ Produtivo</option>
+            <option value="unproductive">❌ Não-produtivo</option>
+            <option value="neutral">⚪ Neutro</option>
+          </select>
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button class="primary" onclick="saveRule()">Salvar Regra</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Regras Ativas -->
+    <div class="card no-bar" style="margin-bottom:18px">
+      <h3>Regras Ativas</h3>
+      <p style="font-size:12px;color:var(--text-dim);margin:4px 0 14px">Avaliadas em ordem — a primeira regra que casar é aplicada. Exclua e recrie para reordenar.</p>
+      <table id="rulesTable">
+        <thead>
+          <tr><th>Rótulo</th><th>Campo</th><th>Padrão</th><th>Tipo</th><th>Categoria</th><th></th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <!-- Apps/Sites detectados -->
+    <div class="card no-bar" style="margin-bottom:18px">
+      <h3>Aplicativos e Sites Detectados</h3>
+      <p style="font-size:12px;color:var(--text-dim);margin:4px 0 4px">Tudo que apareceu nos últimos 30 dias. 🌐 = browser. Clique para pré-preencher o formulário acima.</p>
+      <div style="margin-top:8px;margin-bottom:6px">
+        <label style="color:var(--text-dim);font-size:12px;margin-right:8px">Filtrar:</label>
+        <input id="appsFilter" oninput="filterApps()" placeholder="buscar app ou site..."
+          style="background:var(--bg-2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:12px">
+      </div>
+      <div id="appsList"><p style="color:var(--text-muted);font-size:13px">Carregando...</p></div>
+    </div>
+
+    <!-- Departamentos -->
+    <div class="card no-bar" style="margin-bottom:18px" id="deptsSection">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+        <div>
+          <h3 style="margin:0 0 4px;font-size:14px;font-weight:600;color:var(--text)">Departamentos</h3>
+          <p style="font-size:12px;color:var(--text-dim);margin:0">Crie departamentos e atribua colaboradores. O gráfico na aba Departamentos é alimentado por esta configuração.</p>
+        </div>
+        <button class="ghost" onclick="loadDepts()" style="white-space:nowrap">↻ Atualizar</button>
+      </div>
+
+      <div style="display:flex;gap:8px;margin-bottom:18px;align-items:flex-end">
+        <div style="flex:1">
+          <label style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;display:block;margin-bottom:4px">Nome do departamento</label>
+          <input id="newDeptName" placeholder="Ex: TI, Contabilidade, RH..."
+            style="width:100%;background:var(--bg-2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px 12px;font-size:13px"
+            onkeydown="if(event.key==='Enter') createDept()">
+        </div>
+        <button class="primary" onclick="createDept()" style="height:38px;padding:0 18px">+ Criar</button>
+      </div>
+
+      <div id="deptsList"><p style="color:var(--text-muted);font-size:13px">Carregando...</p></div>
+    </div>
+
+    <!-- Colaboradores -->
+    <div class="card no-bar" id="collabsSection">
+      <h3>Colaboradores</h3>
+      <p style="font-size:12px;color:var(--text-dim);margin:4px 0 14px">
+        Defina o nome amigável, e-mail, departamento e função para cada dispositivo monitorado.<br>
+        Quando o agente envia o nome de login do SO, ele é pré-preenchido automaticamente.
+      </p>
+
+      <!-- Formulário de edição inline -->
+      <div id="collabForm" class="config-form" style="display:none;padding:14px;background:var(--bg-2);border-radius:10px;margin-bottom:16px">
+        <input type="hidden" id="collabUserId">
+        <div>
+          <label>Device / ID</label>
+          <input id="collabDevice" disabled style="opacity:.5;min-width:160px">
+        </div>
+        <div>
+          <label>Nome amigável</label>
+          <input id="collabName" placeholder="Ex: João Silva" style="min-width:180px">
+        </div>
+        <div>
+          <label>E-mail</label>
+          <input id="collabEmail" type="email" placeholder="joao@empresa.com" style="min-width:180px">
+        </div>
+        <div>
+          <label>Departamento</label>
+          <input id="collabDept" list="deptDatalist" placeholder="Selecione ou digite..." style="min-width:160px" autocomplete="off">
+          <datalist id="deptDatalist"></datalist>
+        </div>
+        <div>
+          <label>Função</label>
+          <input id="collabRole" placeholder="Analista, Dev..." style="min-width:130px">
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <div style="display:flex;gap:8px">
+            <button class="primary" onclick="saveUser()">Salvar</button>
+            <button class="ghost" onclick="document.getElementById('collabForm').style.display='none'">Cancelar</button>
+          </div>
+        </div>
+      </div>
+
+      <table id="collabsTable">
+        <thead>
+          <tr><th>Device</th><th>Nome amigável</th><th>E-mail</th><th>Departamento</th><th>Função</th><th>Última atividade</th><th></th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <p class="footnote">WorkPulse · Painel do Cliente · Métricas baseadas em metadados de uso (sem captura de tela, sem keylogging).</p>
+</main>
+
+<div id="toast" class="toast hide"></div>
+
+<!-- ===== MÓDULOS JS (defer: executam após parse do DOM, em ordem) ===== -->
+<script src="js/wp-core.js" defer></script>
+<script src="js/wp-overview.js" defer></script>
+<script src="js/wp-people.js" defer></script>
+<script src="js/wp-departments.js" defer></script>
+<script src="js/wp-analytics.js" defer></script>
+<script src="js/wp-events.js" defer></script>
+<script src="js/wp-internet.js" defer></script>
+<script src="js/wp-settings.js" defer></script>
+<script src="js/wp-nav.js" defer></script>
+<script src="js/wp-auth.js" defer></script>
+
+</body>
+</html>
