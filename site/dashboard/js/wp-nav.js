@@ -3,14 +3,14 @@
 //
 // Estrutura:
 //   Visão Geral  |  [Coletas ▾]  |  [Análises ▾]
-//   Coletas  → Pessoas, Departamentos, Eventos, Internet
+//   Coletas  → Pessoas, Departamentos, Eventos, Internet, Jornada de Trabalho
 //   Análises → Alertas, Tendências
 //
 //   ACTIONS (topo direito):
 //   status • tenant • [⚙ ▾ → Configurações / Sair]
 // =====================================================================
 
-const TABS = ['overview', 'people', 'departments', 'alerts', 'trends', 'events', 'internet', 'config'];
+const TABS = ['overview', 'people', 'departments', 'alerts', 'trends', 'events', 'internet', 'jornada', 'config'];
 
 // Mapeamento tab → grupo de dropdown (null = standalone)
 const TAB_GROUP = {
@@ -18,6 +18,7 @@ const TAB_GROUP = {
   departments: 'coletas',
   events:      'coletas',
   internet:    'coletas',
+  jornada:     'coletas',
   alerts:      'analises',
   trends:      'analises',
 };
@@ -62,6 +63,7 @@ function switchTab(name) {
     alerts:      loadAlerts,
     trends:      loadTrends,
     internet:    loadInternet,
+    jornada:     loadJornada,
     config:      loadConfig,
   };
   if (loaders[name]) loaders[name]();

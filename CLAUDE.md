@@ -16,6 +16,10 @@ the file looks saved but is cut off partway through. Real incidents in this repo
 - `server/requirements.txt` — lost `psycopg2-binary` + `boto3` (server then crash-looped)
 - `../workpulse-agent/src/license.rs` — cut mid-function, lost `spawn_heartbeat`
 - `../workpulse-agent/windows/installer.wxs` — stray trailing NUL bytes
+- `site/dashboard/workforce.html` (2026-05-27) — Edit/Write truncated mid-word
+  while adding the Jornada tab; recovery had to restore from the v20 zip
+- `site/dashboard/js/wp-nav.js` (2026-05-27) — Write truncated to original byte
+  count; rewrote via `cat > … <<'EOF'` heredoc
 
 **Rule:** for any file over ~150 lines, do NOT use the Edit tool with multi-line
 replacements. Edit in the shell instead:
@@ -302,6 +306,7 @@ site/dashboard/
     wp-analytics.js       Abas Alertas + Tendências (loadAlerts, loadTrends)
     wp-events.js          Aba Eventos (loadEvents, drawEvDailyChart)
     wp-internet.js        Aba Internet (loadInternet, renderSitesTable)
+    wp-jornada.js         Aba Jornada de Trabalho (loadJornada, computeJornadas)
     wp-settings.js        Aba Configurações (regras, apps, depts, colaboradores)
     wp-nav.js             Navegação por tabs + dropdowns (switchTab, TABS)
     wp-auth.js            Login com validação API, logout, tema, bootstrap IIFE
@@ -310,16 +315,17 @@ site/dashboard/
 #### Navegação (topbar)
 
 ```
-[Visão Geral]  [Coletas ▾]  [Análises ▾]         [⚙ ▾]
-               Pessoas       Alertas          Configurações
-               Departamentos Tendências       Sair
+[Visão Geral]  [Coletas ▾]            [Análises ▾]     [⚙ ▾]
+               Pessoas                 Alertas          Configurações
+               Departamentos           Tendências       Sair
                Eventos
                Internet
+               Jornada de Trabalho
 ```
 
 #### Features adicionadas em 2026-05-26
 
-- **Dropdowns de nav**: Coletas (Pessoas/Depts/Eventos/Internet) e Análises (Alertas/Tendências).
+- **Dropdowns de nav**: Coletas (Pessoas/Depts/Eventos/Internet/Jornada) e Análises (Alertas/Tendências).
 - **Actions como dropdown**: botão ⚙ ▾ abre menu com Configurações e Sair.
 - **Tema claro/escuro**: toggle em Configurações → Aparência. Salvo em `localStorage('wp_theme')`. Default: `light` (claro).
   `body.theme-light` substitui todas as CSS vars. Charts destruídos e recriados ao trocar.
@@ -330,6 +336,29 @@ site/dashboard/
 - **Modularidade**: cada aba é um arquivo JS independente (~50–150 linhas).
   Estado global em `state` (definido em `wp-core.js`, escopo global sem `window.WP`).
   Scripts carregados com `defer` — DOM pronto, ordem garantida.
+
+#### Aba Jornada de Trabalho (adicionada 2026-05-27)
+
+Submenu dentro de **Coletas → Jornada de Trabalho**. Mostra para um colaborador
+escolhido, dia a dia: início da jornada, fim, total de pausas, bruta e líquida.
+
+**Lógica de cálculo** (`computeJornadas` em `wp-jornada.js`):
+- `Início da Jornada` = primeiro `bucket=window` event do dia (timestamp local).
+- `Final da Jornada`  = `ts + duration_sec` do último `bucket=window` event do dia.
+- `Total de Pausas`   = soma dos `duration_sec` de `bucket=afk` que caem dentro
+  da janela `[start, end]` do mesmo dia local (almoço, café, AFK longos).
+- `Bruta`   = `end - start`. `Líquida` = `Bruta - Pausas`.
+- **Dia atual**: Final em branco (em andamento), Pausas/Líquida marcadas como
+  parciais. Detectado por `_jorLocalDayKey(new Date()) === j.day`.
+
+**Fetch chunked por dia** (`_jorFetchByDay`): como `/v1/events` limita a 1000
+eventos/chamada, faz `N` chamadas paralelas (cap de 5) com `since/until` por dia.
+Para 30 dias × 2 buckets = 60 chamadas em ~10 batches. Sem necessidade de novo
+endpoint de backend.
+
+**Visual**: 5 KPI cards no topo (dias, jornada líquida média, início médio,
+encerramento médio, pausas médias), 2 charts (barra empilhada trabalho+pausas
+por dia, linha de início × fim) e a tabela final.
 
 #### Contratos de resposta relevantes (herdados)
 

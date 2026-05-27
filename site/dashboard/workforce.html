@@ -62,6 +62,7 @@
         <button data-tab="departments">🏢 Departamentos</button>
         <button data-tab="events">⚡ Eventos</button>
         <button data-tab="internet">🌐 Internet</button>
+        <button data-tab="jornada">⏱ Jornada de Trabalho</button>
       </div>
     </div>
 
@@ -78,21 +79,17 @@
 
   </nav>
 
-  <!-- Ações — dropdown único: status + tenant + Configurações + Sair -->
+  <!-- Ações (status + dropdown de conta) -->
   <div class="actions">
+    <span><span class="led"></span><span id="apiStatus">conectado</span></span>
+    <span id="tenantPill" class="pill">tenant</span>
+
+    <!-- Dropdown de conta -->
     <div class="nav-dropdown actions-dd">
       <button class="actions-trigger nav-dd-trigger">
-        <span class="led" id="statusLed"></span>
-        <span id="tenantPill">tenant</span>
-        <span class="dd-arrow">▾</span>
+        ⚙ <span class="dd-arrow">▾</span>
       </button>
       <div class="nav-dropdown-menu">
-        <!-- Linha de status (não clicável) -->
-        <div class="menu-info-row">
-          <span class="menu-info-label">Status</span>
-          <span id="apiStatus" class="menu-info-value">conectado</span>
-        </div>
-        <hr class="menu-separator">
         <button onclick="switchTab('config')">⚙ Configurações</button>
         <hr class="menu-separator">
         <button onclick="logout()">↩ Sair</button>
@@ -408,6 +405,101 @@
     </div>
   </section>
 
+  <!-- ── JORNADA DE TRABALHO ── -->
+  <section id="tab-jornada" class="hide">
+    <h1 class="page-title">A <span class="em">jornada</span>, dia a dia.</h1>
+    <p class="page-sub">
+      Quando a pessoa começa, quando termina e quanto pausa — interpretado a partir
+      das coletas. O dia atual aparece em tempo real, com o final ainda em aberto.
+    </p>
+
+    <div class="toolbar">
+      <div><label>Colaborador</label>
+        <select id="jorUser" onchange="loadJornada()" style="min-width:220px">
+          <option value="">Selecione um colaborador…</option>
+        </select>
+      </div>
+      <div><label>Período</label>
+        <select id="jorDays" onchange="loadJornada()">
+          <option value="7" selected>Últimos 7 dias</option>
+          <option value="14">2 semanas</option>
+          <option value="30">30 dias</option>
+        </select>
+      </div>
+      <div class="spacer"></div>
+      <span style="color:var(--text-dim);font-size:12px;align-self:center">
+        Mostrando jornada de <strong id="jorUserLabel" style="color:var(--text)">—</strong>
+      </span>
+      <button class="ghost" onclick="loadJornada()">↻ Atualizar</button>
+    </div>
+
+    <div class="kpi-row" style="grid-template-columns:repeat(5,1fr)">
+      <div class="kpi-card" style="border-top:3px solid var(--primary)">
+        <div class="kpi-val" id="kpiJorDays">—</div>
+        <div class="kpi-label">Dias monitorados</div>
+      </div>
+      <div class="kpi-card" style="border-top:3px solid #4ade80">
+        <div class="kpi-val" id="kpiJorAvgWork">—</div>
+        <div class="kpi-label">Jornada líquida média</div>
+      </div>
+      <div class="kpi-card" style="border-top:3px solid #6c8cff">
+        <div class="kpi-val" id="kpiJorAvgStart">—</div>
+        <div class="kpi-label">Início médio</div>
+      </div>
+      <div class="kpi-card" style="border-top:3px solid #f472b6">
+        <div class="kpi-val" id="kpiJorAvgEnd">—</div>
+        <div class="kpi-label">Encerramento médio</div>
+      </div>
+      <div class="kpi-card" style="border-top:3px solid var(--warn)">
+        <div class="kpi-val" id="kpiJorAvgPause">—</div>
+        <div class="kpi-label">Pausas médias / dia</div>
+      </div>
+    </div>
+
+    <div class="grid" style="margin-bottom:18px">
+      <div class="card span-7 no-bar">
+        <h3>Horas trabalhadas × pausas por dia</h3>
+        <p style="font-size:12px;color:var(--text-dim);margin:4px 0 14px">
+          Empilhado: tempo efetivamente trabalhado (verde) + pausas (almoço, café, AFK longos).
+        </p>
+        <div style="height:280px"><canvas id="chartJorHours"></canvas></div>
+      </div>
+      <div class="card span-5 no-bar">
+        <h3>Ritmo da jornada — início × fim</h3>
+        <p style="font-size:12px;color:var(--text-dim);margin:4px 0 14px">
+          Padrão de início e término ao longo dos dias. O ponto rosa some no dia atual (em andamento).
+        </p>
+        <div style="height:280px"><canvas id="chartJorTimes"></canvas></div>
+      </div>
+    </div>
+
+    <div class="card no-bar">
+      <h3>Jornadas registradas</h3>
+      <p style="font-size:12px;color:var(--text-dim);margin:4px 0 14px">
+        Cada linha representa um dia. <em>Bruta</em> = do início ao fim (com pausas).
+        <em>Líquida</em> = tempo efetivo de trabalho descontando pausas.
+      </p>
+      <table id="jornadaTable">
+        <thead>
+          <tr>
+            <th>Dia</th>
+            <th>Início da Jornada</th>
+            <th>Final da Jornada</th>
+            <th>Total de Pausas</th>
+            <th>Bruta</th>
+            <th>Líquida</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td colspan="6" class="empty-state">
+            <h4>Selecione um colaborador</h4>
+            Escolha alguém no seletor acima para ver a jornada de trabalho dia a dia.
+          </td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
   <!-- ── CONFIGURAÇÕES ── -->
   <section id="tab-config" class="hide">
     <h1 class="page-title"><span class="em">Configurações</span>.</h1>
@@ -578,6 +670,7 @@
 <script src="js/wp-analytics.js" defer></script>
 <script src="js/wp-events.js" defer></script>
 <script src="js/wp-internet.js" defer></script>
+<script src="js/wp-jornada.js" defer></script>
 <script src="js/wp-settings.js" defer></script>
 <script src="js/wp-nav.js" defer></script>
 <script src="js/wp-auth.js" defer></script>
