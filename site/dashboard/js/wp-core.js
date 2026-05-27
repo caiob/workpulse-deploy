@@ -39,6 +39,25 @@ function chartTheme() {
   };
 }
 
+/* ---------- Status de conexão (LED + texto no dropdown) ---------- */
+function _setConnectionStatus(text, isError) {
+  const statusEl = document.getElementById('apiStatus');
+  const ledEl    = document.getElementById('statusLed');
+  if (statusEl) {
+    statusEl.textContent = text;
+    statusEl.className   = 'menu-info-value' + (isError ? ' error' : '');
+  }
+  if (ledEl) {
+    if (isError) {
+      ledEl.style.background  = 'var(--danger)';
+      ledEl.style.boxShadow   = '0 0 8px var(--danger)';
+    } else {
+      ledEl.style.background  = '';
+      ledEl.style.boxShadow   = '';
+    }
+  }
+}
+
 /* ---------- Toast ---------- */
 function toast(msg, ms = 2800) {
   const el = document.getElementById('toast');
@@ -157,7 +176,6 @@ async function api(path, signal) {
     }
     return r.json();
   } catch (e) {
-    clearTimeout(tid);
     if (e.name === 'AbortError') throw new Error('Tempo esgotado ou aba trocada');
     throw e;
   } finally {

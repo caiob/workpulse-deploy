@@ -123,7 +123,7 @@ function logout() {
 /* ==================== BOOTSTRAP ==================== */
 (function bootstrap() {
   // Aplica tema salvo
-  const savedTheme = localStorage.getItem('wp_theme') || 'dark';
+  const savedTheme = localStorage.getItem('wp_theme') || 'light';
   applyTheme(savedTheme);
 
   // Restaura sessão salva

@@ -82,7 +82,7 @@ WorkPulse is a SaaS employee-activity monitoring platform.
 **Live URLs:**
 - API: `https://api.workpulse.com.br`
 - Site: `https://workpulse.com.br`
-- Workforce dashboard: `https://workpulse.com.br/dashboard/workforce.html`
+- Workforce dashboard: `https://workpulse.com.br/dashboard/workforce.html` (modular, atual)
 - Platform admin: `https://workpulse.com.br/adm/admin.html`
 
 ---
@@ -280,18 +280,18 @@ then `py_compile`.
 
 ### Client Dashboard (`site/dashboard/`)
 
-**`workforce.html`** — versão original (mantida como contingência, ~2150 linhas,
-tudo inline).
+**`workforce.html`** — versão modular atual. HTML lean carrega módulos via
+`<script defer>`. Acesse em `https://workpulse.com.br/dashboard/workforce.html`.
 
-**`workforce-v2.html`** — versão modular atual. HTML lean carrega módulos via
-`<script defer>`. Acesse em `https://workpulse.com.br/dashboard/workforce-v2.html`.
+**`workforce-v1.html`** — versão original monolítica (~2150 linhas, tudo inline).
+Mantida como contingência — não modificar.
 
-#### Estrutura de arquivos (workforce-v2)
+#### Estrutura de arquivos
 
 ```
 site/dashboard/
-  workforce-v2.html       HTML principal (lean, sem CSS/JS inline)
-  workforce.html          Versão legada (contingência — não modificar)
+  workforce.html          HTML principal (lean, sem CSS/JS inline)
+  workforce-v1.html       Versão legada (contingência — não modificar)
   css/
     workforce.css         Todos os estilos + tema claro/escuro
   js/
@@ -321,7 +321,7 @@ site/dashboard/
 
 - **Dropdowns de nav**: Coletas (Pessoas/Depts/Eventos/Internet) e Análises (Alertas/Tendências).
 - **Actions como dropdown**: botão ⚙ ▾ abre menu com Configurações e Sair.
-- **Tema claro/escuro**: toggle em Configurações → Aparência. Salvo em `localStorage('wp_theme')`.
+- **Tema claro/escuro**: toggle em Configurações → Aparência. Salvo em `localStorage('wp_theme')`. Default: `light` (claro).
   `body.theme-light` substitui todas as CSS vars. Charts destruídos e recriados ao trocar.
   `chartTheme()` em `wp-core.js` retorna cores corretas para o tema ativo.
 - **Validação de login**: `doLogin()` faz `fetch` real para `/v1/workforce/overview?days=1`.
@@ -333,7 +333,7 @@ site/dashboard/
 
 #### Contratos de resposta relevantes (herdados)
 
-Os mesmos do `workforce.html` — ver tabela na seção CRITICAL #2 acima.
+Os mesmos do `workforce-v1.html` (legado) — ver tabela na seção CRITICAL #2 acima.
 
 **`admin.html`** — platform admin (~1120 linhas, self-contained).
 - tabs: `overview|tenants|licenses|system|audit`
@@ -365,104 +365,4 @@ Separate crate. Built per-client with an embedded license.
   it at `%APPDATA%\WorkPulse\Agent\data\server_pubkey.txt`. As of 2026-05-25 the
   agent **self-heals**: if verification fails with the cached key, it drops the
   cache and refetches the current key.
-- **installer.wxs:** uses `AllowSameVersionUpgrades="yes"` and the `agent.conf`
-  component is NOT `NeverOverwrite` — so reinstalling an MSI applies its embedded
-  license. (Both were wrong before and silently kept the old license.)
-
-### Auto-start behavior (post 2026-05-25)
-
-Both installers now garantem "instalou → rodou, reiniciou → rodou":
-
-| Platform | Início automático no boot/login | Início imediato pós-install |
-|---|---|---|
-| Windows | `HKLM\...\Run` via `start-hidden.vbs` (cada usuário na sua sessão) | `CustomAction LaunchAgentNow` no `InstallFinalize` (`Impersonate=yes`) |
-| Linux | `/etc/xdg/autostart/workpulse-agent.desktop` (XDG, todo login gráfico) | `postinst` detecta o usuário + DISPLAY, faz `setsid nohup` do binário |
-
-**Nota Windows:** o agente roda via chave `Run`, não como Windows Service — correto
-porque `GetForegroundWindow()` não funciona em Session 0 (serviços). O VBScript
-`start-hidden.vbs` evita que apareça uma janela de console.
-
-**Nota Linux:** coleta exige sessão **X11** (não Wayland). No Ubuntu 22.04+, na tela
-de login escolher "Ubuntu on Xorg". O postinst detecta o DISPLAY via
-`/tmp/.X11-unix/X*` e inicia o agente como o usuário dono do socket.
-
-### Parâmetros configuráveis do agent.conf (todos têm padrão — só license_key é obrigatório)
-
-| Parâmetro | Padrão | Descrição |
-|---|---|---|
-| `license_key` | `""` | **Obrigatório.** Token Ed25519 emitido pelo servidor. |
-| `server_url` | `https://api.workpulse.com.br` | URL do servidor WorkPulse. |
-| `poll_interval_ms` | `1000` | Resolução do loop de monitoramento (ms). |
-| `afk_timeout_sec` | `180` | Segundos sem input antes de marcar como AFK. |
-| `heartbeat_interval_sec` | `5` | **Novo.** Intervalo de heartbeat de presença passiva (s). `0` = desabilita. |
-| `sync_interval_sec` | `30` | Intervalo de envio de lotes ao servidor (s). |
-| `batch_size` | `500` | Máximo de eventos por lote de sync. |
-| `capture_titles` | `true` | Capturar título das janelas. `false` = só o app. |
-| `autostart` | `false` | Autostart via código. Deixar `false` — o instalador já cuida. |
-| `heartbeat_interval_min` | `30` | Intervalo de verificação de revogação de licença (min). |
-
-### Mecanismo de heartbeat de presença passiva
-
-**Problema resolvido:** antes, o agente só gravava um evento quando a janela mudava.
-Se o usuário ficasse 45 min lendo no Chrome sem clicar, o sistema registrava ~1s de Chrome.
-
-**Solução (tracker.rs, 2026-05-25):** a cada `heartbeat_interval_sec` segundos o
-tracker emite um evento `window` com `"heartbeat": true` no JSON para a janela atual,
-independente de haver interação. Suprimido enquanto AFK. O servidor soma todas as
-durações para calcular o tempo real de uso.
-
-```
-Evento de troca de janela  → duration_sec = poll_interval_ms / 1000  (marca o início)
-Evento de heartbeat        → duration_sec = heartbeat_interval_sec   (acumula tempo)
-```
-
-Agent gotchas: after a server fresh-install the key pair changes — old agents
-with a cached pubkey must self-heal or have `server_pubkey.txt` deleted. The
-sandbox has no Rust toolchain; the real compile check is `cargo build` inside
-`build-msi.ps1` — if it errors, fix and rebuild.
-
----
-
-## Known Latent Issues (be aware)
-
-1. **License-key worker race.** The task runs `WEB_CONCURRENCY=2` uvicorn workers.
-   On the VERY FIRST boot of a fresh install (Secrets Manager still "PLACEHOLDER"),
-   both workers can generate different Ed25519 keys and race to store in Secrets
-   Manager. After any restart all workers read the one stored key, so it
-   self-corrects — but a fresh install should be followed by an ECS restart, or
-   the key should be seeded into Secrets Manager before the service starts.
-2. **`agent.conf` NeverOverwrite (fixed).** Old MSIs kept stale licenses on
-   reinstall. Fixed; rebuild the agent to get the fix into new MSIs.
-3. **Old deploy zips.** `workpulse-deploy_v1..v13`, `-corrigido` are broken
-   (truncated files). Use only `workpulse-deploy-v16-VALIDADO.zip`.
-
----
-
-## Infra Quick Reference
-
-| Resource | Value |
-|---|---|
-| AWS account / region | 881027528914 / us-east-1 |
-| ECS cluster / service | `workpulse-prod` / `workpulse-prod-server` |
-| RDS instance | `workpulse-prod-pg` (PostgreSQL 15, db.t3.micro, 20 GB) |
-| ECR repo | `workpulse-prod-server` |
-| CodeBuild project | `workpulse-prod-image-build` |
-| ALB | `workpulse-prod` |
-| CloudWatch logs | `/aws/ecs/workpulse-prod-server` |
-| Site bucket | `workpulse-site-881027528914` |
-| Secrets | `workpulse-prod/{admin-token,db-password,license-key-b64}` |
-| Terraform state | S3 `workpulse-tfstate-881027528914`, lock table `workpulse-tf-locks` |
-| Alerts email | caiob@hotmail.com (SNS `workpulse-prod-alerts`) |
-
-```bash
-# Admin token
-aws secretsmanager get-secret-value --region us-east-1 \
-  --secret-id workpulse-prod/admin-token --query SecretString --output text
-# Live server logs
-aws logs tail /aws/ecs/workpulse-prod-server --region us-east-1 --follow --format short
-```
-
-Multiple ECS tasks are safe (PostgreSQL handles concurrent writers); the service
-uses `minimum_healthy_percent=100`, `maximum_percent=200` for zero-downtime rolls.
-The biggest single cost is the NAT Gateway (~US$34/mo) — replaceable with VPC
-endpoints later. Full breakdown in `INFRA_AWS_V3.docx`.
+-

@@ -36,12 +36,12 @@ async function loadOverview() {
     drawAppsChart(team.top_apps || []);
     drawHeatmap(data.hourly || [], data.daily || []);
 
-    document.getElementById('apiStatus').textContent = 'conectado';
+    _setConnectionStatus('conectado', false);
     const hhmm = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
     const lbl  = document.getElementById('lastRefreshLabel');
     if (lbl) lbl.textContent = `Atualizado às ${hhmm}`;
   } catch (e) {
-    document.getElementById('apiStatus').textContent = 'erro';
+    _setConnectionStatus('erro', true);
     toast('Falha ao carregar visão geral: ' + e.message);
   }
 }

@@ -183,22 +183,43 @@ nav.tabs > button.active {
 
 /* ---------- ACTIONS ---------- */
 .topbar .actions {
-  display:flex; align-items:center; gap: 10px;
+  display:flex; align-items:center;
   color: var(--text-dim); font-size: 13px; flex-shrink: 0;
 }
 .actions-dd .nav-dropdown-menu {
   left: auto; right: 0;
-  min-width: 180px;
+  min-width: 200px;
 }
 .actions-trigger {
   background: transparent; color: var(--text-dim);
   border: 1px solid var(--border); padding: 7px 13px;
   border-radius: 8px; cursor: pointer; font-size: 13px;
   font-weight: 500; white-space: nowrap;
-  display: inline-flex; align-items: center; gap: 6px;
-  transition: all .15s ease;
+  display: inline-flex; align-items: center; gap: 7px;
+  transition: all .15s ease; max-width: 220px;
 }
 .actions-trigger:hover { background: var(--panel); color: var(--text); }
+.actions-trigger #tenantPill {
+  /* tenant ID inline no trigger — sem pill colorido, texto simples */
+  overflow: hidden; text-overflow: ellipsis;
+  font-size: 13px; font-weight: 500; color: inherit;
+  max-width: 150px;
+}
+
+/* Linha de info dentro do menu (status de conexão — não clicável) */
+.menu-info-row {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 8px 12px; gap: 8px;
+  cursor: default; user-select: none;
+}
+.menu-info-label {
+  font-size: 11px; color: var(--text-muted);
+  text-transform: uppercase; letter-spacing: 0.05em; font-weight: 500;
+}
+.menu-info-value {
+  font-size: 12px; font-weight: 500; color: var(--accent);
+}
+.menu-info-value.error { color: var(--danger); }
 
 /* ---------- PILLS / BADGES ---------- */
 .led {
