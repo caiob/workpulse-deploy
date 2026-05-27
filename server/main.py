@@ -1008,11 +1008,14 @@ def team_summary(tenant: str, days: int = 7):
             """SELECT u.user_id, u.display_name, u.email, u.department, u.last_seen,
                       COALESCE(SUM(CASE WHEN e.bucket='window' THEN e.duration_sec END), 0) AS active,
                       COALESCE(SUM(CASE WHEN e.bucket='afk' AND e.data_json->>'status'='afk'
-                                        THEN e.duration_sec END), 0) AS afk
+                                        THEN e.duration_sec END), 0) AS afk,
+                      (SELECT d.agent_version FROM devices d
+                       WHERE d.tenant_id = u.tenant_id AND d.user_id = u.user_id
+                       ORDER BY d.last_seen DESC LIMIT 1) AS agent_version
                FROM users u LEFT JOIN events e
                     ON e.tenant_id = u.tenant_id AND e.user_id = u.user_id AND e.ts >= %s
                WHERE u.tenant_id = %s
-               GROUP BY u.user_id, u.display_name, u.email, u.department, u.last_seen
+               GROUP BY u.user_id, u.display_name, u.email, u.department, u.last_seen, u.tenant_id
                ORDER BY active DESC""",
             (since, tenant),
         ).fetchall()

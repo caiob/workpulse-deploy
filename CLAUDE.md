@@ -1,7 +1,7 @@
 # CLAUDE.md — WorkPulse
 
 Guidance for AI agents (Claude Code / Cowork) working on WorkPulse.
-**Read this fully before changing anything.** Last updated: 2026-05-26.
+**Read this fully before changing anything.** Last updated: 2026-05-27.
 
 ---
 
@@ -20,6 +20,18 @@ the file looks saved but is cut off partway through. Real incidents in this repo
   while adding the Jornada tab; recovery had to restore from the v20 zip
 - `site/dashboard/js/wp-nav.js` (2026-05-27) — Write truncated to original byte
   count; rewrote via `cat > … <<'EOF'` heredoc
+- `../workpulse-agent/src/{tracker,config,main,sync}.rs`,
+  `../workpulse-agent/windows/installer.wxs`,
+  `../workpulse-agent/Cargo.toml`,
+  `../workpulse-agent/linux/build-deb.sh`,
+  `../workpulse-agent/LEIA-PRIMEIRO.md`,
+  `CLAUDE.md` itself (2026-05-27) — eight files in the agent kit + this very
+  CLAUDE.md found truncated mid-content during the AFK fix. The compiled
+  `dist/WorkPulseAgent-ASAPTECH.msi` (2026-05-26) predates the corruption, so
+  the deployed binary is intact, but `cargo build` would fail on the current
+  source tree. All recovered via `cat > … <<'EOF'` heredoc using cached Read
+  content as the source of truth; backed up beforehand to
+  `../workpulse-agent-backup-20260527-145705.zip`
 
 **Rule:** for any file over ~150 lines, do NOT use the Edit tool with multi-line
 replacements. Edit in the shell instead:
@@ -63,6 +75,7 @@ Contracts that MUST hold (verified working as of 2026-05-25):
 | `GET /v1/admin/stats` | `{version, server_time, db_size_bytes, counts:{tenants,users,devices,total_events,active_licenses,revoked_licenses}, events_last_24h, events_last_7d, ingest_per_hour:[{hour,events}], os_distribution:[{os,n}], plan_distribution:[{plan,n}]}` |
 | `GET /v1/admin/tenants` | items: `id,name,plan,status,users,devices,active_licenses,created_at,last_activity,retention_days` |
 | `GET /v1/admin/licenses` | items: `lic_id,tenant_id,tenant_name,plan,seats,issued,expires,revoked,days_remaining,expired` |
+| `GET /v1/team/summary` | items: `user_id,display_name,email,department,last_seen,active,afk,agent_version` |
 | `GET /v1/users/{id}/summary` | must include `by_day:[{day,active,afk}]` |
 | `GET /v1/workforce/overview` | `totals:{total_users,online_now,active_seconds,afk_seconds,today_active_seconds}, daily:[{day,active,afk}], hourly:[{hour,seconds}], by_department:[{dept,users,active}], alerts:{overwork,underwork}` |
 
@@ -380,10 +393,9 @@ everything in `site/` — keep `.bak`/temp files out of that folder.**
 ## The Rust Agent (`../workpulse-agent`)
 
 Separate crate. Built per-client with an embedded license.
-
-- **Build (Windows):** `windows/build-msi.ps1 -LicenseKey "<token>" -ClientName "X"`
+- **Build (Windows):** `windows/build-msi.ps1 -LicenseKey "<token>" -ClientName "X" -Version "2.1.0"`
   → runs `cargo build --release` then WiX. Output in `dist/`.
-- **Build (Linux):** `LICENSE_KEY="<token>" ./linux/build-deb.sh`
+- **Build (Linux):** `VERSION="2.1.0" LICENSE_KEY="<token>" ./linux/build-deb.sh`
   → runs `cargo build --release` then `dpkg-deb`. Output in `dist/`.
 - **Config:** `agent.conf` (TOML). Only `license_key` is required; `server_url`
   defaults to `https://api.workpulse.com.br`; tenant comes from inside the license.
@@ -394,4 +406,39 @@ Separate crate. Built per-client with an embedded license.
   it at `%APPDATA%\WorkPulse\Agent\data\server_pubkey.txt`. As of 2026-05-25 the
   agent **self-heals**: if verification fails with the cached key, it drops the
   cache and refetches the current key.
--
+- **Per-client versioning (2026-05-27).** The agent reads its version from
+  `env!("WORKPULSE_AGENT_VERSION")` at compile time. `build.rs` resolves the
+  value from the `WORKPULSE_AGENT_VERSION` env var (set by the build scripts),
+  falling back to `CARGO_PKG_VERSION` from `Cargo.toml` (currently `1.0.0`).
+  `Cargo.toml` declares `build = "build.rs"`. The MSI script accepts
+  `-Version "X.Y.Z"` (validated regex, WiX gets `X.Y.Z.0`); the deb script
+  accepts `VERSION="X.Y.Z"`. The value is propagated to the binary (used in
+  the `agent_version` field of every ingest payload), the MSI Package
+  `Version` attribute via `<?define AgentVersion?>` + `$(var.AgentVersion)`,
+  and the `.deb` `Version` field. Without these flags every client appears as
+  `1.0.0` in the workforce dashboard — that was the symptom that prompted
+  the change.
+- **AFK with real duration (2026-05-27, v2.0+ of the agent).** Pre-fix the
+  tracker only emitted transition markers (`status="afk"`/`"not-afk"`) with
+  `duration_sec=0.0`, so every server query of the form
+  `SUM(duration_sec WHERE bucket='afk' AND status='afk')` returned 0. This
+  silently broke `users/{id}/summary`, `team/summary`, `workforce/overview`,
+  and the Jornada tab. The fix in `src/tracker.rs` slices each AFK period
+  into events with real durations: (1) an initial slice with
+  `ts = now - afk_timeout_sec`, `duration = afk_timeout_sec` on the
+  active→AFK transition; (2) periodic heartbeats every `heartbeat_interval_sec`
+  while AFK with `data.heartbeat = true`; (3) a final partial slice on
+  AFK→active, followed by the legacy `status="not-afk"` marker with
+  `duration=0` (kept for backward compatibility with consumers that detect
+  end-of-period by marker). Slices are non-overlapping, so a plain
+  `SUM(duration_sec)` reflects the real idle time. **No server or dashboard
+  changes were needed** — the SQL contracts in CRITICAL #2 already expected
+  this shape, the agent just wasn't honoring it.
+
+---
+
+**Last updated:** 2026-05-27 (added per-client versioning, fixed AFK duration
+calculation in the Rust agent, rebuilt eight silently-truncated agent files;
+added `agent_version` column to aba Pessoas — `GET /v1/team/summary` now returns
+`agent_version` via correlated subquery on `devices` table; `workforce.html`
+and `wp-people.js` updated accordingly).

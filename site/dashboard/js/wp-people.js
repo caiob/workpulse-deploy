@@ -22,7 +22,7 @@ function renderPeopleTable() {
   });
   const tb = document.querySelector('#peopleTable tbody');
   if (!rows.length) {
-    tb.innerHTML = `<tr><td colspan="7" class="empty-state">Nenhum colaborador no período.</td></tr>`;
+    tb.innerHTML = `<tr><td colspan="8" class="empty-state">Nenhum colaborador no período.</td></tr>`;
     return;
   }
   tb.innerHTML = rows.map(u => {
@@ -39,6 +39,7 @@ function renderPeopleTable() {
       <td><span class="bar"><span style="width:${adh}%"></span></span>
           <small style="color:var(--text-dim);margin-left:6px">${adh}%</small></td>
       <td>${relTime(u.last_seen)}</td>
+      <td><code style="font-size:11px;color:var(--text-dim)">${u.agent_version || '—'}</code></td>
       <td style="display:flex;gap:6px">
         <button class="ghost" onclick="drillUser('${safeUid}','${safeName}')">abrir</button>
         <button class="cat-btn" onclick="editUser('${safeUid}')">✏ Editar</button>
