@@ -1090,22 +1090,31 @@ def search_events(
     limit:   int = Query(200, le=1000),
     offset:  int = 0,
 ):
-    sql = ["SELECT * FROM events WHERE tenant_id = %s"]
+    # Filtros base (reutilizados na query de contagem e na query principal)
+    where = ["tenant_id = %s"]
     args: list = [tenant]
     if user_id:
-        sql.append("AND user_id = %s"); args.append(user_id)
-    sql.append("AND bucket = %s"); args.append(bucket or "window")
+        where.append("user_id = %s"); args.append(user_id)
+    where.append("bucket = %s"); args.append(bucket or "window")
     if days:
         since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=int(days))).isoformat()
     if since:
-        sql.append("AND ts >= %s"); args.append(since)
+        where.append("ts >= %s"); args.append(since)
     if until:
-        sql.append("AND ts <= %s"); args.append(until)
-    sql.append("ORDER BY ts DESC LIMIT %s OFFSET %s")
-    args.extend([limit, offset])
+        where.append("ts <= %s"); args.append(until)
+
+    where_clause = " AND ".join(where)
 
     with db() as c:
-        rows = c.execute(" ".join(sql), args).fetchall()
+        total = c.execute(
+            f"SELECT COUNT(*) AS n FROM events WHERE {where_clause}", args
+        ).fetchone()["n"]
+
+        rows = c.execute(
+            f"SELECT * FROM events WHERE {where_clause} ORDER BY ts DESC LIMIT %s OFFSET %s",
+            args + [limit, offset],
+        ).fetchall()
+
         rules = [dict(r) for r in c.execute(
             "SELECT * FROM productivity_rules WHERE tenant_id=%s ORDER BY created_at",
             (tenant,),
@@ -1119,7 +1128,7 @@ def search_events(
         category = _apply_rules(title, app_name, rules) if r["bucket"] == "window" else "neutral"
         events.append({**dict(r), "data": data, "category": category})
 
-    return {"count": len(events), "events": events}
+    return {"count": len(events), "total": total, "offset": offset, "limit": limit, "events": events}
 
 
 @app.get("/v1/productivity/events_summary", dependencies=[Depends(require_tenant_scope)])
