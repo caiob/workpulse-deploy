@@ -20,33 +20,70 @@ function _evChangePageSize() {
   loadEvents(false);
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Agrupamento de sessões
+// ─────────────────────────────────────────────────────────────────────
+
 /**
- * Agrupa eventos consecutivos com mesmo user_id + app + title.
+ * Agrupa eventos consecutivos com mesmo user_id + app (ignora título).
  * Eventos chegam ordenados por ts DESC (mais recente primeiro).
+ *
+ * Cada grupo resultante contém:
+ *   _count      — quantos eventos foram mesclados
+ *   _ts_display — timestamp do evento mais antigo (início da sessão)
+ *   _subEvents  — array com todos os eventos individuais (para expansão)
+ *   data.title  — título do evento mais recente do grupo
  */
 function collapseEvents(events) {
   if (!events.length) return events;
+
   const merged = [];
-  let cur = { ...events[0], _count: 1, _ts_display: events[0].ts };
+  let cur = {
+    ...events[0],
+    _count:     1,
+    _ts_display: events[0].ts,
+    _subEvents: [events[0]],
+  };
 
   for (let i = 1; i < events.length; i++) {
-    const e         = events[i];
-    const sameUser  = cur.user_id === e.user_id;
-    const sameApp   = ((cur.data || {}).app   || '') === ((e.data || {}).app   || '');
-    const sameTitle = ((cur.data || {}).title || '') === ((e.data || {}).title || '');
+    const e       = events[i];
+    const sameUser = cur.user_id === e.user_id;
+    const sameApp  = ((cur.data || {}).app || '') === ((e.data || {}).app || '');
 
-    if (sameUser && sameApp && sameTitle) {
+    if (sameUser && sameApp) {
       cur.duration_sec = (cur.duration_sec || 0) + (e.duration_sec || 0);
       cur._count++;
-      cur._ts_display = e.ts; // timestamp mais antigo = início da sessão
+      cur._ts_display = e.ts;   // mais antigo = início da sessão
+      cur._subEvents.push(e);
     } else {
       merged.push(cur);
-      cur = { ...e, _count: 1, _ts_display: e.ts };
+      cur = { ...e, _count: 1, _ts_display: e.ts, _subEvents: [e] };
     }
   }
   merged.push(cur);
   return merged;
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Toggle de expansão de grupo
+// ─────────────────────────────────────────────────────────────────────
+
+function _toggleEvGroup(rowId) {
+  const rows = document.querySelectorAll(`.ev-sub-${rowId}`);
+  let anyVisible = false;
+  rows.forEach(r => { if (!r.classList.contains('hide')) anyVisible = true; });
+  rows.forEach(r => r.classList.toggle('hide', anyVisible));
+
+  const btn = document.getElementById(`ev-btn-${rowId}`);
+  if (btn) {
+    btn.classList.toggle('expanded', !anyVisible);
+    btn.textContent = anyVisible ? '▶' : '▼';
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Carregamento principal
+// ─────────────────────────────────────────────────────────────────────
 
 /**
  * Carrega eventos do servidor para a página atual (_evPage).
@@ -67,7 +104,7 @@ async function loadEvents(resetPage = true) {
   const base      = `tenant=${encodeURIComponent(state.tenant)}&days=${days}`;
   const userParam = user   ? `&user_id=${encodeURIComponent(user)}` : '';
   const bktParam  = bucket ? `&bucket=${encodeURIComponent(bucket)}` : '';
-  // Pede 1 evento a mais para detectar se existe próxima página (truque N+1)
+  // N+1: pede um evento a mais para detectar se existe próxima página
   const pageParam = `&limit=${_evPageSize + 1}&offset=${_evPage * _evPageSize}`;
 
   try {
@@ -87,28 +124,29 @@ async function loadEvents(resetPage = true) {
 
     drawEvDailyChart(summary.daily || []);
 
-    // N+1: se vieram mais que _evPageSize, há próxima página — descarta o extra
+    // N+1: determina hasNext e descarta o evento extra
     const rawAll    = evData.events || [];
     const hasNext   = rawAll.length > _evPageSize;
     const rawEvents = hasNext ? rawAll.slice(0, _evPageSize) : rawAll;
 
-    // Total do backend (quando disponível) permite mostrar "Página X de Y"
+    // Total do backend (quando disponível) para exibir "Página X de Y"
     _evTotal = evData.total || 0;
     const totalPages = _evTotal > 0
       ? Math.max(1, Math.ceil(_evTotal / _evPageSize))
-      : (hasNext ? _evPage + 2 : _evPage + 1);   // fallback sem total
+      : (hasNext ? _evPage + 2 : _evPage + 1);
 
-    const hasPrev = _evPage > 0;
-
+    const hasPrev    = _evPage > 0;
     const doCollapse = document.getElementById('evCollapse')?.checked !== false;
     const events     = doCollapse ? collapseEvents(rawEvents) : rawEvents;
 
+    // Label de contagem
     const label = document.getElementById('evCountLabel');
     if (label) {
       if (!rawEvents.length && !_evPage) {
         label.textContent = '';
       } else if (doCollapse && events.length < rawEvents.length) {
-        label.textContent = `— ${events.length} sessões (${rawEvents.length} eventos agrupados)`;
+        const saved = rawEvents.length - events.length;
+        label.textContent = `— ${events.length} grupos (${rawEvents.length} eventos, ${saved} agrupados)`;
       } else if (_evTotal > 0) {
         label.textContent = `— ${rawEvents.length} de ${_evTotal.toLocaleString('pt-BR')} eventos`;
       } else {
@@ -123,27 +161,70 @@ async function loadEvents(resetPage = true) {
       return;
     }
 
-    tb.innerHTML = events.map(e => {
+    tb.innerHTML = events.map((e, idx) => {
+      const rowId    = `p${_evPage}_${idx}`;
       const d        = e.data || {};
-      const appLabel = d.app   ? `<strong>${d.app}</strong>` : '<span style="color:var(--text-muted)">—</span>';
+      const appLabel = d.app ? `<strong>${d.app}</strong>` : '<span style="color:var(--text-muted)">—</span>';
       const title    = d.title || '';
       const cat      = CAT_PILLS[e.category] || CAT_PILLS.uncategorized;
       const when     = e._ts_display || e.ts;
-      const ts       = when ? new Date(when).toLocaleString('pt-BR', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' }) : '—';
-      const user     = displayName(state.people.find(p => p.user_id === e.user_id) || { user_id: e.user_id });
-      const dur      = fmtSec(e.duration_sec || 0);
-      const safePat  = (d.title || d.app || '').replace(/'/g, "\\'");
+      const ts       = when
+        ? new Date(when).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+        : '—';
+      const userName  = displayName(state.people.find(p => p.user_id === e.user_id) || { user_id: e.user_id });
+      const dur       = fmtSec(e.duration_sec || 0);
+      const safePat   = (d.title || d.app || '').replace(/'/g, "\\'");
       const safeField = d.title ? 'title' : 'app';
-      return `<tr>
+      const isGroup   = (e._count || 1) > 1;
+
+      // Badge de contagem e botão de expansão
+      const countBadge = isGroup
+        ? `<span class="ev-count-badge">${e._count}×</span>`
+        : '';
+      const expandBtn = isGroup
+        ? `<button id="ev-btn-${rowId}" class="ev-expand-btn ghost" onclick="_toggleEvGroup('${rowId}')" title="Expandir eventos individuais">▶</button>`
+        : '';
+
+      // Linha pai
+      const parentRow = `<tr class="${isGroup ? 'ev-group-row' : ''}">
         <td style="white-space:nowrap;color:var(--text-dim);font-size:12px">${ts}</td>
-        <td>${user}</td>
-        <td>${dur}</td>
+        <td>${userName}</td>
+        <td>${dur}${countBadge}</td>
         <td style="max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
           ${appLabel}${title ? ` <span style="color:var(--text-dim);font-size:11px">— ${title}</span>` : ''}
         </td>
         <td>${cat}</td>
-        <td><button class="cat-btn" onclick="quickRule('${safePat}','${safeField}')">Categorizar</button></td>
+        <td style="display:flex;gap:6px;align-items:center">
+          ${expandBtn}
+          <button class="cat-btn" onclick="quickRule('${safePat}','${safeField}')">Categorizar</button>
+        </td>
       </tr>`;
+
+      // Sub-linhas (ocultas por padrão)
+      const subRows = isGroup
+        ? e._subEvents.map((sub, si) => {
+            const sd    = sub.data || {};
+            const sTs   = sub.ts
+              ? new Date(sub.ts).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+              : '—';
+            const sDur  = fmtSec(sub.duration_sec || 0);
+            const sTitle = sd.title || '';
+            const sPat  = (sd.title || sd.app || '').replace(/'/g, "\\'");
+            const sField = sd.title ? 'title' : 'app';
+            return `<tr class="ev-sub-row ev-sub-${rowId} hide">
+              <td style="white-space:nowrap;color:var(--text-dim);font-size:11px;padding-left:28px">↳ ${sTs}</td>
+              <td></td>
+              <td style="color:var(--text-dim);font-size:12px">${sDur}</td>
+              <td style="max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--text-dim)">
+                ${sTitle || '<em style="opacity:.5">sem título</em>'}
+              </td>
+              <td></td>
+              <td><button class="cat-btn" style="font-size:11px" onclick="quickRule('${sPat}','${sField}')">Categorizar</button></td>
+            </tr>`;
+          }).join('')
+        : '';
+
+      return parentRow + subRows;
     }).join('');
 
     _renderEvPagination(hasPrev, hasNext, totalPages);
@@ -151,11 +232,12 @@ async function loadEvents(resetPage = true) {
   } catch (e) { toast('Erro ao carregar eventos: ' + e.message); }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Paginação
+// ─────────────────────────────────────────────────────────────────────
+
 /**
- * Renderiza os controles de paginação.
- * @param {boolean} hasPrev
- * @param {boolean} hasNext
- * @param {number}  totalPages
+ * Renderiza os controles de paginação no cabeçalho do card.
  */
 function _renderEvPagination(hasPrev, hasNext, totalPages) {
   const container = document.getElementById('evPagination');
@@ -166,12 +248,11 @@ function _renderEvPagination(hasPrev, hasNext, totalPages) {
     return;
   }
 
-  const currentPage = _evPage + 1; // exibe 1-indexed
-
-  // Gera botões de páginas próximas (janela de ±2 ao redor da atual)
-  const pageButtons = [];
+  const currentPage = _evPage + 1;
   const windowStart = Math.max(1, currentPage - 2);
   const windowEnd   = Math.min(totalPages, currentPage + 2);
+
+  const pageButtons = [];
 
   if (windowStart > 1) {
     pageButtons.push(`<button class="ev-page-btn ghost" onclick="_evGoTo(0)">1</button>`);
@@ -192,24 +273,22 @@ function _renderEvPagination(hasPrev, hasNext, totalPages) {
 
   container.innerHTML = `
     <div class="ev-pagination">
-      <button class="ghost ev-page-nav" ${hasPrev ? '' : 'disabled'} onclick="_evGoTo(${_evPage - 1})">
-        ← Anterior
-      </button>
+      <button class="ghost ev-page-nav" ${hasPrev ? '' : 'disabled'} onclick="_evGoTo(${_evPage - 1})">← Anterior</button>
       <div class="ev-page-numbers">${pageButtons.join('')}</div>
-      <button class="ghost ev-page-nav" ${hasNext ? '' : 'disabled'} onclick="_evGoTo(${_evPage + 1})">
-        Próxima →
-      </button>
-    </div>
-  `;
+      <button class="ghost ev-page-nav" ${hasNext ? '' : 'disabled'} onclick="_evGoTo(${_evPage + 1})">Próxima →</button>
+    </div>`;
 }
 
 /** Navega para uma página específica e recarrega. */
 function _evGoTo(page) {
   _evPage = page;
   loadEvents(false);
-  // Scroll suave até a tabela
   document.getElementById('eventsTable')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Gráfico diário
+// ─────────────────────────────────────────────────────────────────────
 
 function drawEvDailyChart(daily) {
   if (state.charts.evDaily) state.charts.evDaily.destroy();
