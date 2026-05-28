@@ -2,12 +2,20 @@
 // wp-internet.js — Aba "Internet" (análise de navegação web)
 // =====================================================================
 
+// Cache da última busca — permite filtrar por categoria sem nova chamada
+let _intSitesCache = [];
+let _intTotalCache = 0;
+
 async function loadInternet() {
   await _populateUserDropdown('intUser');
   const days   = document.getElementById('intDays').value;
   const user   = document.getElementById('intUser').value.trim();
   const params = new URLSearchParams({ tenant: state.tenant, days });
   if (user) params.set('user_id', user);
+
+  // Reseta o filtro de categoria ao recarregar
+  const catSel = document.getElementById('intCategory');
+  if (catSel) catSel.value = '';
 
   try {
     const data  = await api('/v1/productivity/internet?' + params.toString());
@@ -21,8 +29,22 @@ async function loadInternet() {
     document.getElementById('kpiIntUncat').innerHTML  = fmtSec(t.uncategorized || 0) + pctOf(t.uncategorized || 0);
 
     drawIntDailyChart(data.daily || []);
-    renderSitesTable(data.sites || [], total);
+
+    // Armazena no cache e renderiza
+    _intSitesCache = data.sites || [];
+    _intTotalCache = total;
+    renderSitesTable(_intSitesCache, _intTotalCache);
   } catch (e) { toast('Erro ao carregar dados de internet: ' + e.message); }
+}
+
+/**
+ * Reaplica o filtro de categoria sobre o cache sem nova chamada à API.
+ * Chamada pelo onchange do select #intCategory.
+ */
+function filterInternet() {
+  const cat   = document.getElementById('intCategory')?.value || '';
+  const sites = cat ? _intSitesCache.filter(s => s.category === cat) : _intSitesCache;
+  renderSitesTable(sites, _intTotalCache, cat);
 }
 
 function drawIntDailyChart(daily) {
@@ -55,15 +77,29 @@ function drawIntDailyChart(daily) {
   });
 }
 
-function renderSitesTable(sites, totalSec) {
+/**
+ * @param {Array}  sites     Lista de sites a renderizar (já filtrada)
+ * @param {number} totalSec  Total geral (para % — sempre o total do período, não filtrado)
+ * @param {string} [catFilter] Categoria ativa (para feedback visual)
+ */
+function renderSitesTable(sites, totalSec, catFilter = '') {
   const tbody = document.querySelector('#intSitesTable tbody');
-  if (!sites.length) {
+
+  if (!_intSitesCache.length) {
     tbody.innerHTML = `<tr><td colspan="6" class="empty-state">
       <h4>Nenhum dado de browser encontrado.</h4>
       Verifique se há eventos do tipo <code>window</code> com app de browser (msedge.exe, chrome.exe, firefox.exe...).
     </td></tr>`;
     return;
   }
+
+  if (!sites.length) {
+    const catEl  = document.getElementById('intCategory');
+    const catTxt = catEl ? catEl.options[catEl.selectedIndex].text : catFilter;
+    tbody.innerHTML = `<tr><td colspan="6" class="empty-state">Nenhum site encontrado na categoria <strong>${catTxt}</strong> para este período.</td></tr>`;
+    return;
+  }
+
   tbody.innerHTML = sites.slice(0, 150).map(s => {
     const pct     = totalSec > 0 ? (s.total_sec / totalSec * 100).toFixed(1) : '0';
     const barFill = CAT_COLORS[s.category] || CAT_COLORS.uncategorized;

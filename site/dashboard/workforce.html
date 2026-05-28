@@ -8,7 +8,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-<link rel="stylesheet" href="css/workforce.css">
+<link rel="stylesheet" href="css/workforce.css?v=2">
 <link rel="icon" type="image/jpeg" href="../assets/logo-workpulse.jpeg">
 </head>
 <body>
@@ -313,6 +313,15 @@
           <option value="none">Sem agrupamento</option>
         </select>
       </div>
+      <div><label>Categoria</label>
+        <select id="evCategory" onchange="loadEvents()">
+          <option value="">Todas</option>
+          <option value="productive">Produtivo</option>
+          <option value="unproductive">Não-produtivo</option>
+          <option value="neutral">Neutro</option>
+          <option value="uncategorized">Não categorizado</option>
+        </select>
+      </div>
       <div class="spacer"></div>
       <button class="ghost" onclick="loadEvents()">↻ Buscar</button>
     </div>
@@ -383,6 +392,15 @@
       </div>
       <div><label>Usuário</label>
         <select id="intUser" style="min-width:200px"><option value="">Todos os usuários</option></select>
+      </div>
+      <div><label>Categoria</label>
+        <select id="intCategory" onchange="filterInternet()">
+          <option value="">Todas</option>
+          <option value="productive">Produtivo</option>
+          <option value="unproductive">Não-produtivo</option>
+          <option value="neutral">Neutro</option>
+          <option value="uncategorized">Não categorizado</option>
+        </select>
       </div>
       <div class="spacer"></div>
       <button class="ghost" onclick="loadInternet()">↻ Atualizar</button>
@@ -715,18 +733,18 @@
 <div id="toast" class="toast hide"></div>
 
 <!-- ===== MÓDULOS JS (defer: executam após parse do DOM, em ordem) ===== -->
-<script src="js/wp-core.js" defer></script>
-<script src="js/wp-overview.js" defer></script>
-<script src="js/wp-people.js" defer></script>
-<script src="js/wp-departments.js" defer></script>
-<script src="js/wp-analytics.js" defer></script>
-<script src="js/wp-events.js" defer></script>
-<script src="js/wp-internet.js" defer></script>
-<script src="js/wp-jornada.js" defer></script>
-<script src="js/wp-settings.js" defer></script>
-<script src="js/wp-reports.js" defer></script>
-<script src="js/wp-nav.js" defer></script>
-<script src="js/wp-auth.js" defer></script>
+<script src="js/wp-core.js?v=2" defer></script>
+<script src="js/wp-overview.js?v=2" defer></script>
+<script src="js/wp-people.js?v=2" defer></script>
+<script src="js/wp-departments.js?v=2" defer></script>
+<script src="js/wp-analytics.js?v=2" defer></script>
+<script src="js/wp-events.js?v=2" defer></script>
+<script src="js/wp-internet.js?v=2" defer></script>
+<script src="js/wp-jornada.js?v=2" defer></script>
+<script src="js/wp-settings.js?v=2" defer></script>
+<script src="js/wp-reports.js?v=2" defer></script>
+<script src="js/wp-nav.js?v=2" defer></script>
+<script src="js/wp-auth.js?v=2" defer></script>
 
 </body>
 </html>

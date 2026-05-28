@@ -193,25 +193,31 @@ async function loadEvents(resetPage = true) {
         : (hasNext ? _evPage + 2 : _evPage + 1);
     }
 
-    // Aplica o modo de agrupamento
-    const events = mode === 'sequential' ? collapseEvents(rawEvents)
-                 : mode === 'byapp'      ? groupByApp(rawEvents)
-                 : rawEvents;  // 'none'
+    // Filtro de categoria (aplicado antes do agrupamento)
+    const catFilter  = document.getElementById('evCategory')?.value || '';
+    const filtered   = catFilter ? rawEvents.filter(e => e.category === catFilter) : rawEvents;
+
+    // Aplica o modo de agrupamento sobre os eventos já filtrados
+    const events = mode === 'sequential' ? collapseEvents(filtered)
+                 : mode === 'byapp'      ? groupByApp(filtered)
+                 : filtered;  // 'none'
 
     // Label de contagem
     const label = document.getElementById('evCountLabel');
     if (label) {
+      const catEl     = document.getElementById('evCategory');
+      const catLabel  = catEl?.value ? ` · ${catEl.options[catEl.selectedIndex].text}` : '';
       if (!rawEvents.length && !_evPage) {
         label.textContent = '';
       } else if (mode === 'byapp') {
-        label.textContent = `— ${events.length} apps (${rawEvents.length} eventos)`;
-      } else if (mode === 'sequential' && events.length < rawEvents.length) {
-        const saved = rawEvents.length - events.length;
-        label.textContent = `— ${events.length} grupos (${rawEvents.length} eventos, ${saved} agrupados)`;
+        label.textContent = `— ${events.length} apps (${filtered.length} eventos${catLabel})`;
+      } else if (mode === 'sequential' && events.length < filtered.length) {
+        const saved = filtered.length - events.length;
+        label.textContent = `— ${events.length} grupos (${filtered.length} eventos, ${saved} agrupados${catLabel})`;
       } else if (_evTotal > 0) {
-        label.textContent = `— ${rawEvents.length} de ${_evTotal.toLocaleString('pt-BR')} eventos`;
+        label.textContent = `— ${filtered.length} de ${_evTotal.toLocaleString('pt-BR')} eventos${catLabel}`;
       } else {
-        label.textContent = `— ${rawEvents.length} eventos`;
+        label.textContent = `— ${filtered.length} eventos${catLabel}`;
       }
     }
 

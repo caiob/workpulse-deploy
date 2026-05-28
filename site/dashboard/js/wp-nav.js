@@ -62,6 +62,7 @@ function switchTab(name) {
     departments: loadDepartments,
     alerts:      loadAlerts,
     trends:      loadTrends,
+    events:      loadEvents,
     internet:    loadInternet,
     jornada:     loadJornada,
     config:      loadConfig,
