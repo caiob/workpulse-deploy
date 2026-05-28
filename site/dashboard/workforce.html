@@ -655,6 +655,42 @@
         <tbody></tbody>
       </table>
     </div>
+
+    <!-- ── RELATÓRIOS AUTOMÁTICOS ── -->
+    <div class="card no-bar" style="margin-bottom:18px">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:16px">
+        <div>
+          <h3 style="margin:0">Relatórios Automáticos</h3>
+          <p style="font-size:12px;color:var(--text-dim);margin:4px 0 0">
+            Envio agendado por e-mail (diário, semanal ou mensal) com dados de atividade da equipe.
+          </p>
+        </div>
+        <button class="primary" onclick="openCreateReportModal()">+ Novo Relatório</button>
+      </div>
+
+      <!-- estilos inline dos cards de relatório -->
+      <style>
+        .report-card{background:var(--bg-card,#1e293b);border:1px solid var(--border,#334155);border-radius:10px;padding:16px;margin-bottom:12px}
+        .report-card-header{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+        .report-card-title{font-weight:700;font-size:15px}
+        .report-card-meta{display:flex;gap:16px;font-size:12px;color:var(--text-dim);margin-bottom:4px}
+        .report-card-sections{font-size:12px;color:var(--text-dim);margin-bottom:4px}
+        .report-card-recipients{margin-bottom:10px}
+        .report-card-actions{display:flex;flex-wrap:wrap;gap:8px}
+        .badge{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600}
+        .badge-ok{background:#16a34a22;color:#4ade80}
+        .badge-warn{background:#ca8a0422;color:#facc15}
+        .badge-error{background:#dc262622;color:#f87171}
+        .btn-danger-outline{border:1px solid var(--danger,#ef4444);color:var(--danger,#ef4444);background:transparent;cursor:pointer;border-radius:6px;padding:4px 10px;font-size:12px}
+        .btn-danger-outline:hover{background:#ef444422}
+        .checkbox-group{display:flex;flex-wrap:wrap;gap:12px;margin-top:6px}
+        .checkbox-label{display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer}
+      </style>
+
+      <div id="reportsListContainer">
+        <p class="empty-state">Carregando relatórios…</p>
+      </div>
+    </div>
   </section>
 
   <p class="footnote">WorkPulse · Painel do Cliente · Métricas baseadas em metadados de uso (sem captura de tela, sem keylogging).</p>
@@ -672,6 +708,7 @@
 <script src="js/wp-internet.js" defer></script>
 <script src="js/wp-jornada.js" defer></script>
 <script src="js/wp-settings.js" defer></script>
+<script src="js/wp-reports.js" defer></script>
 <script src="js/wp-nav.js" defer></script>
 <script src="js/wp-auth.js" defer></script>
 

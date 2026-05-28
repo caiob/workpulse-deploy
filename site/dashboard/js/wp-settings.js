@@ -9,7 +9,7 @@ let _depts   = []; // cache local: [{id, name, user_count, users:[...]}]
 
 /* -------------------- LOAD CONFIG -------------------- */
 async function loadConfig() {
-  await Promise.all([loadRules(), loadAppsForConfig(), loadCollabs(), loadDepts()]);
+  await Promise.all([loadRules(), loadAppsForConfig(), loadCollabs(), loadDepts(), loadReports()]);
   // Atualiza botão de tema (pode ter mudado de aba)
   const btn = document.getElementById('themeToggleBtn');
   if (btn) {

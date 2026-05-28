@@ -59,6 +59,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import datetime as dt
+import email.mime.application
+import email.mime.multipart
+import email.mime.text
+import io
 import json
 import os
 import re as _re
@@ -104,6 +108,8 @@ LICENSE_KEY_B64     = os.getenv("WORKPULSE_LICENSE_PRIVKEY_B64", "")
 LICENSE_KEY_SECRET_ARN = os.getenv("LICENSE_KEY_SECRET_ARN", "")
 
 APP_VERSION = "2.0.0"
+FROM_EMAIL   = os.getenv("WORKPULSE_FROM_EMAIL", "noreply@workpulse.com.br")
+SES_REGION   = os.getenv("WORKPULSE_SES_REGION", "us-east-1")
 
 if not ADMIN_TOKEN or len(ADMIN_TOKEN) < 32:
     raise RuntimeError(
@@ -289,6 +295,35 @@ _SCHEMA_STMTS = [
     "CREATE INDEX IF NOT EXISTS idx_audit_ts            ON audit_log(ts)",
     "CREATE INDEX IF NOT EXISTS idx_prod_rules_tenant   ON productivity_rules(tenant_id)",
     "CREATE INDEX IF NOT EXISTS idx_dept_tenant         ON tenant_departments(tenant_id)",
+    # ── Relatórios automáticos ──────────────────────────────────────────────
+    """
+    CREATE TABLE IF NOT EXISTS report_configs (
+        id           BIGSERIAL PRIMARY KEY,
+        tenant_id    TEXT NOT NULL,
+        name         TEXT NOT NULL,
+        recipients   TEXT NOT NULL,          -- JSON array of email strings
+        frequency    TEXT NOT NULL,          -- 'daily' | 'weekly' | 'monthly'
+        sections     TEXT NOT NULL,          -- JSON array: coletas|jornada|tendencias|alertas
+        user_filter  TEXT,                   -- JSON array of user_ids or NULL = all
+        enabled      BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS report_history (
+        id           BIGSERIAL PRIMARY KEY,
+        config_id    BIGINT NOT NULL REFERENCES report_configs(id) ON DELETE CASCADE,
+        tenant_id    TEXT NOT NULL,
+        sent_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        recipients   TEXT NOT NULL,          -- JSON array of emails actually sent to
+        status       TEXT NOT NULL,          -- 'ok' | 'error'
+        error_msg    TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_report_configs_tenant ON report_configs(tenant_id)",
+    "CREATE INDEX IF NOT EXISTS idx_report_history_config ON report_history(config_id)",
+    "CREATE INDEX IF NOT EXISTS idx_report_history_tenant ON report_history(tenant_id, sent_at DESC)",
 ]
 
 
@@ -693,13 +728,16 @@ async def lifespan(app: FastAPI):
     _init_pool()
     init_db()
     load_or_create_keypair()
-    task = asyncio.create_task(_retention_worker())
+    task_retention = asyncio.create_task(_retention_worker())
+    task_reports   = asyncio.create_task(_reports_worker())
     yield
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
+    task_retention.cancel()
+    task_reports.cancel()
+    for t in (task_retention, task_reports):
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
     if _pool:
         _pool.closeall()
 
@@ -1731,6 +1769,480 @@ def admin_purge_data(request: Request, tenant: str | None = None):
 
     return {"status": "ok", "scope": tenant or "ALL", "deleted": deleted}
 
+
+
+# ===========================================================================
+# RELATÓRIOS AUTOMÁTICOS
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Modelos Pydantic
+# ---------------------------------------------------------------------------
+class ReportConfigIn(BaseModel):
+    name:        str
+    recipients:  list[str]                          # lista de e-mails
+    frequency:   str                                 # daily | weekly | monthly
+    sections:    list[str]                           # coletas | jornada | tendencias | alertas
+    user_filter: list[str] | None = None            # user_ids ou None = todos
+    enabled:     bool = True
+
+
+class ReportConfigOut(ReportConfigIn):
+    id:         int
+    created_at: str
+    updated_at: str
+
+
+# ---------------------------------------------------------------------------
+# Geração de PDF com reportlab
+# ---------------------------------------------------------------------------
+def _build_report_pdf(
+    tenant_id: str,
+    cfg: dict,
+    period_label: str,
+) -> bytes:
+    """Gera o PDF do relatório e devolve bytes."""
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import cm
+    from reportlab.platypus import (
+        Paragraph, Spacer, Table, TableStyle, SimpleDocTemplate, HRFlowable
+    )
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4,
+                            leftMargin=2*cm, rightMargin=2*cm,
+                            topMargin=2*cm, bottomMargin=2*cm)
+    styles = getSampleStyleSheet()
+    title_style  = ParagraphStyle("wp_title",  parent=styles["Title"],  fontSize=18, spaceAfter=6)
+    h2_style     = ParagraphStyle("wp_h2",     parent=styles["Heading2"], spaceBefore=14, spaceAfter=4)
+    normal_style = styles["Normal"]
+    dim_style    = ParagraphStyle("wp_dim",    parent=normal_style, textColor=colors.gray, fontSize=9)
+
+    story = []
+
+    # Cabeçalho
+    story.append(Paragraph("WorkPulse — Relatório Automático", title_style))
+    story.append(Paragraph(f"Período: <b>{period_label}</b>", normal_style))
+    story.append(Paragraph(f"Relatório: <b>{cfg['name']}</b>", normal_style))
+    story.append(Paragraph(
+        f"Gerado em: {dt.datetime.utcnow().strftime('%d/%m/%Y %H:%M')} UTC",
+        dim_style,
+    ))
+    story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#3b82f6"), spaceAfter=10))
+
+    sections = json.loads(cfg["sections"]) if isinstance(cfg["sections"], str) else cfg["sections"]
+    user_filter = json.loads(cfg["user_filter"]) if cfg.get("user_filter") else None
+
+    # Busca dados do banco
+    with db() as c:
+        # ── COLETAS POR PESSOA ─────────────────────────────────────────────
+        if "coletas" in sections:
+            story.append(Paragraph("Coletas por Pessoa", h2_style))
+            uid_filter = user_filter or []
+            if uid_filter:
+                rows = c.execute(
+                    """SELECT u.display_name, u.email, u.department,
+                              COALESCE(SUM(CASE WHEN e.bucket='window' THEN e.duration_sec END),0) AS active,
+                              COALESCE(SUM(CASE WHEN e.bucket='afk' AND e.data_json->>'status'='afk'
+                                               THEN e.duration_sec END),0) AS afk
+                       FROM users u LEFT JOIN events e
+                            ON e.tenant_id=u.tenant_id AND e.user_id=u.user_id
+                               AND e.ts >= NOW() - INTERVAL '31 days'
+                       WHERE u.tenant_id=%s AND u.user_id=ANY(%s)
+                       GROUP BY u.display_name, u.email, u.department
+                       ORDER BY active DESC""",
+                    (tenant_id, uid_filter),
+                ).fetchall()
+            else:
+                rows = c.execute(
+                    """SELECT u.display_name, u.email, u.department,
+                              COALESCE(SUM(CASE WHEN e.bucket='window' THEN e.duration_sec END),0) AS active,
+                              COALESCE(SUM(CASE WHEN e.bucket='afk' AND e.data_json->>'status'='afk'
+                                               THEN e.duration_sec END),0) AS afk
+                       FROM users u LEFT JOIN events e
+                            ON e.tenant_id=u.tenant_id AND e.user_id=u.user_id
+                               AND e.ts >= NOW() - INTERVAL '31 days'
+                       WHERE u.tenant_id=%s
+                       GROUP BY u.display_name, u.email, u.department
+                       ORDER BY active DESC""",
+                    (tenant_id,),
+                ).fetchall()
+
+            if rows:
+                data = [["Colaborador", "Depto", "Ativo (h)", "AFK (h)"]]
+                for r in rows:
+                    data.append([
+                        r["display_name"] or r["email"],
+                        r["department"] or "—",
+                        f"{r['active']/3600:.1f}",
+                        f"{r['afk']/3600:.1f}",
+                    ])
+                tbl = Table(data, colWidths=[6*cm, 4*cm, 3*cm, 3*cm])
+                tbl.setStyle(TableStyle([
+                    ("BACKGROUND",   (0, 0), (-1, 0), colors.HexColor("#3b82f6")),
+                    ("TEXTCOLOR",    (0, 0), (-1, 0), colors.white),
+                    ("FONTNAME",     (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTSIZE",     (0, 0), (-1, -1), 8),
+                    ("GRID",         (0, 0), (-1, -1), 0.25, colors.lightgrey),
+                    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f0f4ff")]),
+                    ("ALIGN",        (2, 0), (-1, -1), "RIGHT"),
+                ]))
+                story.append(tbl)
+            else:
+                story.append(Paragraph("Nenhum dado no período.", dim_style))
+            story.append(Spacer(1, 10))
+
+        # ── JORNADA ───────────────────────────────────────────────────────
+        if "jornada" in sections:
+            story.append(Paragraph("Jornada de Trabalho", h2_style))
+            rows = c.execute(
+                """SELECT u.display_name, u.email,
+                          ds.day,
+                          ds.active_sec, ds.afk_sec
+                   FROM daily_summaries ds
+                   JOIN users u ON u.tenant_id=ds.tenant_id AND u.user_id=ds.user_id
+                   WHERE ds.tenant_id=%s
+                     AND ds.day >= to_char(NOW() - INTERVAL '30 days', 'YYYY-MM-DD')
+                   ORDER BY u.display_name, ds.day""",
+                (tenant_id,),
+            ).fetchall()
+            if rows:
+                data = [["Colaborador", "Dia", "Ativo (h)", "AFK (h)"]]
+                for r in rows:
+                    data.append([
+                        r["display_name"] or r["email"],
+                        r["day"],
+                        f"{r['active_sec']/3600:.1f}",
+                        f"{r['afk_sec']/3600:.1f}",
+                    ])
+                tbl = Table(data, colWidths=[6*cm, 3*cm, 3*cm, 3*cm])
+                tbl.setStyle(TableStyle([
+                    ("BACKGROUND",   (0, 0), (-1, 0), colors.HexColor("#3b82f6")),
+                    ("TEXTCOLOR",    (0, 0), (-1, 0), colors.white),
+                    ("FONTNAME",     (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTSIZE",     (0, 0), (-1, -1), 8),
+                    ("GRID",         (0, 0), (-1, -1), 0.25, colors.lightgrey),
+                    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f0f4ff")]),
+                    ("ALIGN",        (2, 0), (-1, -1), "RIGHT"),
+                ]))
+                story.append(tbl)
+            else:
+                story.append(Paragraph("Nenhum dado no período.", dim_style))
+            story.append(Spacer(1, 10))
+
+        # ── TENDÊNCIAS ────────────────────────────────────────────────────
+        if "tendencias" in sections:
+            story.append(Paragraph("Tendências (últimos 14 dias)", h2_style))
+            rows = c.execute(
+                """SELECT substr(ts,1,10) AS day,
+                          SUM(CASE WHEN bucket='window' THEN duration_sec ELSE 0 END) AS active,
+                          SUM(CASE WHEN bucket='afk' AND data_json->>'status'='afk'
+                                   THEN duration_sec ELSE 0 END) AS afk,
+                          COUNT(DISTINCT user_id) AS users
+                   FROM events
+                   WHERE tenant_id=%s AND ts >= NOW() - INTERVAL '14 days'
+                   GROUP BY day ORDER BY day""",
+                (tenant_id,),
+            ).fetchall()
+            if rows:
+                data = [["Dia", "Usuários", "Ativo total (h)", "AFK total (h)"]]
+                for r in rows:
+                    data.append([
+                        r["day"], str(r["users"]),
+                        f"{r['active']/3600:.1f}",
+                        f"{r['afk']/3600:.1f}",
+                    ])
+                tbl = Table(data, colWidths=[4*cm, 3*cm, 4.5*cm, 4.5*cm])
+                tbl.setStyle(TableStyle([
+                    ("BACKGROUND",   (0, 0), (-1, 0), colors.HexColor("#3b82f6")),
+                    ("TEXTCOLOR",    (0, 0), (-1, 0), colors.white),
+                    ("FONTNAME",     (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTSIZE",     (0, 0), (-1, -1), 8),
+                    ("GRID",         (0, 0), (-1, -1), 0.25, colors.lightgrey),
+                    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f0f4ff")]),
+                    ("ALIGN",        (1, 0), (-1, -1), "RIGHT"),
+                ]))
+                story.append(tbl)
+            else:
+                story.append(Paragraph("Nenhum dado no período.", dim_style))
+            story.append(Spacer(1, 10))
+
+        # ── ALERTAS ───────────────────────────────────────────────────────
+        if "alertas" in sections:
+            story.append(Paragraph("Alertas de Produtividade", h2_style))
+            # Usuários sem atividade nos últimos 3 dias úteis
+            rows = c.execute(
+                """SELECT u.display_name, u.email, u.department,
+                          u.last_seen
+                   FROM users u
+                   WHERE u.tenant_id=%s
+                     AND (u.last_seen IS NULL
+                          OR u.last_seen::timestamptz < NOW() - INTERVAL '72 hours')
+                   ORDER BY u.last_seen ASC NULLS FIRST""",
+                (tenant_id,),
+            ).fetchall()
+            if rows:
+                data = [["Colaborador", "Depto", "Última atividade"]]
+                for r in rows:
+                    data.append([
+                        r["display_name"] or r["email"],
+                        r["department"] or "—",
+                        r["last_seen"] or "Nunca",
+                    ])
+                tbl = Table(data, colWidths=[6*cm, 4*cm, 6*cm])
+                tbl.setStyle(TableStyle([
+                    ("BACKGROUND",   (0, 0), (-1, 0), colors.HexColor("#ef4444")),
+                    ("TEXTCOLOR",    (0, 0), (-1, 0), colors.white),
+                    ("FONTNAME",     (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTSIZE",     (0, 0), (-1, -1), 8),
+                    ("GRID",         (0, 0), (-1, -1), 0.25, colors.lightgrey),
+                    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#fff0f0")]),
+                ]))
+                story.append(Paragraph(
+                    f"⚠ {len(rows)} colaborador(es) sem atividade nas últimas 72h:", dim_style
+                ))
+                story.append(tbl)
+            else:
+                story.append(Paragraph("Nenhum alerta encontrado.", dim_style))
+            story.append(Spacer(1, 10))
+
+    story.append(Spacer(1, 20))
+    story.append(HRFlowable(width="100%", thickness=0.5, color=colors.lightgrey))
+    story.append(Paragraph(
+        "WorkPulse — Monitoramento de Força de Trabalho | workpulse.com.br",
+        dim_style,
+    ))
+
+    doc.build(story)
+    return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Envio via AWS SES
+# ---------------------------------------------------------------------------
+def _send_report_email(
+    recipients: list[str],
+    subject: str,
+    body_html: str,
+    pdf_bytes: bytes,
+    filename: str,
+) -> None:
+    import boto3 as _boto3
+
+    msg = email.mime.multipart.MIMEMultipart("mixed")
+    msg["Subject"] = subject
+    msg["From"]    = FROM_EMAIL
+    msg["To"]      = ", ".join(recipients)
+
+    body_part = email.mime.text.MIMEText(body_html, "html", "utf-8")
+    msg.attach(body_part)
+
+    attachment = email.mime.application.MIMEApplication(pdf_bytes, Name=filename)
+    attachment["Content-Disposition"] = f'attachment; filename="{filename}"'
+    msg.attach(attachment)
+
+    client = _boto3.client("ses", region_name=SES_REGION)
+    client.send_raw_email(
+        Source=FROM_EMAIL,
+        Destinations=recipients,
+        RawMessage={"Data": msg.as_bytes()},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Função central de execução de um relatório
+# ---------------------------------------------------------------------------
+def _run_report(cfg: dict, tenant_id: str, period_label: str) -> None:
+    """Gera o PDF e envia o e-mail para um config de relatório."""
+    config_id  = cfg["id"]
+    recipients = json.loads(cfg["recipients"]) if isinstance(cfg["recipients"], str) else cfg["recipients"]
+    rname      = cfg["name"]
+
+    status, err_msg = "ok", None
+    try:
+        pdf_bytes = _build_report_pdf(tenant_id, cfg, period_label)
+        filename  = f"workpulse_{rname.lower().replace(' ', '_')}_{dt.date.today().isoformat()}.pdf"
+        subject   = f"WorkPulse — {rname} ({period_label})"
+        body_html = f"""
+        <p>Olá,</p>
+        <p>Segue em anexo o relatório automático <b>{rname}</b> referente ao período <b>{period_label}</b>.</p>
+        <p>Acesse o dashboard para mais detalhes: <a href="https://workpulse.com.br/dashboard/workforce.html">WorkPulse Dashboard</a></p>
+        <br><p style="color:#888;font-size:12px">WorkPulse — Monitoramento de Força de Trabalho</p>
+        """
+        _send_report_email(recipients, subject, body_html, pdf_bytes, filename)
+        print(f"[reports] sent '{rname}' → {recipients}", flush=True)
+    except Exception as exc:
+        status, err_msg = "error", str(exc)
+        print(f"[reports] ERROR sending '{rname}': {exc}", flush=True)
+
+    # Grava histórico
+    with db() as c:
+        c.execute(
+            """INSERT INTO report_history (config_id, tenant_id, recipients, status, error_msg)
+               VALUES (%s, %s, %s, %s, %s)""",
+            (config_id, tenant_id, json.dumps(recipients), status, err_msg),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Worker de agendamento (roda diariamente às 10:00 UTC = 07:00 BRT)
+# ---------------------------------------------------------------------------
+def _do_reports() -> None:
+    """Verifica quais configs devem ser enviados hoje e os envia."""
+    now_utc  = dt.datetime.utcnow()
+    today    = now_utc.date()
+    weekday  = today.weekday()   # 0=Mon … 6=Sun
+    monthday = today.day
+
+    with db() as c:
+        configs = c.execute(
+            "SELECT * FROM report_configs WHERE enabled = TRUE"
+        ).fetchall()
+
+    for cfg in configs:
+        freq = cfg["frequency"]
+        should_run = (
+            freq == "daily"
+            or (freq == "weekly"  and weekday == 0)           # segunda-feira
+            or (freq == "monthly" and monthday == 1)          # dia 1 do mês
+        )
+        if not should_run:
+            continue
+
+        if freq == "daily":
+            period_label = today.strftime("%d/%m/%Y")
+        elif freq == "weekly":
+            sunday = today + dt.timedelta(days=6)
+            period_label = f"{today.strftime('%d/%m/%Y')} – {sunday.strftime('%d/%m/%Y')}"
+        else:
+            import calendar
+            last_day = calendar.monthrange(today.year, today.month)[1]
+            period_label = today.strftime("%B/%Y")
+
+        _run_report(dict(cfg), cfg["tenant_id"], period_label)
+
+
+async def _reports_worker() -> None:
+    """Aguarda até 10:00 UTC do próximo dia e dispara os relatórios."""
+    while True:
+        now_utc     = dt.datetime.utcnow()
+        target      = now_utc.replace(hour=10, minute=0, second=0, microsecond=0)
+        if now_utc >= target:
+            target += dt.timedelta(days=1)
+        sleep_secs  = (target - now_utc).total_seconds()
+        print(f"[reports_worker] próximo disparo em {sleep_secs/3600:.1f}h ({target} UTC)", flush=True)
+        await asyncio.sleep(sleep_secs)
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _do_reports)
+
+
+# ---------------------------------------------------------------------------
+# Endpoints de Relatórios
+# ---------------------------------------------------------------------------
+
+@app.get("/v1/reports", dependencies=[Depends(require_tenant_scope)])
+def list_reports(tenant: str):
+    with db() as c:
+        rows = c.execute(
+            "SELECT * FROM report_configs WHERE tenant_id=%s ORDER BY id",
+            (tenant,),
+        ).fetchall()
+    return {"reports": [dict(r) for r in rows]}
+
+
+@app.post("/v1/reports", dependencies=[Depends(require_tenant_scope)])
+def create_report(tenant: str, body: ReportConfigIn):
+    tid = tenant
+    with db() as c:
+        row = c.execute(
+            """INSERT INTO report_configs
+               (tenant_id, name, recipients, frequency, sections, user_filter, enabled)
+               VALUES (%s,%s,%s,%s,%s,%s,%s)
+               RETURNING *""",
+            (
+                tid, body.name,
+                json.dumps(body.recipients),
+                body.frequency,
+                json.dumps(body.sections),
+                json.dumps(body.user_filter) if body.user_filter is not None else None,
+                body.enabled,
+            ),
+        ).fetchone()
+    return dict(row)
+
+
+@app.put("/v1/reports/{cfg_id}", dependencies=[Depends(require_tenant_scope)])
+def update_report(cfg_id: int, tenant: str, body: ReportConfigIn):
+    tid = tenant
+    with db() as c:
+        row = c.execute(
+            """UPDATE report_configs
+               SET name=%s, recipients=%s, frequency=%s, sections=%s,
+                   user_filter=%s, enabled=%s, updated_at=NOW()
+               WHERE id=%s AND tenant_id=%s
+               RETURNING *""",
+            (
+                body.name,
+                json.dumps(body.recipients),
+                body.frequency,
+                json.dumps(body.sections),
+                json.dumps(body.user_filter) if body.user_filter is not None else None,
+                body.enabled,
+                cfg_id, tid,
+            ),
+        ).fetchone()
+    if not row:
+        raise HTTPException(404, "Report config not found")
+    return dict(row)
+
+
+@app.delete("/v1/reports/{cfg_id}", dependencies=[Depends(require_tenant_scope)])
+def delete_report(cfg_id: int, tenant: str):
+    tid = tenant
+    with db() as c:
+        result = c.execute(
+            "DELETE FROM report_configs WHERE id=%s AND tenant_id=%s",
+            (cfg_id, tid),
+        )
+    if result.rowcount == 0:
+        raise HTTPException(404, "Report config not found")
+    return {"status": "deleted"}
+
+
+@app.post("/v1/reports/{cfg_id}/send", dependencies=[Depends(require_tenant_scope)])
+def send_report_now(cfg_id: int, tenant: str):
+    """Envio imediato (test button)."""
+    tid = tenant
+    with db() as c:
+        row = c.execute(
+            "SELECT * FROM report_configs WHERE id=%s AND tenant_id=%s",
+            (cfg_id, tid),
+        ).fetchone()
+    if not row:
+        raise HTTPException(404, "Report config not found")
+    cfg  = dict(row)
+    t = threading.Thread(
+        target=_run_report,
+        args=(cfg, tid, dt.date.today().strftime("%d/%m/%Y")),
+        daemon=True,
+    )
+    t.start()
+    return {"status": "queued"}
+
+
+@app.get("/v1/reports/{cfg_id}/history", dependencies=[Depends(require_tenant_scope)])
+def report_history(cfg_id: int, tenant: str):
+    tid = tenant
+    with db() as c:
+        rows = c.execute(
+            """SELECT * FROM report_history
+               WHERE config_id=%s AND tenant_id=%s
+               ORDER BY sent_at DESC LIMIT 50""",
+            (cfg_id, tid),
+        ).fetchall()
+    return {"history": [dict(r) for r in rows]}
 
 # ---------------------------------------------------------------------------
 # Entry point

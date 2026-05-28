@@ -57,6 +57,40 @@ with an assertion that the old block was found exactly once.
 
 ---
 
+## ⚠️ CRITICAL #3 — PostgreSQL GROUP BY + correlated subqueries
+
+When adding a correlated subquery to a `SELECT` that already has `GROUP BY`,
+**every outer-table column referenced inside the subquery must also appear in
+the `GROUP BY` clause** — even if it is a constant due to a `WHERE` filter.
+
+PostgreSQL raises at runtime:
+```
+ERROR: column "u.tenant_id" must appear in the GROUP BY clause
+       or be used in an aggregate function
+```
+
+The browser sees a CORS error (no `Access-Control-Allow-Origin` header) instead
+of the real 500, making diagnosis harder.
+
+**Real incident (2026-05-27):** adding `agent_version` to `/v1/team/summary`
+via a correlated subquery that referenced `u.tenant_id` — which was in `WHERE`
+but not in `GROUP BY` — took the endpoint down in production immediately after
+deploy. Fix: add the missing column to `GROUP BY`:
+
+```sql
+-- ❌ QUEBRA: subquery usa u.tenant_id mas ele não está no GROUP BY
+GROUP BY u.user_id, u.display_name, u.email, u.department, u.last_seen
+
+-- ✅ CORRETO: adicionar u.tenant_id ao GROUP BY
+GROUP BY u.user_id, u.display_name, u.email, u.department, u.last_seen, u.tenant_id
+```
+
+**Rule:** before shipping any SQL change that adds a subquery to a GROUP BY
+query, list every outer column the subquery references and confirm all appear
+in the GROUP BY list.
+
+---
+
 ## ⚠️ CRITICAL #2 — Frontend ↔ Backend response contracts
 
 The dashboards are plain HTML+JS that read **exact JSON shapes** from the API.
@@ -250,6 +284,12 @@ Public key is served at `GET /v1/license/pubkey`; agents verify licenses locally
 `_retention_worker()` (asyncio task, started in `lifespan`) archives events older
 than `tenants.retention_days` (default 90) into `daily_summaries`, then deletes them.
 
+`_reports_worker()` (asyncio task, started in `lifespan`) sleeps until 10:00 UTC
+(07:00 BRT) daily, then calls `_do_reports()` which queries `report_configs` and
+sends PDF reports via AWS SES for each enabled config whose `frequency` matches
+the current day (daily=every day, weekly=Monday, monthly=1st). PDF is generated
+with **reportlab**. Env vars: `WORKPULSE_FROM_EMAIL`, `WORKPULSE_SES_REGION`.
+
 ---
 
 ## Database Schema
@@ -257,6 +297,8 @@ than `tenants.retention_days` (default 90) into `daily_summaries`, then deletes 
 | Table | Purpose |
 |---|---|
 | `tenants` | One row per client company. `dash_token`, `retention_days` |
+| `report_configs` | Configurações de relatórios automáticos por tenant: `name`, `recipients` (JSON), `frequency`, `sections` (JSON), `user_filter` (JSON), `enabled` |
+| `report_history` | Log de envios: `config_id`, `sent_at`, `status` (ok/error), `error_msg` |
 | `licenses` | Ed25519-signed tokens. `revoked` flag |
 | `users` | `(tenant_id, user_id)` — `user_id` = hostname. `display_name`, `login_user`, `department`, `role` |
 | `devices` | One row per device (hostname + OS metadata) |
@@ -284,6 +326,9 @@ Key indexes: `idx_events_tenant_bucket_ts`, JSONB expression indexes
 `POST /admin/tenant-token`, `GET /admin/tenants`, `GET /admin/licenses`,
 `GET /admin/stats`, `GET /admin/audit`, `GET /admin/data-summary`,
 `POST /admin/purge-data`, `PUT /admin/tenants/{id}/retention`
+**Tenant-scoped (Reports):** `GET /reports`, `POST /reports`,
+`PUT /reports/{id}`, `DELETE /reports/{id}`, `POST /reports/{id}/send`,
+`GET /reports/{id}/history`
 **Public:** `GET /healthz`, `GET /license/pubkey`
 
 When adding an endpoint: add the Pydantic model, the route with the right
@@ -321,6 +366,7 @@ site/dashboard/
     wp-internet.js        Aba Internet (loadInternet, renderSitesTable)
     wp-jornada.js         Aba Jornada de Trabalho (loadJornada, computeJornadas)
     wp-settings.js        Aba Configurações (regras, apps, depts, colaboradores)
+    wp-reports.js         Relatórios automáticos (CRUD, envio SES, histórico)
     wp-nav.js             Navegação por tabs + dropdowns (switchTab, TABS)
     wp-auth.js            Login com validação API, logout, tema, bootstrap IIFE
 ```
@@ -441,4 +487,10 @@ Separate crate. Built per-client with an embedded license.
 calculation in the Rust agent, rebuilt eight silently-truncated agent files;
 added `agent_version` column to aba Pessoas — `GET /v1/team/summary` now returns
 `agent_version` via correlated subquery on `devices` table; `workforce.html`
-and `wp-people.js` updated accordingly).
+and `wp-people.js` updated accordingly; fixed GROUP BY omission that caused
+production 500 → added `u.tenant_id` to GROUP BY in `team_summary` SQL;
+added CRITICAL #3 documenting the GROUP BY + correlated subquery pitfall;
+**added Relatórios Automáticos** — tables `report_configs`/`report_history`,
+6 new tenant-scoped endpoints under `/v1/reports`, PDF generation via reportlab,
+SES email via boto3, `_reports_worker` cron task (daily at 10:00 UTC = 07:00 BRT),
+frontend in `wp-reports.js`, UI card in aba Configurações of `workforce.html`).
