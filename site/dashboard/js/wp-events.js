@@ -24,15 +24,14 @@ function _evChangePageSize() {
 // Agrupamento de sessões
 // ─────────────────────────────────────────────────────────────────────
 
+/** Retorna o modo de agrupamento selecionado: 'sequential' | 'byapp' | 'none' */
+function _evGroupMode() {
+  return document.getElementById('evGroupMode')?.value || 'sequential';
+}
+
 /**
- * Agrupa eventos consecutivos com mesmo user_id + app (ignora título).
- * Eventos chegam ordenados por ts DESC (mais recente primeiro).
- *
- * Cada grupo resultante contém:
- *   _count      — quantos eventos foram mesclados
- *   _ts_display — timestamp do evento mais antigo (início da sessão)
- *   _subEvents  — array com todos os eventos individuais (para expansão)
- *   data.title  — título do evento mais recente do grupo
+ * MODO SEQUENTIAL — Agrupa eventos CONSECUTIVOS com mesmo user_id + app.
+ * Ignora título. Eventos chegam ordenados por ts DESC.
  */
 function collapseEvents(events) {
   if (!events.length) return events;
@@ -40,13 +39,13 @@ function collapseEvents(events) {
   const merged = [];
   let cur = {
     ...events[0],
-    _count:     1,
+    _count:      1,
     _ts_display: events[0].ts,
-    _subEvents: [events[0]],
+    _subEvents:  [events[0]],
   };
 
   for (let i = 1; i < events.length; i++) {
-    const e       = events[i];
+    const e        = events[i];
     const sameUser = cur.user_id === e.user_id;
     const sameApp  = ((cur.data || {}).app || '') === ((e.data || {}).app || '');
 
@@ -62,6 +61,50 @@ function collapseEvents(events) {
   }
   merged.push(cur);
   return merged;
+}
+
+/** Retorna a categoria mais frequente entre um array de eventos. */
+function _dominantCategory(events) {
+  const cnt = {};
+  for (const e of events) {
+    const c = e.category || 'uncategorized';
+    cnt[c] = (cnt[c] || 0) + 1;
+  }
+  return Object.entries(cnt).sort((a, b) => b[1] - a[1])[0]?.[0] || 'uncategorized';
+}
+
+/**
+ * MODO BY-APP — Agrupa TODOS os eventos do período pelo nome do executável,
+ * independente de ordem. Ordena por tempo total decrescente.
+ * Sub-eventos ficam em _subEvents para expansão.
+ */
+function groupByApp(events) {
+  if (!events.length) return events;
+
+  const appMap = new Map();
+
+  for (const e of events) {
+    const app = (e.data || {}).app || '(desconhecido)';
+    if (!appMap.has(app)) {
+      appMap.set(app, {
+        ...e,
+        data:         { app, title: '' },
+        _count:       0,
+        duration_sec: 0,
+        _subEvents:   [],
+        _ts_display:  e.ts,  // mais recente do grupo (1º encontrado em ts DESC)
+      });
+    }
+    const g = appMap.get(app);
+    g.duration_sec += (e.duration_sec || 0);
+    g._count++;
+    g._subEvents.push(e);
+  }
+
+  const result = [...appMap.values()].sort((a, b) => b.duration_sec - a.duration_sec);
+  // Assign categoria dominante após construir todos os grupos
+  for (const g of result) g.category = _dominantCategory(g._subEvents);
+  return result;
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -100,12 +143,16 @@ async function loadEvents(resetPage = true) {
   const sig    = _tabAbort ? _tabAbort.signal : undefined;
 
   _evPageSize = _evGetPageSize();
+  const mode  = _evGroupMode();
 
   const base      = `tenant=${encodeURIComponent(state.tenant)}&days=${days}`;
   const userParam = user   ? `&user_id=${encodeURIComponent(user)}` : '';
   const bktParam  = bucket ? `&bucket=${encodeURIComponent(bucket)}` : '';
-  // N+1: pede um evento a mais para detectar se existe próxima página
-  const pageParam = `&limit=${_evPageSize + 1}&offset=${_evPage * _evPageSize}`;
+
+  // "Agrupar por App" busca tudo de uma vez (sem paginação) — máx 1000 do backend
+  const pageParam = mode === 'byapp'
+    ? `&limit=1000&offset=0`
+    : `&limit=${_evPageSize + 1}&offset=${_evPage * _evPageSize}`;  // N+1 para detectar próxima pág
 
   try {
     const [summary, evData] = await Promise.all([
@@ -124,27 +171,41 @@ async function loadEvents(resetPage = true) {
 
     drawEvDailyChart(summary.daily || []);
 
-    // N+1: determina hasNext e descarta o evento extra
-    const rawAll    = evData.events || [];
-    const hasNext   = rawAll.length > _evPageSize;
-    const rawEvents = hasNext ? rawAll.slice(0, _evPageSize) : rawAll;
+    // ── Paginação + agrupamento dependem do modo ──────────────────────
+    let rawEvents, hasNext, hasPrev, totalPages;
 
-    // Total do backend (quando disponível) para exibir "Página X de Y"
-    _evTotal = evData.total || 0;
-    const totalPages = _evTotal > 0
-      ? Math.max(1, Math.ceil(_evTotal / _evPageSize))
-      : (hasNext ? _evPage + 2 : _evPage + 1);
+    if (mode === 'byapp') {
+      // Sem paginação — todos os eventos já vieram
+      rawEvents  = evData.events || [];
+      hasNext    = false;
+      hasPrev    = false;
+      totalPages = 1;
+      _evTotal   = evData.total || rawEvents.length;
+    } else {
+      // N+1: se vieram mais que _evPageSize há próxima página
+      const rawAll = evData.events || [];
+      hasNext      = rawAll.length > _evPageSize;
+      rawEvents    = hasNext ? rawAll.slice(0, _evPageSize) : rawAll;
+      hasPrev      = _evPage > 0;
+      _evTotal     = evData.total || 0;
+      totalPages   = _evTotal > 0
+        ? Math.max(1, Math.ceil(_evTotal / _evPageSize))
+        : (hasNext ? _evPage + 2 : _evPage + 1);
+    }
 
-    const hasPrev    = _evPage > 0;
-    const doCollapse = document.getElementById('evCollapse')?.checked !== false;
-    const events     = doCollapse ? collapseEvents(rawEvents) : rawEvents;
+    // Aplica o modo de agrupamento
+    const events = mode === 'sequential' ? collapseEvents(rawEvents)
+                 : mode === 'byapp'      ? groupByApp(rawEvents)
+                 : rawEvents;  // 'none'
 
     // Label de contagem
     const label = document.getElementById('evCountLabel');
     if (label) {
       if (!rawEvents.length && !_evPage) {
         label.textContent = '';
-      } else if (doCollapse && events.length < rawEvents.length) {
+      } else if (mode === 'byapp') {
+        label.textContent = `— ${events.length} apps (${rawEvents.length} eventos)`;
+      } else if (mode === 'sequential' && events.length < rawEvents.length) {
         const saved = rawEvents.length - events.length;
         label.textContent = `— ${events.length} grupos (${rawEvents.length} eventos, ${saved} agrupados)`;
       } else if (_evTotal > 0) {
@@ -182,7 +243,7 @@ async function loadEvents(resetPage = true) {
         ? `<span class="ev-count-badge">${e._count}×</span>`
         : '';
       const expandBtn = isGroup
-        ? `<button id="ev-btn-${rowId}" class="ev-expand-btn ghost" onclick="_toggleEvGroup('${rowId}')" title="Expandir eventos individuais">▶</button>`
+        ? `<button id="ev-btn-${rowId}" class="ev-expand-btn cat-btn" onclick="_toggleEvGroup('${rowId}')" title="Expandir eventos individuais">▶</button>`
         : '';
 
       // Linha pai
