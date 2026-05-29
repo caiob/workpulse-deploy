@@ -145,7 +145,7 @@ async function loadEvents(resetPage = true) {
   _evPageSize = _evGetPageSize();
   const mode  = _evGroupMode();
 
-  const base      = `tenant=${encodeURIComponent(state.tenant)}&days=${days}`;
+  const base      = `tenant=${encodeURIComponent(state.tenant)}&days=${days}&no_browser=true`;
   const userParam = user   ? `&user_id=${encodeURIComponent(user)}` : '';
   const bktParam  = bucket ? `&bucket=${encodeURIComponent(bucket)}` : '';
 

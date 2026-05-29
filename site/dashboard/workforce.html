@@ -8,7 +8,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-<link rel="stylesheet" href="css/workforce.css?v=4">
+<link rel="stylesheet" href="css/workforce.css?v=5">
 <link rel="icon" type="image/jpeg" href="../assets/logo-workpulse.jpeg">
 </head>
 <body>
@@ -487,15 +487,15 @@
       </div>
       <div class="kpi-card" style="border-top:3px solid var(--warn)">
         <div class="kpi-val" id="kpiJorAvgPause">—</div>
-        <div class="kpi-label">Pausas médias / dia</div>
+        <div class="kpi-label">Pausas (AFK) médias / dia</div>
       </div>
     </div>
 
     <div class="grid" style="margin-bottom:18px">
       <div class="card span-7 no-bar">
-        <h3>Horas trabalhadas × pausas por dia</h3>
+        <h3>Horas trabalhadas × pausas (AFK) por dia</h3>
         <p style="font-size:12px;color:var(--text-dim);margin:4px 0 14px">
-          Empilhado: tempo efetivamente trabalhado (verde) + pausas (almoço, café, AFK longos).
+          Empilhado: tempo efetivamente trabalhado (verde) + pausas AFK (almoço, café, ausências).
         </p>
         <div style="height:280px"><canvas id="chartJorHours"></canvas></div>
       </div>
@@ -520,7 +520,7 @@
             <th>Dia</th>
             <th>Início da Jornada</th>
             <th>Final da Jornada</th>
-            <th>Total de Pausas</th>
+            <th>Total de Pausas (AFK)</th>
             <th>Bruta</th>
             <th>Líquida</th>
           </tr>
@@ -734,18 +734,18 @@
 <div id="toast" class="toast hide"></div>
 
 <!-- ===== MÓDULOS JS (defer: executam após parse do DOM, em ordem) ===== -->
-<script src="js/wp-core.js?v=4" defer></script>
-<script src="js/wp-overview.js?v=4" defer></script>
-<script src="js/wp-people.js?v=4" defer></script>
-<script src="js/wp-departments.js?v=4" defer></script>
-<script src="js/wp-analytics.js?v=4" defer></script>
-<script src="js/wp-events.js?v=4" defer></script>
-<script src="js/wp-internet.js?v=4" defer></script>
-<script src="js/wp-jornada.js?v=4" defer></script>
-<script src="js/wp-settings.js?v=4" defer></script>
-<script src="js/wp-reports.js?v=4" defer></script>
-<script src="js/wp-nav.js?v=4" defer></script>
-<script src="js/wp-auth.js?v=4" defer></script>
+<script src="js/wp-core.js?v=5" defer></script>
+<script src="js/wp-overview.js?v=5" defer></script>
+<script src="js/wp-people.js?v=5" defer></script>
+<script src="js/wp-departments.js?v=5" defer></script>
+<script src="js/wp-analytics.js?v=5" defer></script>
+<script src="js/wp-events.js?v=5" defer></script>
+<script src="js/wp-internet.js?v=5" defer></script>
+<script src="js/wp-jornada.js?v=5" defer></script>
+<script src="js/wp-settings.js?v=5" defer></script>
+<script src="js/wp-reports.js?v=5" defer></script>
+<script src="js/wp-nav.js?v=5" defer></script>
+<script src="js/wp-auth.js?v=5" defer></script>
 
 </body>
 </html>

@@ -1094,14 +1094,15 @@ def team_summary(tenant: str, days: int = 7):
 
 @app.get("/v1/events", dependencies=[Depends(require_tenant_scope)])
 def search_events(
-    tenant:  str,
-    user_id: str | None = None,
-    bucket:  str | None = None,
-    since:   str | None = None,
-    until:   str | None = None,
-    days:    int | None = None,
-    limit:   int = Query(200, le=1000),
-    offset:  int = 0,
+    tenant:     str,
+    user_id:    str | None = None,
+    bucket:     str | None = None,
+    since:      str | None = None,
+    until:      str | None = None,
+    days:       int | None = None,
+    limit:      int = Query(200, le=1000),
+    offset:     int = 0,
+    no_browser: bool = False,   # quando True, exclui browsers (usado pela aba Aplicações)
 ):
     # Filtros base (reutilizados na query de contagem e na query principal)
     where = ["tenant_id = %s"]
@@ -1117,7 +1118,7 @@ def search_events(
         where.append("ts <= %s"); args.append(until)
 
     where_clause = " AND ".join(where)
-    nb_sql, nb_args = _no_browser_where()
+    nb_sql, nb_args = _no_browser_where() if no_browser else ("", [])
 
     with db() as c:
         total = c.execute(

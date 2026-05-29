@@ -229,7 +229,7 @@ function _jorDrawHoursChart(jornadas) {
           stack: 'a',
         },
         {
-          label: 'Pausas',
+          label: 'Pausas (AFK)',
           data: jornadas.map(j => +(j.pausesSec / 3600).toFixed(2)),
           backgroundColor: 'rgba(245,158,11,.70)',
           borderRadius: 6,
