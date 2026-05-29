@@ -513,16 +513,18 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
 }
 
 /* ---------- CHIPS (Apps/Sites) ---------- */
-.chip-grid { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.chip-grid { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .chip {
-  display: inline-flex; align-items: center; gap: 6px;
-  padding: 5px 12px; background: var(--panel-soft);
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 4px 10px; background: var(--panel-soft);
   border: 1px solid var(--border-soft); border-radius: 999px;
   cursor: pointer; font-size: 12px; transition: all .15s;
+  max-width: 220px;
 }
 .chip:hover { border-color: var(--primary); color: var(--primary); }
-.chip .chip-time { color: var(--text-muted); font-size: 11px; margin-left: 2px; }
-.chip.browser { border-color: rgba(108,140,255,.3); }
+.chip-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.chip-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+.chip .chip-time { color: var(--text-muted); font-size: 11px; white-space: nowrap; flex-shrink: 0; }
 
 /* ---------- ACTION BUTTONS ---------- */
 button.del-btn {

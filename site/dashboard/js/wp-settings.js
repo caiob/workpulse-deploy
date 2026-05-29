@@ -4,12 +4,13 @@
 //         colaboradores e toggle de tema.
 // =====================================================================
 
-let _allApps = [];
-let _depts   = []; // cache local: [{id, name, user_count, users:[...]}]
+let _allApps  = [];   // apenas apps não-browser
+let _allSites = [];   // sites detectados via internet
+let _depts    = [];   // cache local: [{id, name, user_count, users:[...]}]
 
 /* -------------------- LOAD CONFIG -------------------- */
 async function loadConfig() {
-  await Promise.all([loadRules(), loadAppsForConfig(), loadCollabs(), loadDepts(), loadReports()]);
+  await Promise.all([loadRules(), loadAppsForConfig(), loadSitesForConfig(), loadCollabs(), loadDepts(), loadReports()]);
   // Atualiza botão de tema (pode ter mudado de aba)
   const btn = document.getElementById('themeToggleBtn');
   if (btn) {
@@ -97,7 +98,8 @@ function quickRule(pattern, field) {
 async function loadAppsForConfig() {
   try {
     const data = await api('/v1/productivity/apps?tenant=' + encodeURIComponent(state.tenant) + '&days=30');
-    _allApps = data.apps || [];
+    // Filtra apenas não-browsers (browsers aparecem na seção de Sites)
+    _allApps = (data.apps || []).filter(a => !a.is_browser);
     renderAppsList(_allApps);
   } catch (e) { toast('Erro ao carregar apps: ' + e.message); }
 }
@@ -108,16 +110,15 @@ function renderAppsList(apps) {
     el.innerHTML = '<p style="color:var(--text-muted);font-size:13px">Nenhum aplicativo detectado no período.</p>';
     return;
   }
-  const catDot = { productive: '🟢', unproductive: '🔴', neutral: '⚪', uncategorized: '🟡' };
+  const catDot  = { productive: '#4ade80', unproductive: '#f87171', neutral: '#94a3b8', uncategorized: '#fbbf24' };
   el.innerHTML = '<div class="chip-grid">' + apps.map(a => {
-    const icon     = a.is_browser ? '🌐' : '📱';
     const dot      = catDot[a.category] || catDot.uncategorized;
     const safeName = (a.app || '').replace(/'/g, "\\'");
-    const field    = a.is_browser ? 'title' : 'app';
-    return `<span class="chip${a.is_browser ? ' browser' : ''}"
-      onclick="quickRule('${safeName}', '${field}')"
-      title="${fmtSec(a.total_sec)} - ${a.user_count} usuário(s)">
-      ${dot} ${icon} ${a.app}
+    return `<span class="chip"
+      onclick="quickRule('${safeName}', 'app')"
+      title="${a.app} — ${fmtSec(a.total_sec)} · ${a.user_count} usuário(s)">
+      <span class="chip-dot" style="background:${dot}"></span>
+      <span class="chip-label">${a.app}</span>
       <span class="chip-time">${fmtSec(a.total_sec)}</span>
     </span>`;
   }).join('') + '</div>';
@@ -127,6 +128,42 @@ function filterApps() {
   const q        = (document.getElementById('appsFilter').value || '').toLowerCase();
   const filtered = q ? _allApps.filter(a => (a.app || '').toLowerCase().includes(q)) : _allApps;
   renderAppsList(filtered);
+}
+
+/* -------------------- SITES DETECTADOS -------------------- */
+async function loadSitesForConfig() {
+  try {
+    const data = await api('/v1/productivity/internet?tenant=' + encodeURIComponent(state.tenant) + '&days=30');
+    _allSites = data.sites || [];
+    renderSitesList(_allSites);
+  } catch (e) { toast('Erro ao carregar sites: ' + e.message); }
+}
+
+function renderSitesList(sites) {
+  const el = document.getElementById('sitesList');
+  if (!el) return;
+  if (!sites.length) {
+    el.innerHTML = '<p style="color:var(--text-muted);font-size:13px">Nenhum site detectado no período.</p>';
+    return;
+  }
+  const catDot = { productive: '#4ade80', unproductive: '#f87171', neutral: '#94a3b8', uncategorized: '#fbbf24' };
+  el.innerHTML = '<div class="chip-grid">' + sites.map(s => {
+    const dot      = catDot[s.category] || catDot.uncategorized;
+    const safeName = (s.site_name || '').replace(/'/g, "\\'");
+    return `<span class="chip"
+      onclick="quickRule('${safeName}', 'title')"
+      title="${s.site_name} — ${fmtSec(s.total_sec)} · ${s.user_count} usuário(s)">
+      <span class="chip-dot" style="background:${dot}"></span>
+      <span class="chip-label">${s.site_name}</span>
+      <span class="chip-time">${fmtSec(s.total_sec)}</span>
+    </span>`;
+  }).join('') + '</div>';
+}
+
+function filterSites() {
+  const q        = (document.getElementById('sitesFilter').value || '').toLowerCase();
+  const filtered = q ? _allSites.filter(s => (s.site_name || '').toLowerCase().includes(q)) : _allSites;
+  renderSitesList(filtered);
 }
 
 /* -------------------- DEPARTAMENTOS (gestão) -------------------- */

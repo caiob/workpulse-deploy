@@ -8,7 +8,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-<link rel="stylesheet" href="css/workforce.css?v=8">
+<link rel="stylesheet" href="css/workforce.css?v=9">
 <link rel="icon" type="image/jpeg" href="../assets/logo-workpulse.jpeg">
 </head>
 <body>
@@ -622,15 +622,27 @@
     </div>
 
     <!-- Apps/Sites detectados -->
-    <div class="card no-bar" style="margin-bottom:18px">
-      <h3>Aplicativos e Sites Detectados</h3>
-      <p style="font-size:12px;color:var(--text-dim);margin:4px 0 4px">Tudo que apareceu nos últimos 30 dias. 🌐 = browser. Clique para pré-preencher o formulário acima.</p>
-      <div style="margin-top:8px;margin-bottom:6px">
-        <label style="color:var(--text-dim);font-size:12px;margin-right:8px">Filtrar:</label>
-        <input id="appsFilter" oninput="filterApps()" placeholder="buscar app ou site..."
-          style="background:var(--bg-2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:12px">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-bottom:18px">
+      <!-- Aplicativos Detectados -->
+      <div class="card no-bar" style="margin-bottom:0">
+        <h3 style="margin-bottom:2px">Aplicativos Detectados</h3>
+        <p style="font-size:12px;color:var(--text-dim);margin:0 0 8px">Últimos 30 dias. Clique para pré-preencher a regra acima.</p>
+        <div style="margin-bottom:8px">
+          <input id="appsFilter" oninput="filterApps()" placeholder="buscar aplicativo..."
+            style="width:100%;box-sizing:border-box;background:var(--bg-2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:12px">
+        </div>
+        <div id="appsList"><p style="color:var(--text-muted);font-size:13px">Carregando...</p></div>
       </div>
-      <div id="appsList"><p style="color:var(--text-muted);font-size:13px">Carregando...</p></div>
+      <!-- Sites Detectados -->
+      <div class="card no-bar" style="margin-bottom:0">
+        <h3 style="margin-bottom:2px">Sites Detectados</h3>
+        <p style="font-size:12px;color:var(--text-dim);margin:0 0 8px">Últimos 30 dias. Clique para pré-preencher a regra acima.</p>
+        <div style="margin-bottom:8px">
+          <input id="sitesFilter" oninput="filterSites()" placeholder="buscar site..."
+            style="width:100%;box-sizing:border-box;background:var(--bg-2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:12px">
+        </div>
+        <div id="sitesList"><p style="color:var(--text-muted);font-size:13px">Carregando...</p></div>
+      </div>
     </div>
 
     <!-- Departamentos -->
@@ -748,18 +760,18 @@
 <div id="toast" class="toast hide"></div>
 
 <!-- ===== MÓDULOS JS (defer: executam após parse do DOM, em ordem) ===== -->
-<script src="js/wp-core.js?v=8" defer></script>
-<script src="js/wp-overview.js?v=8" defer></script>
-<script src="js/wp-people.js?v=8" defer></script>
-<script src="js/wp-departments.js?v=8" defer></script>
-<script src="js/wp-analytics.js?v=8" defer></script>
-<script src="js/wp-events.js?v=8" defer></script>
-<script src="js/wp-internet.js?v=8" defer></script>
-<script src="js/wp-jornada.js?v=8" defer></script>
-<script src="js/wp-settings.js?v=8" defer></script>
-<script src="js/wp-reports.js?v=8" defer></script>
-<script src="js/wp-nav.js?v=8" defer></script>
-<script src="js/wp-auth.js?v=8" defer></script>
+<script src="js/wp-core.js?v=9" defer></script>
+<script src="js/wp-overview.js?v=9" defer></script>
+<script src="js/wp-people.js?v=9" defer></script>
+<script src="js/wp-departments.js?v=9" defer></script>
+<script src="js/wp-analytics.js?v=9" defer></script>
+<script src="js/wp-events.js?v=9" defer></script>
+<script src="js/wp-internet.js?v=9" defer></script>
+<script src="js/wp-jornada.js?v=9" defer></script>
+<script src="js/wp-settings.js?v=9" defer></script>
+<script src="js/wp-reports.js?v=9" defer></script>
+<script src="js/wp-nav.js?v=9" defer></script>
+<script src="js/wp-auth.js?v=9" defer></script>
 
 </body>
 </html>
