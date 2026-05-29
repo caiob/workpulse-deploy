@@ -584,6 +584,16 @@ def _is_browser(app: str) -> bool:
     return a in _BROWSER_APPS or any(kw in a for kw in _BROWSER_KEYWORDS)
 
 
+def _since_for_days(days: int) -> str:
+    """Retorna o ISO timestamp de início do período.
+    Para days=1 (Hoje), usa meia-noite UTC do dia atual.
+    Para outros valores usa now - N dias."""
+    now = dt.datetime.now(dt.timezone.utc)
+    if days == 1:
+        return now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    return (now - dt.timedelta(days=days)).isoformat()
+
+
 def _no_browser_where() -> tuple[str, list]:
     """SQL fragment + args to exclude browser apps from queries.
     Append the fragment to an existing WHERE clause; extend args list."""
@@ -1111,7 +1121,7 @@ def search_events(
         where.append("user_id = %s"); args.append(user_id)
     where.append("bucket = %s"); args.append(bucket or "window")
     if days:
-        since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=int(days))).isoformat()
+        since = _since_for_days(int(days))
     if since:
         where.append("ts >= %s"); args.append(since)
     if until:
@@ -1160,7 +1170,7 @@ def productivity_events_summary(
     if cached is not None:
         return cached
 
-    since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).isoformat()
+    since = _since_for_days(days)
 
     with db() as c:
         rules = [dict(r) for r in c.execute(
@@ -1414,7 +1424,7 @@ def productivity_internet(
     days:    int = Query(7, le=90),
     user_id: str | None = None,
 ):
-    since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).isoformat()
+    since = _since_for_days(days)
 
     with db() as c:
         rules = [dict(r) for r in c.execute(
@@ -1424,7 +1434,7 @@ def productivity_internet(
 
         sql  = ("SELECT user_id, data_json->>'app' AS app, data_json->>'title' AS title,"
                 " SUM(duration_sec) AS total_sec, COUNT(*) AS events,"
-                " substr(MIN(ts),1,10) AS first_day, substr(MAX(ts),1,10) AS last_day"
+                " MIN(ts) AS first_ts, MAX(ts) AS last_ts"
                 " FROM events WHERE tenant_id=%s AND bucket='window' AND ts>=%s")
         args: list = [tenant, since]
         if user_id:
@@ -1452,18 +1462,22 @@ def productivity_internet(
         if key not in site_agg:
             site_agg[key] = {"site_name": site_name, "category": category,
                               "total_sec": 0.0, "event_count": 0,
-                              "users": set(), "per_user": {}}
+                              "users": set(), "per_user": {},
+                              "last_ts": row["last_ts"] or ""}
         entry = site_agg[key]
         entry["total_sec"]   += row["total_sec"] or 0.0
         entry["event_count"] += row["events"] or 0
         entry["users"].add(row["user_id"])
         uid = row["user_id"]
         entry["per_user"][uid] = entry["per_user"].get(uid, 0.0) + (row["total_sec"] or 0.0)
+        # Mantém o timestamp mais recente entre todos os registros do site
+        if (row["last_ts"] or "") > entry["last_ts"]:
+            entry["last_ts"] = row["last_ts"]
 
     totals: dict[str, float] = {"productive": 0.0, "unproductive": 0.0,
                                  "neutral": 0.0, "uncategorized": 0.0, "total": 0.0}
     sites = []
-    for entry in sorted(site_agg.values(), key=lambda x: x["total_sec"], reverse=True):
+    for entry in sorted(site_agg.values(), key=lambda x: x["last_ts"] or "", reverse=True):
         cat = entry["category"]
         totals[cat]     = totals.get(cat, 0.0) + entry["total_sec"]
         totals["total"] += entry["total_sec"]
@@ -1475,6 +1489,7 @@ def productivity_internet(
             "user_count":  len(entry["users"]),
             "users":       list(entry["users"]),
             "per_user":    {k: round(v, 1) for k, v in entry["per_user"].items()},
+            "last_access": entry["last_ts"],
         })
 
     daily_agg: dict[str, dict[str, float]] = {}

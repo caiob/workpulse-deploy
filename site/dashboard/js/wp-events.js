@@ -210,14 +210,14 @@ async function loadEvents(resetPage = true) {
       if (!rawEvents.length && !_evPage) {
         label.textContent = '';
       } else if (mode === 'byapp') {
-        label.textContent = `— ${events.length} apps (${filtered.length} aplicações${catLabel})`;
+        label.textContent = `— ${events.length} apps (${filtered.length} aplicativos${catLabel})`;
       } else if (mode === 'sequential' && events.length < filtered.length) {
         const saved = filtered.length - events.length;
-        label.textContent = `— ${events.length} grupos (${filtered.length} aplicações, ${saved} agrupadas${catLabel})`;
+        label.textContent = `— ${events.length} grupos (${filtered.length} aplicativos, ${saved} agrupados${catLabel})`;
       } else if (_evTotal > 0) {
-        label.textContent = `— ${filtered.length} de ${_evTotal.toLocaleString('pt-BR')} aplicações${catLabel}`;
+        label.textContent = `— ${filtered.length} de ${_evTotal.toLocaleString('pt-BR')} aplicativos${catLabel}`;
       } else {
-        label.textContent = `— ${filtered.length} aplicações${catLabel}`;
+        label.textContent = `— ${filtered.length} aplicativos${catLabel}`;
       }
     }
 
@@ -296,7 +296,7 @@ async function loadEvents(resetPage = true) {
 
     _renderEvPagination(hasPrev, hasNext, totalPages);
 
-  } catch (e) { toast('Erro ao carregar aplicações: ' + e.message); }
+  } catch (e) { toast('Erro ao carregar aplicativos: ' + e.message); }
 }
 
 // ─────────────────────────────────────────────────────────────────────

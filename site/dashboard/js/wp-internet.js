@@ -86,7 +86,7 @@ function renderSitesTable(sites, totalSec, catFilter = '') {
   const tbody = document.querySelector('#intSitesTable tbody');
 
   if (!_intSitesCache.length) {
-    tbody.innerHTML = `<tr><td colspan="6" class="empty-state">
+    tbody.innerHTML = `<tr><td colspan="7" class="empty-state">
       <h4>Nenhum dado de browser encontrado.</h4>
       Verifique se há eventos do tipo <code>window</code> com app de browser (msedge.exe, chrome.exe, firefox.exe...).
     </td></tr>`;
@@ -96,7 +96,7 @@ function renderSitesTable(sites, totalSec, catFilter = '') {
   if (!sites.length) {
     const catEl  = document.getElementById('intCategory');
     const catTxt = catEl ? catEl.options[catEl.selectedIndex].text : catFilter;
-    tbody.innerHTML = `<tr><td colspan="6" class="empty-state">Nenhum site encontrado na categoria <strong>${catTxt}</strong> para este período.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="7" class="empty-state">Nenhum site encontrado na categoria <strong>${catTxt}</strong> para este período.</td></tr>`;
     return;
   }
 
@@ -107,8 +107,12 @@ function renderSitesTable(sites, totalSec, catFilter = '') {
     const pill    = CAT_PILLS[s.category] || CAT_PILLS.uncategorized;
     const users   = s.user_count === 1 ? '1 usuário' : s.user_count + ' usuários';
     const safeName = s.site_name.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+    const when    = s.last_access
+      ? new Date(s.last_access).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+      : '—';
     return `<tr>
-      <td style="max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${s.site_name}">${s.site_name}</td>
+      <td style="white-space:nowrap;color:var(--text-dim);font-size:12px">${when}</td>
+      <td style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${s.site_name}">${s.site_name}</td>
       <td>${pill}</td>
       <td>${fmtSec(s.total_sec)}</td>
       <td>${bar} <span style="color:var(--text-dim);font-size:11px">${pct}%</span></td>
