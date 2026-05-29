@@ -247,11 +247,11 @@
     <p class="page-sub">Ranking de horas ativas, AFK e aderência no período selecionado. Clique em <em>abrir</em> para ver o desdobramento individual.</p>
 
     <div class="toolbar">
-      <div style="flex:1"><label>Buscar</label>
-        <input id="peopleFilter" oninput="renderPeopleTable()" placeholder="nome, e-mail ou departamento" style="width:100%;max-width:360px">
-      </div>
       <div><label>Período</label>
         <div id="peopleRange"></div>
+      </div>
+      <div style="flex:1"><label>Buscar</label>
+        <input id="peopleFilter" oninput="renderPeopleTable()" placeholder="nome, e-mail ou departamento" style="width:100%;max-width:360px">
       </div>
       <button class="ghost" onclick="loadPeople()">↻ Atualizar</button>
     </div>
