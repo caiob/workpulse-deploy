@@ -9,9 +9,11 @@
 // O dia atual aparece com Início preenchido, Final em branco (em andamento)
 // e Pausas com o total acumulado até o momento.
 //
-// IMPORTANTE: como o endpoint /v1/events limita a 1000 eventos por chamada,
-// fazemos uma busca por dia (em paralelo, com cap de concorrência) para
-// garantir cobertura completa mesmo em períodos longos.
+// CÁLCULO: feito preferencialmente no SERVIDOR (endpoint /v1/jornada), via
+// agregação SQL por dia LOCAL e SEM limite de linhas. Se o servidor ainda
+// não tiver esse endpoint (deploy do backend pendente), cai num fallback
+// que pagina TODOS os eventos do /v1/events — evitando o "corte" do limite
+// de 1000 que deslocava o início (ex.: mostrava 16:01 em vez de 08:01).
 // =====================================================================
 
 /* ---------- Helpers de formatação ---------- */
@@ -57,78 +59,128 @@ function _jorHHfromFloat(v) {
   return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
 }
 
-/* ---------- Fetch chunked por dia ---------- */
-async function _jorFetchByDay(userId, dayStarts, bucket, signal) {
-  const CONC = 5;
+/* ---------- Converte resposta do endpoint /v1/jornada em jornadas ----------
+ * As datas são reconstruídas a partir do horário LOCAL já calculado pelo
+ * servidor (start_float/end_float = horas desde a meia-noite local), de
+ * forma que a exibição não dependa do fuso do navegador.
+ */
+function _jorBuildJornada(d) {
+  const [y, m, dd] = d.day.split('-').map(Number);
+  const base  = new Date(y, m - 1, dd, 0, 0, 0, 0);        // meia-noite local
+  const start = new Date(base.getTime() + (d.start_float || 0) * 3600000);
+  const end   = new Date(base.getTime() + (d.end_float   || 0) * 3600000);
+  return {
+    day:       d.day,
+    start:     start,
+    end:       end,
+    pausesSec: d.pauses_sec || 0,
+    focusSec:  d.focus_sec  || 0,
+    isToday:   !!d.is_today,
+  };
+}
+
+/* ---------- Caminho A: endpoint agregado no servidor (/v1/jornada) ---------- */
+async function _jorViaEndpoint(user, jorSince, jorUntil, sig) {
+  const params = new URLSearchParams({
+    tenant:  state.tenant,
+    user_id: user,
+    since:   new Date(jorSince).toISOString(),
+    until:   new Date(jorUntil).toISOString(),
+  });
+  const resp = await api('/v1/jornada?' + params.toString(), sig);
+  return (resp.days || [])
+    .map(_jorBuildJornada)
+    .sort((a, b) => a.day.localeCompare(b.day));
+}
+
+/* ---------- Caminho B (fallback): /v1/events com PAGINAÇÃO completa ----------
+ * Usado quando o servidor ainda não tem o /v1/jornada. Pagina TODOS os
+ * eventos de cada dia (offset += 1000) para não sofrer o "corte" do limite.
+ */
+async function _jorFetchAllByDay(userId, dayStarts, bucket, signal) {
+  const CONC = 4;
   const all  = [];
   for (let i = 0; i < dayStarts.length; i += CONC) {
     const batch = dayStarts.slice(i, i + CONC);
-    const results = await Promise.all(batch.map(d => {
+    const results = await Promise.all(batch.map(async d => {
       const since = d.toISOString();
       const next  = new Date(d.getTime() + 86400000).toISOString();
-      const params = new URLSearchParams({
-        tenant:  state.tenant,
-        user_id: userId,
-        bucket:  bucket,
-        since:   since,
-        until:   next,
-        limit:   '1000',
-      });
-      return api('/v1/events?' + params.toString(), signal).catch(() => ({ events: [] }));
+      const dayEvents = [];
+      let offset = 0;
+      for (let guard = 0; guard < 100; guard++) {       // teto de segurança
+        const params = new URLSearchParams({
+          tenant:  state.tenant,
+          user_id: userId,
+          bucket:  bucket,
+          since:   since,
+          until:   next,
+          limit:   '1000',
+          offset:  String(offset),
+          order:   'asc',
+        });
+        let r;
+        try { r = await api('/v1/events?' + params.toString(), signal); }
+        catch { break; }
+        const evs = r.events || [];
+        dayEvents.push(...evs);
+        if (evs.length < 1000) break;                   // última página
+        offset += 1000;
+      }
+      return dayEvents;
     }));
-    results.forEach(r => all.push(...(r.events || [])));
+    results.forEach(evs => all.push(...evs));
   }
   return all;
 }
 
-/* ---------- Núcleo: agrega eventos em jornadas diárias ---------- */
-function computeJornadas(windowEvents, afkEvents) {
+/* Agrega eventos crus em jornadas diárias (usado só no fallback) */
+function _jorComputeFromEvents(windowEvents, afkEvents) {
   const byDay = {};
-
-  // 1) Window events definem início, fim e tempo focado
   for (const e of windowEvents) {
     if (!e.ts) continue;
     const start = new Date(e.ts);
     const dur   = e.duration_sec || 0;
     const end   = new Date(start.getTime() + dur * 1000);
     const key   = _jorLocalDayKey(start);
-    if (!byDay[key]) {
-      byDay[key] = { day: key, start: start, end: end, pausesSec: 0, focusSec: 0 };
-    }
+    if (!byDay[key]) byDay[key] = { day: key, start, end, pausesSec: 0, focusSec: 0 };
     if (start < byDay[key].start) byDay[key].start = start;
     if (end   > byDay[key].end)   byDay[key].end   = end;
     byDay[key].focusSec += dur;
   }
-
-  // 2) AFK events dentro da janela viram pausas
   for (const e of afkEvents) {
     if (!e.ts) continue;
+    const status = (e.data && e.data.status) || (e.data_json && e.data_json.status);
+    if (status && status !== 'afk') continue;           // só ociosidade real
     const ts  = new Date(e.ts);
     const dur = e.duration_sec || 0;
     const key = _jorLocalDayKey(ts);
-    if (!byDay[key]) continue; // dia sem atividade real (só AFK)
-    // Considera AFK como pausa apenas se cair dentro da janela de trabalho
+    if (!byDay[key]) continue;
     const afkEnd = new Date(ts.getTime() + dur * 1000);
-    if (afkEnd >= byDay[key].start && ts <= byDay[key].end) {
-      byDay[key].pausesSec += dur;
-    }
+    if (afkEnd >= byDay[key].start && ts <= byDay[key].end) byDay[key].pausesSec += dur;
   }
-
   const todayKey = _jorLocalDayKey(new Date());
   return Object.values(byDay)
     .map(j => ({ ...j, isToday: j.day === todayKey }))
     .sort((a, b) => a.day.localeCompare(b.day));
 }
 
+async function _jorViaEvents(user, jorSince, jorUntil, sig) {
+  const jorStart = new Date(jorSince); jorStart.setHours(0, 0, 0, 0);
+  const jorEnd   = new Date(jorUntil); jorEnd.setHours(0, 0, 0, 0);
+  const dayStarts = [];
+  for (let d = new Date(jorEnd); d >= jorStart; d.setDate(d.getDate() - 1))
+    dayStarts.push(new Date(d));
+  const [windowEv, afkEv] = await Promise.all([
+    _jorFetchAllByDay(user, dayStarts, 'window', sig),
+    _jorFetchAllByDay(user, dayStarts, 'afk',    sig),
+  ]);
+  return _jorComputeFromEvents(windowEv, afkEv);
+}
+
 /* ---------- Loader principal ---------- */
 async function loadJornada() {
   await _populateUserDropdown('jorUser');
   const { since: jorSince, until: jorUntil } = wpDP.getRange('jorDays');
-  const jorStart = new Date(jorSince); jorStart.setHours(0, 0, 0, 0);
-  const jorEnd   = new Date(jorUntil); jorEnd.setHours(0, 0, 0, 0);
-  const jorDayStarts = [];
-  for (let d = new Date(jorEnd); d >= jorStart; d.setDate(d.getDate() - 1))
-    jorDayStarts.push(new Date(d));
   const user = document.getElementById('jorUser').value.trim();
   const sig  = _tabAbort ? _tabAbort.signal : undefined;
 
@@ -148,14 +200,17 @@ async function loadJornada() {
   }
 
   try {
-    const [windowEv, afkEv] = await Promise.all([
-      _jorFetchByDay(user, jorDayStarts, 'window', sig),
-      _jorFetchByDay(user, jorDayStarts, 'afk',    sig),
-    ]);
+    let jornadas;
+    try {
+      jornadas = await _jorViaEndpoint(user, jorSince, jorUntil, sig);   // preferido
+    } catch (err) {
+      if (/^404/.test(err.message || '')) {
+        jornadas = await _jorViaEvents(user, jorSince, jorUntil, sig);   // fallback
+      } else {
+        throw err;
+      }
+    }
 
-    const jornadas = computeJornadas(windowEv, afkEv);
-
-    // Nome amigável no rótulo
     const u = state.people.find(p => p.user_id === user) || { user_id: user };
     document.getElementById('jorUserLabel').textContent = displayName(u);
 

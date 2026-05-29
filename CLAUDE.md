@@ -1,7 +1,7 @@
 # CLAUDE.md — WorkPulse
 
 Guidance for AI agents (Claude Code / Cowork) working on WorkPulse.
-**Read this fully before changing anything.** Last updated: 2026-05-27.
+**Read this fully before changing anything.** Last updated: 2026-05-29.
 
 ---
 
@@ -118,6 +118,29 @@ There is a server-logic simulation harness pattern used to validate these — se
 
 ---
 
+## ⚠️ CRITICAL #4 — `<base href>` e Clean URLs
+
+`workforce.html` tem `<base href="/dashboard/">` no `<head>`. Isso é necessário porque
+a clean URL `/dashboard` (sem barra) faz o browser resolver paths relativos como `/css/...`
+em vez de `/dashboard/css/...`.
+
+**Regra:** todo path relativo em `workforce.html` (CSS, JS, imagens) deve ser relativo
+à pasta `dashboard/` — ex.: `css/workforce.css`, `js/wp-core.js`, `../assets/logo.jpeg`.
+Se um `<script src="...">` for adicionado sem fechar a tag `</script>`, **o browser
+interpreta o resto da página como conteúdo do script e nenhuma função JS é definida**
+(real incident 2026-05-29). Sempre fechar: `<script src="..." defer></script>`.
+
+**Clean URLs** são gerenciadas pela CloudFront Function em `scripts/clean-urls.js`:
+- `/dashboard` → `/dashboard/workforce.html`
+- `/adm`       → `/adm/admin.html`
+- `/docs`      → `/docs/developers.html`
+- Paths sem extensão → tenta `.html` (fallback genérico)
+- Assets com extensão `.js`, `.css` etc. passam sem modificação
+
+Para atualizar a função: `bash scripts/4-setup-clean-urls.sh`.
+
+---
+
 ## Project Overview
 
 WorkPulse is a SaaS employee-activity monitoring platform.
@@ -133,7 +156,8 @@ WorkPulse is a SaaS employee-activity monitoring platform.
 **Live URLs:**
 - API: `https://api.workpulse.com.br`
 - Site: `https://workpulse.com.br`
-- Workforce dashboard: `https://workpulse.com.br/dashboard/workforce.html` (modular, atual)
+- Workforce dashboard: `https://workpulse.com.br/dashboard` ← **clean URL ativo** (CloudFront Function)
+  (`/dashboard/workforce.html` ainda funciona para retrocompatibilidade)
 - Platform admin: `https://workpulse.com.br/adm/admin.html`
 
 ---
@@ -357,13 +381,14 @@ site/dashboard/
   css/
     workforce.css         Todos os estilos + tema claro/escuro
   js/
-    wp-core.js            State, utils, api(), apiFetch(), chartTheme(), CAT_*
+    wp-core.js            State, utils, api(), apiFetch(), chartTheme(), CAT_*, ptDateTime(), escHtml()
+    wp-datepicker.js      Date picker reutilizável (wpDP namespace — init, getRange, getDays)
     wp-overview.js        Aba Visão Geral (loadOverview, drawDailyChart, etc.)
     wp-people.js          Aba Pessoas (loadPeople, renderPeopleTable, drillUser)
     wp-departments.js     Aba Departamentos (loadDepartments)
     wp-analytics.js       Abas Alertas + Tendências (loadAlerts, loadTrends)
-    wp-events.js          Aba Eventos (loadEvents, drawEvDailyChart)
-    wp-internet.js        Aba Internet (loadInternet, renderSitesTable)
+    wp-events.js          Aba Aplicativos (loadEvents, drawEvDailyChart, renderEventRows, _renderEvPagination)
+    wp-internet.js        Aba Internet (loadInternet, renderSitesTable, _intCatBadge, _renderIntPagination)
     wp-jornada.js         Aba Jornada de Trabalho (loadJornada, computeJornadas)
     wp-settings.js        Aba Configurações (regras, apps, depts, colaboradores)
     wp-reports.js         Relatórios automáticos (CRUD, envio SES, histórico)
@@ -396,6 +421,37 @@ site/dashboard/
   Estado global em `state` (definido em `wp-core.js`, escopo global sem `window.WP`).
   Scripts carregados com `defer` — DOM pronto, ordem garantida.
 
+
+#### Date Picker (`wp-datepicker.js`)
+
+Componente reusável `wpDP` (IIFE, sem dependências). Instanciado em `wp-nav.js`
+ao inicializar a página.
+
+```javascript
+wpDP.init('myId', { defaultDays: 7, onChange: myCallback });
+const { since, until } = wpDP.getRange('myId');  // ISO strings
+const days = wpDP.getDays('myId');               // número de dias
+```
+
+HTML: apenas `<div id="myId"></div>`. O componente injeta o trigger e o painel.
+
+**Presets:** Hoje / Últimos 7 dias / Últimos 30 dias / Últimos 90 dias / Personalizado.
+**Modo Personalizado:** clique inicial = início do período; clique seguinte = fim.
+Se já houver início+fim selecionados, qualquer novo clique reinicia a seleção.
+
+Pickers por aba:
+| ID | Aba | Default |
+|---|---|---|
+| `rangeDays` | Visão Geral + Alertas | 7 dias |
+| `peopleRange` | Pessoas | 7 dias |
+| `trendDays` | Tendências | 30 dias |
+| `evDays` | Aplicativos | Hoje |
+| `intDays` | Internet | Hoje |
+| `jorDays` | Jornada de Trabalho | 7 dias |
+
+**Cache busting:** versão atual do site é `?v=15` (em todos os `<script>` e `<link>`
+de `workforce.html`). Incrementar a cada deploy que muda JS/CSS.
+
 #### Aba Jornada de Trabalho (adicionada 2026-05-27)
 
 Submenu dentro de **Coletas → Jornada de Trabalho**. Mostra para um colaborador
@@ -414,6 +470,13 @@ escolhido, dia a dia: início da jornada, fim, total de pausas, bruta e líquida
 eventos/chamada, faz `N` chamadas paralelas (cap de 5) com `since/until` por dia.
 Para 30 dias × 2 buckets = 60 chamadas em ~10 batches. Sem necessidade de novo
 endpoint de backend.
+
+**IMPORTANTE — `order=asc`:** `/v1/events` suporta `?order=asc|desc` (default `desc`).
+Jornada usa `order=asc` para garantir que os primeiros 1000 eventos de cada dia
+incluam o início da jornada (início matinal). Com `order=desc`, ao final do dia
+os 1000 resultados são todos do período da tarde, cortando os eventos da manhã
+e exibindo horário de entrada errado. Redeploy do backend é necessário para que
+o parâmetro `order` seja respeitado.
 
 **Visual**: 5 KPI cards no topo (dias, jornada líquida média, início médio,
 encerramento médio, pausas médias), 2 charts (barra empilhada trabalho+pausas
@@ -483,7 +546,7 @@ Separate crate. Built per-client with an embedded license.
 
 ---
 
-**Last updated:** 2026-05-27 (added per-client versioning, fixed AFK duration
+**Last updated:** 2026-05-29 (added per-client versioning, fixed AFK duration
 calculation in the Rust agent, rebuilt eight silently-truncated agent files;
 added `agent_version` column to aba Pessoas — `GET /v1/team/summary` now returns
 `agent_version` via correlated subquery on `devices` table; `workforce.html`
@@ -494,3 +557,23 @@ added CRITICAL #3 documenting the GROUP BY + correlated subquery pitfall;
 6 new tenant-scoped endpoints under `/v1/reports`, PDF generation via reportlab,
 SES email via boto3, `_reports_worker` cron task (daily at 10:00 UTC = 07:00 BRT),
 frontend in `wp-reports.js`, UI card in aba Configurações of `workforce.html`).
+
+**2026-05-29 updates:**
+- **Calendar date picker** (`wp-datepicker.js`): novo componente reusável `wpDP`.
+  Todos os selects de período substituídos por date pickers com presets + calendário.
+  Período agora passa `since`/`until` (ISO) para a API em vez de `days` (int).
+- **Backend `since`/`until`**: 6 endpoints atualizados para aceitar `since`/`until`
+  como strings ISO além de `days` (fallback). Endpoints: `user_summary`, `team_summary`,
+  `productivity_events_summary`, `workforce_overview`, `workforce_timeseries`,
+  `productivity_internet`. Endpoint `/v1/events` agora aceita `order=asc|desc`.
+- **Clean URLs**: CloudFront Function em `scripts/clean-urls.js` + `scripts/4-setup-clean-urls.sh`.
+  `workforce.html` tem `<base href="/dashboard/">` para resolver paths corretamente.
+- **Funções recuperadas** (truncação anterior): `drawEvDailyChart`, `renderEventRows`,
+  `_renderEvPagination` (wp-events.js); `_intCatBadge`, `_renderIntPagination`
+  (wp-internet.js); `ptDateTime`, `escHtml` (wp-core.js); `prefillRule` (wp-settings.js).
+- **Bug fixes**: posição do calendar (requestAnimationFrame); reset de range ao
+  re-clicar com início+fim já selecionados; Pessoas: picker movido para esquerda;
+  `renderSitesTable`: duplicate `const` removido; script tag `wp-auth.js` sem
+  `</script>` (quebrava todo o JS da página).
+- **Jornada horário de entrada**: `_jorFetchByDay` usa `order=asc` — garante que
+  os primeiros 1000 eventos incluam o início da manhã.

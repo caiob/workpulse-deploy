@@ -73,6 +73,11 @@ import time
 from contextlib import asynccontextmanager, contextmanager
 from typing import Annotated, Any, cast
 
+try:
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover - fallback se tzdata ausente
+    ZoneInfo = None  # type: ignore
+
 import psycopg2
 import psycopg2.errors
 import psycopg2.extras
@@ -110,6 +115,9 @@ LICENSE_KEY_SECRET_ARN = os.getenv("LICENSE_KEY_SECRET_ARN", "")
 APP_VERSION = "2.0.0"
 FROM_EMAIL   = os.getenv("WORKPULSE_FROM_EMAIL", "noreply@workpulse.com.br")
 SES_REGION   = os.getenv("WORKPULSE_SES_REGION", "us-east-1")
+# Timezone usada para "fechar" a jornada de trabalho por dia local (início/fim/pausas).
+# Os eventos sao gravados em UTC; aqui convertemos para o fuso do cliente.
+REPORT_TZ    = os.getenv("WORKPULSE_TZ", "America/Sao_Paulo")
 
 if not ADMIN_TOKEN or len(ADMIN_TOKEN) < 32:
     raise RuntimeError(
@@ -1122,6 +1130,7 @@ def search_events(
     limit:      int = Query(200, le=1000),
     offset:     int = 0,
     no_browser: bool = False,   # quando True, exclui browsers (usado pela aba Aplicações)
+    order:      str = Query("desc", pattern="^(asc|desc)$"),
 ):
     # Filtros base (reutilizados na query de contagem e na query principal)
     where = ["tenant_id = %s"]
@@ -1146,7 +1155,7 @@ def search_events(
         ).fetchone()["n"]
 
         rows = c.execute(
-            f"SELECT * FROM events WHERE {where_clause}{nb_sql} ORDER BY ts DESC LIMIT %s OFFSET %s",
+            f"SELECT * FROM events WHERE {where_clause}{nb_sql} ORDER BY ts {order.upper()} LIMIT %s OFFSET %s",
             args + nb_args + [limit, offset],
         ).fetchall()
 
@@ -1164,6 +1173,113 @@ def search_events(
         events.append({**dict(r), "data": data, "category": category})
 
     return {"count": len(events), "total": total, "offset": offset, "limit": limit, "events": events}
+
+
+@app.get("/v1/jornada", dependencies=[Depends(require_tenant_scope)])
+def jornada(
+    tenant:  str,
+    user_id: str,
+    since:   str | None = None,
+    until:   str | None = None,
+    days:    int | None = None,
+):
+    """Jornada de trabalho agregada por DIA LOCAL, calculada no banco.
+
+    Por que existe: a aba Jornada antes baixava os eventos crus e calculava
+    início/fim no navegador. Como o agente emite um heartbeat 'window' a cada
+    poucos segundos, um único dia ultrapassa o limite de 1000 eventos por
+    chamada do /v1/events — e o "corte" do limite fazia o início/fim saírem
+    errados (ex.: início às 16:01 em vez de 08:01).
+
+    Aqui usamos MIN/MAX/SUM com ts::timestamptz (comparação cronológica, não
+    lexicográfica) e bucketizamos por dia no fuso REPORT_TZ. Sem LIMIT: imune
+    ao "corte" e independente do fuso do navegador.
+    """
+    if days:
+        since = _since_for_days(int(days))
+    if since is None:
+        since = _since_for_days(7)
+    if until is None:
+        until = dt.datetime.now(dt.timezone.utc).isoformat()
+
+    cache_key = f"{tenant}:jornada:{user_id}:{since}:{until}"
+    cached    = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    # %(tz)s parametriza o fuso; ts::timestamptz garante ordenação cronológica
+    # mesmo com formatos mistos ('+00:00', 'Z', com/sem milissegundos).
+    sql = """
+        WITH w AS (
+            SELECT (ts::timestamptz AT TIME ZONE %(tz)s)                       AS lts,
+                   (ts::timestamptz AT TIME ZONE %(tz)s)
+                       + (duration_sec || ' seconds')::interval               AS lend,
+                   duration_sec
+            FROM events
+            WHERE tenant_id = %(tenant)s AND user_id = %(uid)s AND bucket = 'window'
+              AND ts::timestamptz >= %(since)s::timestamptz
+              AND ts::timestamptz <  %(until)s::timestamptz
+        ),
+        win AS (
+            SELECT lts::date         AS day,
+                   MIN(lts)          AS start_ts,
+                   MAX(lend)         AS end_ts,
+                   SUM(duration_sec) AS focus_sec
+            FROM w GROUP BY lts::date
+        ),
+        afk AS (
+            SELECT (ts::timestamptz AT TIME ZONE %(tz)s)::date AS day,
+                   SUM(duration_sec)                           AS pauses_sec
+            FROM events
+            WHERE tenant_id = %(tenant)s AND user_id = %(uid)s AND bucket = 'afk'
+              AND data_json->>'status' = 'afk'
+              AND ts::timestamptz >= %(since)s::timestamptz
+              AND ts::timestamptz <  %(until)s::timestamptz
+            GROUP BY 1
+        )
+        SELECT to_char(win.day, 'YYYY-MM-DD')        AS day,
+               to_char(win.start_ts, 'HH24:MI:SS')   AS start_hm,
+               to_char(win.end_ts,   'HH24:MI:SS')   AS end_hm,
+               EXTRACT(EPOCH FROM (win.start_ts - win.day::timestamp)) AS start_sec,
+               EXTRACT(EPOCH FROM (win.end_ts   - win.day::timestamp)) AS end_sec,
+               win.focus_sec                         AS focus_sec,
+               COALESCE(afk.pauses_sec, 0)           AS pauses_sec
+        FROM win LEFT JOIN afk ON afk.day = win.day
+        ORDER BY win.day
+    """
+    params = {"tz": REPORT_TZ, "tenant": tenant, "uid": user_id,
+              "since": since, "until": until}
+    with db() as c:
+        rows = c.execute(sql, params).fetchall()
+
+    today_local = dt.datetime.now(
+        ZoneInfo(REPORT_TZ)
+    ).date().isoformat() if ZoneInfo else None
+
+    days_out = []
+    for r in rows:
+        focus  = float(r["focus_sec"]  or 0.0)
+        pauses = float(r["pauses_sec"] or 0.0)
+        start_sec = float(r["start_sec"] or 0.0)
+        end_sec   = float(r["end_sec"]   or 0.0)
+        gross  = max(0.0, end_sec - start_sec)
+        days_out.append({
+            "day":        r["day"],
+            "start":      r["start_hm"][:5],          # HH:MM
+            "end":        r["end_hm"][:5],            # HH:MM
+            "start_float": round(start_sec / 3600.0, 4),
+            "end_float":   round(end_sec   / 3600.0, 4),
+            "focus_sec":  round(focus, 1),
+            "pauses_sec": round(pauses, 1),
+            "gross_sec":  round(gross, 1),
+            "net_sec":    round(max(0.0, gross - pauses), 1),
+            "is_today":   (r["day"] == today_local),
+        })
+
+    result = {"tenant": tenant, "user_id": user_id,
+              "since": since, "until": until, "tz": REPORT_TZ, "days": days_out}
+    _cache_set(cache_key, result)
+    return result
 
 
 @app.get("/v1/productivity/events_summary", dependencies=[Depends(require_tenant_scope)])
@@ -2236,121 +2352,4 @@ async def _reports_worker() -> None:
 # ---------------------------------------------------------------------------
 
 @app.get("/v1/reports", dependencies=[Depends(require_tenant_scope)])
-def list_reports(tenant: str):
-    with db() as c:
-        rows = c.execute(
-            "SELECT * FROM report_configs WHERE tenant_id=%s ORDER BY id",
-            (tenant,),
-        ).fetchall()
-    return {"reports": [dict(r) for r in rows]}
-
-
-@app.post("/v1/reports", dependencies=[Depends(require_tenant_scope)])
-def create_report(tenant: str, body: ReportConfigIn):
-    tid = tenant
-    with db() as c:
-        row = c.execute(
-            """INSERT INTO report_configs
-               (tenant_id, name, recipients, frequency, sections, user_filter, enabled)
-               VALUES (%s,%s,%s,%s,%s,%s,%s)
-               RETURNING *""",
-            (
-                tid, body.name,
-                json.dumps(body.recipients),
-                body.frequency,
-                json.dumps(body.sections),
-                json.dumps(body.user_filter) if body.user_filter is not None else None,
-                body.enabled,
-            ),
-        ).fetchone()
-    return dict(row)
-
-
-@app.put("/v1/reports/{cfg_id}", dependencies=[Depends(require_tenant_scope)])
-def update_report(cfg_id: int, tenant: str, body: ReportConfigIn):
-    tid = tenant
-    with db() as c:
-        row = c.execute(
-            """UPDATE report_configs
-               SET name=%s, recipients=%s, frequency=%s, sections=%s,
-                   user_filter=%s, enabled=%s, updated_at=NOW()
-               WHERE id=%s AND tenant_id=%s
-               RETURNING *""",
-            (
-                body.name,
-                json.dumps(body.recipients),
-                body.frequency,
-                json.dumps(body.sections),
-                json.dumps(body.user_filter) if body.user_filter is not None else None,
-                body.enabled,
-                cfg_id, tid,
-            ),
-        ).fetchone()
-    if not row:
-        raise HTTPException(404, "Report config not found")
-    return dict(row)
-
-
-@app.delete("/v1/reports/{cfg_id}", dependencies=[Depends(require_tenant_scope)])
-def delete_report(cfg_id: int, tenant: str):
-    tid = tenant
-    with db() as c:
-        result = c.execute(
-            "DELETE FROM report_configs WHERE id=%s AND tenant_id=%s",
-            (cfg_id, tid),
-        )
-    if result.rowcount == 0:
-        raise HTTPException(404, "Report config not found")
-    return {"status": "deleted"}
-
-
-@app.post("/v1/reports/{cfg_id}/send", dependencies=[Depends(require_tenant_scope)])
-def send_report_now(cfg_id: int, tenant: str):
-    """Envio imediato (test button)."""
-    tid = tenant
-    with db() as c:
-        row = c.execute(
-            "SELECT * FROM report_configs WHERE id=%s AND tenant_id=%s",
-            (cfg_id, tid),
-        ).fetchone()
-    if not row:
-        raise HTTPException(404, "Report config not found")
-    cfg  = dict(row)
-    t = threading.Thread(
-        target=_run_report,
-        args=(cfg, tid, dt.date.today().strftime("%d/%m/%Y")),
-        daemon=True,
-    )
-    t.start()
-    return {"status": "queued"}
-
-
-@app.get("/v1/reports/{cfg_id}/history", dependencies=[Depends(require_tenant_scope)])
-def report_history(cfg_id: int, tenant: str):
-    tid = tenant
-    with db() as c:
-        rows = c.execute(
-            """SELECT * FROM report_history
-               WHERE config_id=%s AND tenant_id=%s
-               ORDER BY sent_at DESC LIMIT 50""",
-            (cfg_id, tid),
-        ).fetchall()
-    return {"history": [dict(r) for r in rows]}
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-def serve() -> None:
-    import uvicorn
-    concurrency = int(os.getenv("WEB_CONCURRENCY", "2"))
-    host, _, port_s = LISTEN_ADDR.rpartition(":")
-    uvicorn.run(
-        "main:app",
-        host=host or "0.0.0.0",
-        port=int(port_s or 8080),
-        workers=concurrency,
-    )
-
-
-if __name__ == "__main__":
-    serve()
+def list_reports(t
