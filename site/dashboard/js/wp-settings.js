@@ -4,14 +4,65 @@
 //         colaboradores e toggle de tema.
 // =====================================================================
 
-let _allApps  = [];   // apenas apps não-browser
-let _allSites = [];   // sites detectados via internet
-let _depts    = [];   // cache local: [{id, name, user_count, users:[...]}]
+let _allRules     = [];   // todas as regras (cache pós-load)
+let _allApps      = [];   // apps não-browser (cache)
+let _allSites     = [];   // sites detectados (cache)
+let _appsFiltered = [];   // resultado do filtro de apps
+let _sitesFiltered= [];   // resultado do filtro de sites
+let _depts        = [];   // [{id, name, user_count, users:[...]}]
+
+// Estado de paginação
+let _rulesPage = 0; const _RULES_PAGE_SIZE = 20;
+let _appsPage  = 0; const _APPS_PAGE_SIZE  = 60;
+let _sitesPage = 0; const _SITES_PAGE_SIZE = 60;
+
+/* ─────────────────────────────────────────────────────────────────
+   Helper genérico de paginação (reutilizado nas 3 seções)
+   ───────────────────────────────────────────────────────────────── */
+function _renderCfgPagination(containerId, labelId, page, total, pageSize, goToFn, itemLabel) {
+  const container  = document.getElementById(containerId);
+  const labelEl    = document.getElementById(labelId);
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const hasPrev    = page > 0;
+  const hasNext    = page < totalPages - 1;
+
+  if (labelEl) {
+    labelEl.textContent = total > 0 ? `— ${total.toLocaleString('pt-BR')} ${itemLabel}` : '';
+  }
+
+  if (!container) return;
+
+  if (!hasPrev && !hasNext) { container.innerHTML = ''; return; }
+
+  const cur         = page + 1;
+  const winStart    = Math.max(1, cur - 2);
+  const winEnd      = Math.min(totalPages, cur + 2);
+  const btns        = [];
+
+  if (winStart > 1) {
+    btns.push(`<button class="ev-page-btn ghost" onclick="${goToFn}(0)">1</button>`);
+    if (winStart > 2) btns.push(`<span class="ev-page-ellipsis">…</span>`);
+  }
+  for (let p = winStart; p <= winEnd; p++) {
+    const active = p === cur ? ' ev-page-active' : '';
+    btns.push(`<button class="ev-page-btn ghost${active}" onclick="${goToFn}(${p - 1})">${p}</button>`);
+  }
+  if (winEnd < totalPages) {
+    if (winEnd < totalPages - 1) btns.push(`<span class="ev-page-ellipsis">…</span>`);
+    btns.push(`<button class="ev-page-btn ghost" onclick="${goToFn}(${totalPages - 1})">${totalPages}</button>`);
+  }
+
+  container.innerHTML = `
+    <div class="ev-pagination">
+      <button class="ghost ev-page-nav" ${hasPrev ? '' : 'disabled'} onclick="${goToFn}(${page - 1})">← Anterior</button>
+      <div class="ev-page-numbers">${btns.join('')}</div>
+      <button class="ghost ev-page-nav" ${hasNext ? '' : 'disabled'} onclick="${goToFn}(${page + 1})">Próxima →</button>
+    </div>`;
+}
 
 /* -------------------- LOAD CONFIG -------------------- */
 async function loadConfig() {
   await Promise.all([loadRules(), loadAppsForConfig(), loadSitesForConfig(), loadCollabs(), loadDepts(), loadReports()]);
-  // Atualiza botão de tema (pode ter mudado de aba)
   const btn = document.getElementById('themeToggleBtn');
   if (btn) {
     const isLight = document.body.classList.contains('theme-light');
@@ -19,24 +70,32 @@ async function loadConfig() {
   }
 }
 
-/* -------------------- REGRAS -------------------- */
+/* ──────────────────────────────────────────────────────────────────
+   REGRAS
+   ────────────────────────────────────────────────────────────────── */
 async function loadRules() {
   try {
     const data = await api('/v1/productivity/rules?tenant=' + encodeURIComponent(state.tenant));
-    renderRulesTable(data.rules || []);
+    _allRules  = data.rules || [];
+    _rulesPage = 0;
+    _renderRulesPage();
   } catch (e) { toast('Erro ao carregar regras: ' + e.message); }
 }
 
-function renderRulesTable(rules) {
+function _renderRulesPage() {
   const tbody      = document.querySelector('#rulesTable tbody');
   const fieldLabel = { title: 'Título', app: 'Aplicativo' };
   const typeLabel  = { contains: 'Contém', exact: 'Exato', startswith: 'Começa com' };
+  const total      = _allRules.length;
 
-  if (!rules.length) {
+  if (!total) {
     tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Nenhuma regra cadastrada ainda.<br><small>Use o formulário acima para criar a primeira.</small></td></tr>';
+    _renderCfgPagination('rulesPagination', 'rulesCountLabel', 0, 0, _RULES_PAGE_SIZE, '_rulesGoTo', 'regras');
     return;
   }
-  tbody.innerHTML = rules.map(r =>
+
+  const slice = _allRules.slice(_rulesPage * _RULES_PAGE_SIZE, (_rulesPage + 1) * _RULES_PAGE_SIZE);
+  tbody.innerHTML = slice.map(r =>
     `<tr>
       <td><strong>${r.label}</strong></td>
       <td><span class="pill">${fieldLabel[r.match_field] || r.match_field}</span></td>
@@ -46,6 +105,21 @@ function renderRulesTable(rules) {
       <td><button class="del-btn" onclick="deleteRule(${r.id})">Excluir</button></td>
     </tr>`
   ).join('');
+
+  _renderCfgPagination('rulesPagination', 'rulesCountLabel', _rulesPage, total, _RULES_PAGE_SIZE, '_rulesGoTo', 'regras');
+}
+
+function _rulesGoTo(page) {
+  _rulesPage = page;
+  _renderRulesPage();
+  document.getElementById('rulesTable')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function renderRulesTable(rules) {
+  // Mantido para compatibilidade — atualiza o cache e re-renderiza
+  _allRules  = rules;
+  _rulesPage = 0;
+  _renderRulesPage();
 }
 
 async function saveRule() {
@@ -94,24 +168,32 @@ function quickRule(pattern, field) {
   document.getElementById('ruleLabel').scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
-/* -------------------- APPS DETECTADOS -------------------- */
+/* ──────────────────────────────────────────────────────────────────
+   APLICATIVOS DETECTADOS
+   ────────────────────────────────────────────────────────────────── */
 async function loadAppsForConfig() {
   try {
     const data = await api('/v1/productivity/apps?tenant=' + encodeURIComponent(state.tenant) + '&days=30');
-    // Filtra apenas não-browsers (browsers aparecem na seção de Sites)
-    _allApps = (data.apps || []).filter(a => !a.is_browser);
-    renderAppsList(_allApps);
+    _allApps      = (data.apps || []).filter(a => !a.is_browser);
+    _appsFiltered = _allApps;
+    _appsPage     = 0;
+    _renderAppsPage();
   } catch (e) { toast('Erro ao carregar apps: ' + e.message); }
 }
 
-function renderAppsList(apps) {
-  const el = document.getElementById('appsList');
-  if (!apps.length) {
+function _renderAppsPage() {
+  const el    = document.getElementById('appsList');
+  const total = _appsFiltered.length;
+  const catDot = { productive: '#4ade80', unproductive: '#f87171', neutral: '#94a3b8', uncategorized: '#fbbf24' };
+
+  if (!total) {
     el.innerHTML = '<p style="color:var(--text-muted);font-size:13px">Nenhum aplicativo detectado no período.</p>';
+    _renderCfgPagination('appsPagination', 'appsCountLabel', 0, 0, _APPS_PAGE_SIZE, '_appsGoTo', 'apps');
     return;
   }
-  const catDot  = { productive: '#4ade80', unproductive: '#f87171', neutral: '#94a3b8', uncategorized: '#fbbf24' };
-  el.innerHTML = '<div class="chip-grid">' + apps.map(a => {
+
+  const slice = _appsFiltered.slice(_appsPage * _APPS_PAGE_SIZE, (_appsPage + 1) * _APPS_PAGE_SIZE);
+  el.innerHTML = '<div class="chip-grid">' + slice.map(a => {
     const dot      = catDot[a.category] || catDot.uncategorized;
     const safeName = (a.app || '').replace(/'/g, "\\'");
     return `<span class="chip"
@@ -122,32 +204,57 @@ function renderAppsList(apps) {
       <span class="chip-time">${fmtSec(a.total_sec)}</span>
     </span>`;
   }).join('') + '</div>';
+
+  _renderCfgPagination('appsPagination', 'appsCountLabel', _appsPage, total, _APPS_PAGE_SIZE, '_appsGoTo', 'apps');
+}
+
+function _appsGoTo(page) {
+  _appsPage = page;
+  _renderAppsPage();
+  document.getElementById('appsList')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 function filterApps() {
-  const q        = (document.getElementById('appsFilter').value || '').toLowerCase();
-  const filtered = q ? _allApps.filter(a => (a.app || '').toLowerCase().includes(q)) : _allApps;
-  renderAppsList(filtered);
+  const q       = (document.getElementById('appsFilter').value || '').toLowerCase();
+  _appsFiltered = q ? _allApps.filter(a => (a.app || '').toLowerCase().includes(q)) : _allApps;
+  _appsPage     = 0;
+  _renderAppsPage();
 }
 
-/* -------------------- SITES DETECTADOS -------------------- */
+// Mantido para compatibilidade
+function renderAppsList(apps) {
+  _appsFiltered = apps;
+  _appsPage     = 0;
+  _renderAppsPage();
+}
+
+/* ──────────────────────────────────────────────────────────────────
+   SITES DETECTADOS
+   ────────────────────────────────────────────────────────────────── */
 async function loadSitesForConfig() {
   try {
     const data = await api('/v1/productivity/internet?tenant=' + encodeURIComponent(state.tenant) + '&days=30');
-    _allSites = data.sites || [];
-    renderSitesList(_allSites);
+    _allSites      = data.sites || [];
+    _sitesFiltered = _allSites;
+    _sitesPage     = 0;
+    _renderSitesPage();
   } catch (e) { toast('Erro ao carregar sites: ' + e.message); }
 }
 
-function renderSitesList(sites) {
-  const el = document.getElementById('sitesList');
+function _renderSitesPage() {
+  const el    = document.getElementById('sitesList');
   if (!el) return;
-  if (!sites.length) {
+  const total = _sitesFiltered.length;
+  const catDot = { productive: '#4ade80', unproductive: '#f87171', neutral: '#94a3b8', uncategorized: '#fbbf24' };
+
+  if (!total) {
     el.innerHTML = '<p style="color:var(--text-muted);font-size:13px">Nenhum site detectado no período.</p>';
+    _renderCfgPagination('sitesPagination', 'sitesCountLabel', 0, 0, _SITES_PAGE_SIZE, '_sitesGoTo', 'sites');
     return;
   }
-  const catDot = { productive: '#4ade80', unproductive: '#f87171', neutral: '#94a3b8', uncategorized: '#fbbf24' };
-  el.innerHTML = '<div class="chip-grid">' + sites.map(s => {
+
+  const slice = _sitesFiltered.slice(_sitesPage * _SITES_PAGE_SIZE, (_sitesPage + 1) * _SITES_PAGE_SIZE);
+  el.innerHTML = '<div class="chip-grid">' + slice.map(s => {
     const dot      = catDot[s.category] || catDot.uncategorized;
     const safeName = (s.site_name || '').replace(/'/g, "\\'");
     return `<span class="chip"
@@ -158,15 +265,33 @@ function renderSitesList(sites) {
       <span class="chip-time">${fmtSec(s.total_sec)}</span>
     </span>`;
   }).join('') + '</div>';
+
+  _renderCfgPagination('sitesPagination', 'sitesCountLabel', _sitesPage, total, _SITES_PAGE_SIZE, '_sitesGoTo', 'sites');
+}
+
+function _sitesGoTo(page) {
+  _sitesPage = page;
+  _renderSitesPage();
+  document.getElementById('sitesList')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 function filterSites() {
   const q        = (document.getElementById('sitesFilter').value || '').toLowerCase();
-  const filtered = q ? _allSites.filter(s => (s.site_name || '').toLowerCase().includes(q)) : _allSites;
-  renderSitesList(filtered);
+  _sitesFiltered = q ? _allSites.filter(s => (s.site_name || '').toLowerCase().includes(q)) : _allSites;
+  _sitesPage     = 0;
+  _renderSitesPage();
 }
 
-/* -------------------- DEPARTAMENTOS (gestão) -------------------- */
+// Mantido para compatibilidade
+function renderSitesList(sites) {
+  _sitesFiltered = sites;
+  _sitesPage     = 0;
+  _renderSitesPage();
+}
+
+/* ──────────────────────────────────────────────────────────────────
+   DEPARTAMENTOS
+   ────────────────────────────────────────────────────────────────── */
 function _updateDeptDatalist() {
   const dl = document.getElementById('deptDatalist');
   if (!dl) return;
@@ -273,7 +398,9 @@ async function removeUserFromDept(uid, deptName) {
   } catch (e) { toast('Erro: ' + e.message); }
 }
 
-/* -------------------- COLABORADORES -------------------- */
+/* ──────────────────────────────────────────────────────────────────
+   COLABORADORES
+   ────────────────────────────────────────────────────────────────── */
 async function loadCollabs() {
   try {
     const data = await api('/v1/users?tenant=' + encodeURIComponent(state.tenant));
