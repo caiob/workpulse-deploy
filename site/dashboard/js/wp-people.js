@@ -48,9 +48,21 @@ function renderPeopleTable() {
   }).join('');
 }
 
+/** Mapeia o valor do seletor para um rótulo legível */
+function _peoplePeriodLabel(days) {
+  const d = +days;
+  if (d === 1)  return 'Hoje';
+  if (d === 7)  return 'Últimos 7 dias';
+  if (d === 14) return 'Últimas 2 semanas';
+  if (d === 30) return 'Últimos 30 dias';
+  return `Últimos ${d} dias`;
+}
+
 async function drillUser(uid, name) {
   try {
-    const data  = await api(`/v1/users/${encodeURIComponent(uid)}/summary?tenant=${encodeURIComponent(state.tenant)}&days=30`);
+    const days  = document.getElementById('peopleRange').value || '7';
+    const label = _peoplePeriodLabel(days);
+    const data  = await api(`/v1/users/${encodeURIComponent(uid)}/summary?tenant=${encodeURIComponent(state.tenant)}&days=${days}`);
     const total = (data.active_seconds || 0) + (data.afk_seconds || 0);
     const adh   = total > 0 ? Math.round((data.active_seconds || 0) / total * 100) : 0;
     const ct    = chartTheme();
@@ -59,22 +71,46 @@ async function drillUser(uid, name) {
     drill.classList.remove('hide');
     drill.className = 'drill';
     drill.innerHTML = `
-      <div style="display:flex;align-items:center;gap:14px;margin-bottom:10px">
-        ${avatar(name, true)}
-        <div>
-          <h4>${name}</h4>
-          <div class="meta">${uid} · últimos 30 dias</div>
+      <!-- ── Cabeçalho da pessoa ── -->
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:20px">
+        <div style="display:flex;align-items:center;gap:14px">
+          ${avatar(name, true)}
+          <div>
+            <h4 style="margin:0 0 2px">${name}</h4>
+            <div class="meta" style="font-size:11px">${uid}</div>
+          </div>
+        </div>
+        <button class="ghost" title="Fechar"
+          onclick="document.getElementById('drill').classList.add('hide')"
+          style="font-size:20px;line-height:1;padding:2px 10px;opacity:.6">×</button>
+      </div>
+
+      <!-- ── KPIs com rótulo de período explícito ── -->
+      <div style="margin-bottom:22px">
+        <div style="font-size:11px;font-weight:600;letter-spacing:.07em;color:var(--text-muted);text-transform:uppercase;margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid var(--border)">
+          Resumo — <span style="color:var(--primary)">${label}</span>
+        </div>
+        <div class="stat-row">
+          <div><h3>Ativo</h3><div class="stat">${fmtH(data.active_seconds)}<small>h</small></div></div>
+          <div><h3>AFK</h3><div class="stat">${fmtH(data.afk_seconds)}<small>h</small></div></div>
+          <div><h3>Aderência</h3><div class="stat">${adh}<small>%</small></div></div>
+          <div><h3>Dias c/ atividade</h3><div class="stat">${(data.by_day || []).length}<small>dias</small></div></div>
         </div>
       </div>
-      <div class="stat-row">
-        <div><h3>Ativo</h3><div class="stat">${fmtH(data.active_seconds)}<small>h</small></div></div>
-        <div><h3>AFK</h3><div class="stat">${fmtH(data.afk_seconds)}<small>h</small></div></div>
-        <div><h3>Aderência</h3><div class="stat">${adh}<small>%</small></div></div>
-        <div><h3>Dias com atividade</h3><div class="stat">${(data.by_day || []).length}<small>dias</small></div></div>
+
+      <!-- ── Gráfico de curva ── -->
+      <div style="margin-bottom:20px">
+        <div style="font-size:12px;color:var(--text-dim);margin-bottom:10px">
+          Ativo × AFK — dia a dia <span style="color:var(--text-muted);font-size:11px">(${label})</span>
+        </div>
+        <div style="height:240px"><canvas id="drillChart"></canvas></div>
       </div>
-      <div style="height:240px;margin-bottom:16px"><canvas id="drillChart"></canvas></div>
-      <h3>Top aplicativos no período</h3>
-      <table style="margin-top:8px">
+
+      <!-- ── Top apps ── -->
+      <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">
+        Top aplicativos <span style="color:var(--text-muted);font-size:11px">(${label})</span>
+      </div>
+      <table style="margin-top:0">
         <thead><tr><th>Aplicativo</th><th>Tempo</th><th>Distribuição</th></tr></thead>
         <tbody>
           ${(data.top_apps || []).map(a => {
@@ -85,7 +121,7 @@ async function drillUser(uid, name) {
               <td><span class="bar" style="width:200px"><span style="width:${Math.min(100, pct)}%"></span></span>
                   <small style="color:var(--text-dim);margin-left:6px">${pct}%</small></td>
             </tr>`;
-          }).join('') || `<tr><td colspan="3" class="empty-state">Sem dados</td></tr>`}
+          }).join('') || `<tr><td colspan="3" class="empty-state">Sem dados no período.</td></tr>`}
         </tbody>
       </table>
     `;
