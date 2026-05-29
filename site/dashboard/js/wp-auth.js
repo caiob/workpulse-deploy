@@ -1,19 +1,22 @@
 // =====================================================================
-// wp-auth.js — Autenticação, sessão, tema claro/escuro
-// Carregado por último: depende de todas as outras funções (switchTab,
-// loadOverview, etc.) que já estão no escopo global.
+// wp-auth.js — Autenticação, sessão, tema e menu de conta
 // =====================================================================
 
-/* ==================== TEMA ==================== */
+/* ══════════════════════════════════════════════════════════════════
+   TEMA
+   ══════════════════════════════════════════════════════════════════ */
 
 function applyTheme(theme) {
   document.body.classList.toggle('theme-light', theme === 'light');
 
-  // Atualiza botão de toggle em Configurações (se visível)
+  // Atualiza botão antigo em Configurações (compatibilidade)
   const btn = document.getElementById('themeToggleBtn');
   if (btn) btn.textContent = theme === 'light' ? '🌙 Tema Escuro' : '☀️ Tema Claro';
 
-  // Destrói charts em cache para recriá-los com as cores corretas do tema
+  // Sincroniza toggle do menu de conta
+  _acctSyncTheme();
+
+  // Reconstrói charts com cores corretas
   Object.keys(state.charts).forEach(k => {
     if (state.charts[k] && typeof state.charts[k].destroy === 'function') {
       state.charts[k].destroy();
@@ -21,14 +24,12 @@ function applyTheme(theme) {
     delete state.charts[k];
   });
 
-  // Recarrega a aba ativa para redesenhar os charts com o novo tema
+  // Recarrega aba ativa
   if (state.token) {
     const activeBtn  = document.querySelector('nav.tabs > button.active');
     const activeItem = document.querySelector('.nav-dropdown-menu .active-item');
     const current    = activeItem || activeBtn;
-    if (current && current.dataset && current.dataset.tab) {
-      switchTab(current.dataset.tab);
-    }
+    if (current?.dataset?.tab) switchTab(current.dataset.tab);
   }
 }
 
@@ -37,12 +38,133 @@ function toggleTheme() {
   const next    = isLight ? 'dark' : 'light';
   localStorage.setItem('wp_theme', next);
   applyTheme(next);
-  // Atualiza botão imediatamente
-  const btn = document.getElementById('themeToggleBtn');
-  if (btn) btn.textContent = next === 'light' ? '🌙 Tema Escuro' : '☀️ Tema Claro';
 }
 
-/* ==================== LOGIN ==================== */
+/* ══════════════════════════════════════════════════════════════════
+   MENU DE CONTA
+   ══════════════════════════════════════════════════════════════════ */
+
+/** Gradientes disponíveis para o avatar (escolhido pelo hash do tenant). */
+const _ACCT_GRADIENTS = [
+  ['#6c8cff', '#a78bfa'],
+  ['#4ade80', '#22d3ee'],
+  ['#f472b6', '#fb923c'],
+  ['#f87171', '#a78bfa'],
+  ['#22d3ee', '#6c8cff'],
+  ['#fbbf24', '#4ade80'],
+];
+
+function _tenantGradient(id) {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+  return _ACCT_GRADIENTS[h % _ACCT_GRADIENTS.length];
+}
+
+function _tenantInitials(name) {
+  const parts = (name || '').trim().split(/\s+/);
+  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
+  return (name || 'WP').slice(0, 2).toUpperCase();
+}
+
+/** Sincroniza o toggle de tema do menu com o estado atual do body. */
+function _acctSyncTheme() {
+  const isLight = document.body.classList.contains('theme-light');
+  const chk = document.getElementById('acctThemeCheck');
+  const lbl = document.getElementById('acctThemeLbl');
+  if (chk) chk.checked = isLight;
+  if (lbl) lbl.textContent = isLight ? 'Claro' : 'Escuro';
+}
+
+/** Atualiza avatar, nome e ID no trigger e no cabeçalho do dropdown. */
+function _acctSetTenant(tenantId, tenantName) {
+  const name = tenantName || tenantId || 'WorkPulse';
+  const initials = _tenantInitials(name);
+  const [c1, c2] = _tenantGradient(tenantId || '');
+
+  // Avatar no trigger
+  const avatar = document.getElementById('acctAvatar');
+  if (avatar) {
+    avatar.textContent = initials;
+    avatar.style.background = `linear-gradient(135deg, ${c1}, ${c2})`;
+  }
+
+  // Nome no trigger (truncado)
+  const trigName = document.getElementById('acctTriggerName');
+  if (trigName) trigName.textContent = name;
+
+  // Cabeçalho do dropdown
+  const nameEl = document.getElementById('acctTenantName');
+  const idEl   = document.getElementById('acctTenantId');
+  if (nameEl) nameEl.textContent = name;
+  if (idEl)   idEl.textContent   = tenantId || '—';
+}
+
+/** Carrega informações de licença do servidor e popula o menu. */
+async function _loadLicenseInfo() {
+  if (!state.token || !state.tenant) return;
+  try {
+    const info = await api('/v1/license/info?tenant=' + encodeURIComponent(state.tenant));
+
+    // Atualiza nome do tenant (agora com nome real)
+    _acctSetTenant(info.tenant_id, info.tenant_name);
+
+    // Plan badge
+    const planEl = document.getElementById('acctPlan');
+    if (planEl) {
+      const planMap = { starter: 'Starter', business: 'Business', enterprise: 'Enterprise' };
+      planEl.textContent = planMap[info.plan] || info.plan || '—';
+      planEl.className   = 'acct-plan plan-' + (info.plan || 'starter');
+    }
+
+    // Seats
+    const seatsEl = document.getElementById('acctSeats');
+    if (seatsEl) {
+      seatsEl.textContent = info.seats > 0
+        ? `${info.used_seats} / ${info.seats}`
+        : (info.used_seats > 0 ? info.used_seats : '—');
+    }
+  } catch (_) {
+    // Falha silenciosa — dados do tenant ainda aparecem via _acctSetTenant
+  }
+}
+
+/** Abre / fecha o menu de conta. */
+function _toggleAccountMenu(e) {
+  if (e) e.stopPropagation();
+  const wrap = document.getElementById('acctWrap');
+  if (!wrap) return;
+  const isOpen = wrap.classList.contains('open');
+  // Fecha nav-dropdowns antes
+  document.querySelectorAll('.nav-dropdown.open').forEach(d => d.classList.remove('open'));
+  wrap.classList.toggle('open', !isOpen);
+}
+
+/** Fecha o menu de conta. */
+function _closeAccountMenu() {
+  document.getElementById('acctWrap')?.classList.remove('open');
+}
+
+/** Inicializa wiring do menu de conta (click fora fecha, ESC fecha). */
+function _acctInitMenu() {
+  const trigger = document.getElementById('acctTrigger');
+  const wrap    = document.getElementById('acctWrap');
+  if (!trigger || !wrap) return;
+
+  trigger.addEventListener('click', _toggleAccountMenu);
+
+  // Click dentro do dropdown não propaga (não fecha)
+  document.getElementById('acctDropdown')?.addEventListener('click', e => e.stopPropagation());
+
+  // Click fora fecha
+  document.addEventListener('click', () => _closeAccountMenu());
+
+  // ESC fecha
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') _closeAccountMenu(); });
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   LOGIN
+   ══════════════════════════════════════════════════════════════════ */
 
 function _showLoginError(msg) {
   const el = document.getElementById('loginError');
@@ -73,7 +195,7 @@ async function doLogin() {
 
   try {
     const controller = new AbortController();
-    const tid = setTimeout(() => controller.abort(), 12000); // timeout 12s
+    const tid = setTimeout(() => controller.abort(), 12000);
 
     const r = await fetch(
       url + '/v1/workforce/overview?tenant=' + encodeURIComponent(tenant) + '&days=1',
@@ -86,10 +208,7 @@ async function doLogin() {
       return;
     }
 
-    // Qualquer resposta que não seja 401/403 significa que as credenciais
-    // são válidas (pode ser 200, 500 de erro de servidor, etc.)
-
-    // Salva e entra
+    // Salva estado
     state.url    = url;
     state.tenant = tenant;
     state.token  = token;
@@ -98,7 +217,12 @@ async function doLogin() {
     localStorage.setItem('wp_token',  token);
 
     document.getElementById('login').classList.add('hide');
-    document.getElementById('tenantPill').textContent = tenant;
+
+    // Preenche o menu de conta
+    _acctSetTenant(tenant, tenant);
+    _acctSyncTheme();
+    _loadLicenseInfo();
+
     loadOverview();
 
   } catch (e) {
@@ -114,17 +238,23 @@ async function doLogin() {
 }
 
 function logout() {
+  _closeAccountMenu();
   localStorage.removeItem('wp_token');
   state.token = '';
   document.getElementById('login').classList.remove('hide');
   _clearLoginError();
 }
 
-/* ==================== BOOTSTRAP ==================== */
+/* ══════════════════════════════════════════════════════════════════
+   BOOTSTRAP
+   ══════════════════════════════════════════════════════════════════ */
 (function bootstrap() {
   // Aplica tema salvo
-  const savedTheme = localStorage.getItem('wp_theme') || 'light';
+  const savedTheme = localStorage.getItem('wp_theme') || 'dark';
   applyTheme(savedTheme);
+
+  // Inicializa menu de conta
+  _acctInitMenu();
 
   // Restaura sessão salva
   const url    = localStorage.getItem('wp_url');
@@ -139,7 +269,12 @@ function logout() {
     state.tenant = tenant;
     state.token  = token;
     document.getElementById('login').classList.add('hide');
-    document.getElementById('tenantPill').textContent = tenant;
+
+    // Preenche menu de conta
+    _acctSetTenant(tenant, tenant);
+    _acctSyncTheme();
+    _loadLicenseInfo();
+
     loadOverview();
   }
 })();

@@ -745,3 +745,151 @@ tr.ev-sub-row td {
 tr.ev-sub-row:last-of-type td {
   border-bottom: 1px solid var(--border, #1e2f5e) !important;
 }
+
+/* ═══════════════════════════════════════════════════════════════════
+   ACCOUNT MENU — menu premium no canto superior direito
+   ═══════════════════════════════════════════════════════════════════ */
+.acct-wrap { position: relative; }
+
+/* ── Trigger ── */
+.acct-trigger {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 5px 12px 5px 5px;
+  background: var(--panel-soft); border: 1px solid var(--border-soft);
+  border-radius: 999px; cursor: pointer;
+  transition: border-color .15s, box-shadow .15s;
+  max-width: 220px;
+}
+.acct-trigger:hover {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(108,140,255,.12);
+}
+.acct-trigger > svg {
+  transition: transform .2s; flex-shrink: 0;
+  color: var(--text-dim); margin-left: 2px;
+}
+.acct-wrap.open .acct-trigger > svg { transform: rotate(180deg); }
+.acct-wrap.open .acct-trigger { border-color: var(--primary); }
+
+/* ── Avatar (iniciais com gradiente) ── */
+.acct-avatar {
+  width: 28px; height: 28px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 700; color: #fff;
+  flex-shrink: 0; letter-spacing: .02em;
+  /* background definido via JS */
+  background: linear-gradient(135deg, #6c8cff, #a78bfa);
+}
+.acct-trigger-name {
+  font-size: 13px; font-weight: 500; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: 120px;
+}
+
+/* ── Dropdown ── */
+.acct-dropdown {
+  position: absolute; right: 0; top: calc(100% + 10px);
+  width: 278px; z-index: 200;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: 0 24px 64px rgba(0,0,0,.50), 0 4px 16px rgba(0,0,0,.3);
+  padding: 6px;
+  opacity: 0; transform: translateY(-8px) scale(.97);
+  pointer-events: none;
+  transition: opacity .15s, transform .15s;
+}
+body.theme-light .acct-dropdown {
+  box-shadow: 0 12px 48px rgba(0,0,0,.18), 0 2px 8px rgba(0,0,0,.08);
+}
+.acct-wrap.open .acct-dropdown {
+  opacity: 1; transform: translateY(0) scale(1);
+  pointer-events: auto;
+}
+
+/* ── Cabeçalho (logo + identidade) ── */
+.acct-head {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 12px 12px;
+}
+.acct-logo-img {
+  width: 44px; height: 44px; border-radius: 10px;
+  object-fit: cover; flex-shrink: 0;
+  border: 1px solid var(--border-soft);
+}
+.acct-tenant-name {
+  font-size: 14px; font-weight: 700; color: var(--text);
+  line-height: 1.3;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.acct-tenant-id {
+  font-size: 11px; color: var(--text-muted);
+  font-family: monospace; margin-top: 3px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* ── Separador ── */
+.acct-sep { height: 1px; background: var(--border-soft); margin: 2px 4px; }
+
+/* ── Linhas de info ── */
+.acct-row {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 8px 12px;
+}
+.acct-lbl { font-size: 12px; color: var(--text-muted); font-weight: 500; }
+.acct-val  { font-size: 12px; color: var(--text); font-weight: 500; }
+
+/* ── Badge de plano ── */
+.acct-plan {
+  font-size: 10px; font-weight: 700; letter-spacing: .07em;
+  text-transform: uppercase; padding: 3px 9px; border-radius: 999px;
+}
+.acct-plan.plan-starter    { background: var(--panel); color: var(--text-dim); border: 1px solid var(--border-soft); }
+.acct-plan.plan-business   { background: rgba(108,140,255,.15); color: var(--primary); border: 1px solid rgba(108,140,255,.3); }
+.acct-plan.plan-enterprise { background: rgba(245,158,11,.15); color: #f59e0b; border: 1px solid rgba(245,158,11,.3); }
+
+/* ── Toggle de tema ── */
+.acct-theme-sw {
+  display: inline-flex; align-items: center; gap: 8px;
+  cursor: pointer; user-select: none;
+}
+.acct-theme-sw input { display: none; }
+.acct-sw-track {
+  position: relative; width: 36px; height: 20px;
+  background: var(--bg-2); border-radius: 999px;
+  border: 1px solid var(--border); flex-shrink: 0;
+  transition: background .2s, border-color .2s;
+}
+.acct-sw-thumb {
+  position: absolute; top: 2px; left: 2px;
+  width: 14px; height: 14px; border-radius: 50%;
+  background: var(--text-muted); transition: transform .2s, background .2s;
+}
+.acct-theme-sw input:checked + .acct-sw-track {
+  background: rgba(108,140,255,.2); border-color: var(--primary);
+}
+.acct-theme-sw input:checked + .acct-sw-track .acct-sw-thumb {
+  transform: translateX(16px); background: var(--primary);
+}
+.acct-sw-label { font-size: 12px; color: var(--text-dim); min-width: 40px; }
+
+/* ── Status row ── */
+.acct-status-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px;
+  font-size: 12px; color: var(--text-dim);
+}
+
+/* ── Action buttons ── */
+.acct-action {
+  display: flex; align-items: center; gap: 10px;
+  width: 100%; padding: 9px 12px;
+  background: transparent; border: none;
+  color: var(--text); font-size: 13px; font-weight: 500;
+  cursor: pointer; border-radius: 10px; text-align: left;
+  transition: background .12s, color .12s;
+}
+.acct-action:hover { background: var(--panel-soft); }
+.acct-action svg { flex-shrink: 0; color: var(--text-dim); }
+.acct-action-logout { color: var(--danger); }
+.acct-action-logout:hover { background: rgba(239,68,68,.08); }
+.acct-action-logout svg { color: var(--danger); }

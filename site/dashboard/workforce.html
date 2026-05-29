@@ -8,7 +8,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-<link rel="stylesheet" href="css/workforce.css?v=10">
+<link rel="stylesheet" href="css/workforce.css?v=11">
 <link rel="icon" type="image/jpeg" href="../assets/logo-workpulse.jpeg">
 </head>
 <body>
@@ -79,22 +79,84 @@
 
   </nav>
 
-  <!-- Ações (status + dropdown de conta) -->
+  <!-- Menu de conta (top-right) -->
   <div class="actions">
-    <span><span class="led"></span><span id="apiStatus">conectado</span></span>
-    <span id="tenantPill" class="pill">tenant</span>
+    <div class="acct-wrap" id="acctWrap">
 
-    <!-- Dropdown de conta -->
-    <div class="nav-dropdown actions-dd">
-      <button class="actions-trigger nav-dd-trigger">
-        ⚙ <span class="dd-arrow">▾</span>
+      <!-- Botão disparador -->
+      <button class="acct-trigger" id="acctTrigger">
+        <span class="acct-avatar" id="acctAvatar">WP</span>
+        <span class="acct-trigger-name" id="acctTriggerName">WorkPulse</span>
+        <svg width="10" height="6" viewBox="0 0 10 6" fill="none">
+          <path d="M1 1l4 4 4-4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
       </button>
-      <div class="nav-dropdown-menu">
-        <button onclick="switchTab('config')">⚙ Configurações</button>
-        <hr class="menu-separator">
-        <button onclick="logout()">↩ Sair</button>
-      </div>
-    </div>
+
+      <!-- Dropdown -->
+      <div class="acct-dropdown" id="acctDropdown">
+
+        <!-- Cabeçalho: logo + identidade -->
+        <div class="acct-head">
+          <img src="../assets/logo-workpulse.jpeg" class="acct-logo-img" id="acctLogoImg" alt="Logo">
+          <div style="min-width:0">
+            <div class="acct-tenant-name" id="acctTenantName">WorkPulse</div>
+            <div class="acct-tenant-id" id="acctTenantId">—</div>
+          </div>
+        </div>
+
+        <div class="acct-sep"></div>
+
+        <!-- Plano e seats -->
+        <div class="acct-row">
+          <span class="acct-lbl">Plano</span>
+          <span class="acct-plan plan-starter" id="acctPlan">Starter</span>
+        </div>
+        <div class="acct-row">
+          <span class="acct-lbl">Colaboradores</span>
+          <span class="acct-val" id="acctSeats">—</span>
+        </div>
+
+        <div class="acct-sep"></div>
+
+        <!-- Toggle de tema -->
+        <div class="acct-row">
+          <span class="acct-lbl">Tema</span>
+          <label class="acct-theme-sw" title="Alternar tema claro / escuro">
+            <input type="checkbox" id="acctThemeCheck" onchange="toggleTheme()">
+            <span class="acct-sw-track"><span class="acct-sw-thumb"></span></span>
+            <span class="acct-sw-label" id="acctThemeLbl">Escuro</span>
+          </label>
+        </div>
+
+        <div class="acct-sep"></div>
+
+        <!-- Status da conexão -->
+        <div class="acct-status-row">
+          <span class="led" id="statusLed"></span>
+          <span id="apiStatus" style="font-size:12px">conectado</span>
+        </div>
+
+        <div class="acct-sep"></div>
+
+        <!-- Ações -->
+        <button class="acct-action" onclick="_closeAccountMenu();switchTab('config')">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+          Configurações
+        </button>
+        <button class="acct-action acct-action-logout" onclick="logout()">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+            <polyline points="16 17 21 12 16 7"/>
+            <line x1="21" y1="12" x2="9" y2="12"/>
+          </svg>
+          Sair
+        </button>
+
+      </div><!-- /acct-dropdown -->
+    </div><!-- /acct-wrap -->
   </div>
 
 </header>
@@ -778,18 +840,18 @@
 <div id="toast" class="toast hide"></div>
 
 <!-- ===== MÓDULOS JS (defer: executam após parse do DOM, em ordem) ===== -->
-<script src="js/wp-core.js?v=10" defer></script>
-<script src="js/wp-overview.js?v=10" defer></script>
-<script src="js/wp-people.js?v=10" defer></script>
-<script src="js/wp-departments.js?v=10" defer></script>
-<script src="js/wp-analytics.js?v=10" defer></script>
-<script src="js/wp-events.js?v=10" defer></script>
-<script src="js/wp-internet.js?v=10" defer></script>
-<script src="js/wp-jornada.js?v=10" defer></script>
-<script src="js/wp-settings.js?v=10" defer></script>
-<script src="js/wp-reports.js?v=10" defer></script>
-<script src="js/wp-nav.js?v=10" defer></script>
-<script src="js/wp-auth.js?v=10" defer></script>
+<script src="js/wp-core.js?v=11" defer></script>
+<script src="js/wp-overview.js?v=11" defer></script>
+<script src="js/wp-people.js?v=11" defer></script>
+<script src="js/wp-departments.js?v=11" defer></script>
+<script src="js/wp-analytics.js?v=11" defer></script>
+<script src="js/wp-events.js?v=11" defer></script>
+<script src="js/wp-internet.js?v=11" defer></script>
+<script src="js/wp-jornada.js?v=11" defer></script>
+<script src="js/wp-settings.js?v=11" defer></script>
+<script src="js/wp-reports.js?v=11" defer></script>
+<script src="js/wp-nav.js?v=11" defer></script>
+<script src="js/wp-auth.js?v=11" defer></script>
 
 </body>
 </html>

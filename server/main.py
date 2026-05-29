@@ -1245,6 +1245,28 @@ def productivity_events_summary(
 # Workforce dashboard
 # ===========================================================================
 
+@app.get("/v1/license/info", dependencies=[Depends(require_tenant_scope)])
+def license_info(tenant: str):
+    """Retorna informações da licença e do tenant para exibição no menu de conta."""
+    with db() as c:
+        t    = c.execute("SELECT id, name, plan FROM tenants WHERE id=%s", (tenant,)).fetchone()
+        lic  = c.execute(
+            "SELECT plan, seats, expires FROM licenses WHERE tenant_id=%s ORDER BY issued DESC LIMIT 1",
+            (tenant,),
+        ).fetchone()
+        used = c.execute(
+            "SELECT COUNT(DISTINCT user_id) AS n FROM users WHERE tenant_id=%s", (tenant,)
+        ).fetchone()["n"]
+    return {
+        "tenant_id":   tenant,
+        "tenant_name": t["name"]    if t   else tenant,
+        "plan":        lic["plan"]  if lic else (t["plan"] if t else "starter"),
+        "seats":       lic["seats"] if lic else 0,
+        "used_seats":  used,
+        "expires":     lic["expires"] if lic else None,
+    }
+
+
 @app.get("/v1/workforce/overview", dependencies=[Depends(require_tenant_scope)])
 def workforce_overview(tenant: str, days: int = 7):
     cache_key = f"{tenant}:overview:{days}"
