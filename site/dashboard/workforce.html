@@ -8,7 +8,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-<link rel="stylesheet" href="css/workforce.css?v=2">
+<link rel="stylesheet" href="css/workforce.css?v=3">
 <link rel="icon" type="image/jpeg" href="../assets/logo-workpulse.jpeg">
 </head>
 <body>
@@ -60,7 +60,7 @@
       <div class="nav-dropdown-menu">
         <button data-tab="people">👥 Pessoas</button>
         <button data-tab="departments">🏢 Departamentos</button>
-        <button data-tab="events">⚡ Eventos</button>
+        <button data-tab="events">⚡ Aplicações</button>
         <button data-tab="internet">🌐 Internet</button>
         <button data-tab="jornada">⏱ Jornada de Trabalho</button>
       </div>
@@ -282,10 +282,10 @@
     </div>
   </section>
 
-  <!-- ── EVENTOS ── -->
+  <!-- ── APLICAÇÕES ── -->
   <section id="tab-events" class="hide">
-    <h1 class="page-title">Eventos de <span class="em">atividade</span>.</h1>
-    <p class="page-sub">Coleta completa de atividade — todos os aplicativos usados, com classificação por categoria de produtividade. Clique em <em>Categorizar</em> para criar uma regra rapidamente.</p>
+    <h1 class="page-title">Aplicações de <span class="em">desktop</span>.</h1>
+    <p class="page-sub">Apps usados no período — sem browsers (esses ficam na aba Internet). Classifique por categoria de produtividade clicando em <em>Categorizar</em>.</p>
 
     <div class="toolbar">
       <div><label>Período</label>
@@ -328,7 +328,7 @@
 
     <div class="kpi-row">
       <div class="kpi-card" style="border-top:3px solid var(--primary)">
-        <div class="kpi-val" id="kpiEvTotal">—</div><div class="kpi-label">Tempo total ativo</div>
+        <div class="kpi-val" id="kpiEvTotal">—</div><div class="kpi-label">Tempo total em apps</div>
       </div>
       <div class="kpi-card" style="border-top:3px solid #4ade80">
         <div class="kpi-val" id="kpiEvProd">—</div><div class="kpi-label">Produtivo</div>
@@ -342,15 +342,15 @@
     </div>
 
     <div class="card no-bar" style="margin-bottom:18px">
-      <h3>Atividade por categoria — por dia</h3>
-      <p style="font-size:12px;color:var(--text-dim);margin:4px 0 14px">Tempo ativo por dia dividido por categoria de produtividade. Configure as categorias na aba <em>Configurações</em>.</p>
+      <h3>Apps por categoria — por dia</h3>
+      <p style="font-size:12px;color:var(--text-dim);margin:4px 0 14px">Tempo em aplicações de desktop por dia, dividido por categoria. Configure as categorias na aba <em>Configurações</em>.</p>
       <div style="height:240px"><canvas id="chartEvDaily"></canvas></div>
     </div>
 
     <div class="card no-bar">
       <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:12px">
         <div>
-          <h3 style="margin:0">Eventos recentes <span id="evCountLabel" style="color:var(--text-muted);font-weight:400;font-size:11px;margin-left:6px"></span></h3>
+          <h3 style="margin:0">Aplicações recentes <span id="evCountLabel" style="color:var(--text-muted);font-weight:400;font-size:11px;margin-left:6px"></span></h3>
           <p style="font-size:12px;color:var(--text-dim);margin:4px 0 0">Buscados sob demanda — troque de página sem recarregar os KPIs.</p>
         </div>
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
@@ -733,18 +733,18 @@
 <div id="toast" class="toast hide"></div>
 
 <!-- ===== MÓDULOS JS (defer: executam após parse do DOM, em ordem) ===== -->
-<script src="js/wp-core.js?v=2" defer></script>
-<script src="js/wp-overview.js?v=2" defer></script>
-<script src="js/wp-people.js?v=2" defer></script>
-<script src="js/wp-departments.js?v=2" defer></script>
-<script src="js/wp-analytics.js?v=2" defer></script>
-<script src="js/wp-events.js?v=2" defer></script>
-<script src="js/wp-internet.js?v=2" defer></script>
-<script src="js/wp-jornada.js?v=2" defer></script>
-<script src="js/wp-settings.js?v=2" defer></script>
-<script src="js/wp-reports.js?v=2" defer></script>
-<script src="js/wp-nav.js?v=2" defer></script>
-<script src="js/wp-auth.js?v=2" defer></script>
+<script src="js/wp-core.js?v=3" defer></script>
+<script src="js/wp-overview.js?v=3" defer></script>
+<script src="js/wp-people.js?v=3" defer></script>
+<script src="js/wp-departments.js?v=3" defer></script>
+<script src="js/wp-analytics.js?v=3" defer></script>
+<script src="js/wp-events.js?v=3" defer></script>
+<script src="js/wp-internet.js?v=3" defer></script>
+<script src="js/wp-jornada.js?v=3" defer></script>
+<script src="js/wp-settings.js?v=3" defer></script>
+<script src="js/wp-reports.js?v=3" defer></script>
+<script src="js/wp-nav.js?v=3" defer></script>
+<script src="js/wp-auth.js?v=3" defer></script>
 
 </body>
 </html>

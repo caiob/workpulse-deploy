@@ -584,6 +584,19 @@ def _is_browser(app: str) -> bool:
     return a in _BROWSER_APPS or any(kw in a for kw in _BROWSER_KEYWORDS)
 
 
+def _no_browser_where() -> tuple[str, list]:
+    """SQL fragment + args to exclude browser apps from queries.
+    Append the fragment to an existing WHERE clause; extend args list."""
+    in_ph   = ", ".join(["%s"] * len(_BROWSER_APPS))
+    like_or = " OR ".join(
+        "LOWER(data_json->>'app') LIKE %s"
+        for _ in _BROWSER_KEYWORDS
+    )
+    sql  = f" AND LOWER(data_json->>'app') NOT IN ({in_ph}) AND NOT ({like_or})"
+    args: list = list(_BROWSER_APPS) + [f"%{kw}%" for kw in _BROWSER_KEYWORDS]
+    return sql, args
+
+
 def _clean_title(title: str) -> str:
     if not title or not title.strip():
         return "(sem título)"
@@ -1104,15 +1117,17 @@ def search_events(
         where.append("ts <= %s"); args.append(until)
 
     where_clause = " AND ".join(where)
+    nb_sql, nb_args = _no_browser_where()
 
     with db() as c:
         total = c.execute(
-            f"SELECT COUNT(*) AS n FROM events WHERE {where_clause}", args
+            f"SELECT COUNT(*) AS n FROM events WHERE {where_clause}{nb_sql}",
+            args + nb_args,
         ).fetchone()["n"]
 
         rows = c.execute(
-            f"SELECT * FROM events WHERE {where_clause} ORDER BY ts DESC LIMIT %s OFFSET %s",
-            args + [limit, offset],
+            f"SELECT * FROM events WHERE {where_clause}{nb_sql} ORDER BY ts DESC LIMIT %s OFFSET %s",
+            args + nb_args + [limit, offset],
         ).fetchall()
 
         rules = [dict(r) for r in c.execute(
@@ -1152,12 +1167,15 @@ def productivity_events_summary(
             (tenant,),
         ).fetchall()]
 
+        nb_sql, nb_args = _no_browser_where()
+
         agg_sql  = ("SELECT data_json->>'app' AS app, data_json->>'title' AS title,"
                     " SUM(duration_sec) AS total_sec"
                     " FROM events WHERE tenant_id=%s AND bucket=%s AND ts>=%s")
         agg_args: list = [tenant, _bucket, since]
         if user_id:
             agg_sql += " AND user_id=%s"; agg_args.append(user_id)
+        agg_sql += nb_sql; agg_args += nb_args
         agg_sql += " GROUP BY app, title"
         agg_rows = c.execute(agg_sql, agg_args).fetchall()
 
@@ -1167,6 +1185,7 @@ def productivity_events_summary(
         day_args: list = [tenant, _bucket, since]
         if user_id:
             day_sql += " AND user_id=%s"; day_args.append(user_id)
+        day_sql += nb_sql; day_args += nb_args
         day_sql += " GROUP BY day, app, title ORDER BY day"
         day_raw = c.execute(day_sql, day_args).fetchall()
 

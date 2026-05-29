@@ -210,20 +210,20 @@ async function loadEvents(resetPage = true) {
       if (!rawEvents.length && !_evPage) {
         label.textContent = '';
       } else if (mode === 'byapp') {
-        label.textContent = `— ${events.length} apps (${filtered.length} eventos${catLabel})`;
+        label.textContent = `— ${events.length} apps (${filtered.length} aplicações${catLabel})`;
       } else if (mode === 'sequential' && events.length < filtered.length) {
         const saved = filtered.length - events.length;
-        label.textContent = `— ${events.length} grupos (${filtered.length} eventos, ${saved} agrupados${catLabel})`;
+        label.textContent = `— ${events.length} grupos (${filtered.length} aplicações, ${saved} agrupadas${catLabel})`;
       } else if (_evTotal > 0) {
-        label.textContent = `— ${filtered.length} de ${_evTotal.toLocaleString('pt-BR')} eventos${catLabel}`;
+        label.textContent = `— ${filtered.length} de ${_evTotal.toLocaleString('pt-BR')} aplicações${catLabel}`;
       } else {
-        label.textContent = `— ${filtered.length} eventos${catLabel}`;
+        label.textContent = `— ${filtered.length} aplicações${catLabel}`;
       }
     }
 
     const tb = document.querySelector('#eventsTable tbody');
     if (!events.length) {
-      tb.innerHTML = '<tr><td colspan="6" class="empty-state">Nenhum evento encontrado com estes filtros.</td></tr>';
+      tb.innerHTML = '<tr><td colspan="6" class="empty-state">Nenhuma aplicação encontrada com estes filtros.</td></tr>';
       _renderEvPagination(hasPrev, hasNext, totalPages);
       return;
     }
@@ -296,7 +296,7 @@ async function loadEvents(resetPage = true) {
 
     _renderEvPagination(hasPrev, hasNext, totalPages);
 
-  } catch (e) { toast('Erro ao carregar eventos: ' + e.message); }
+  } catch (e) { toast('Erro ao carregar aplicações: ' + e.message); }
 }
 
 // ─────────────────────────────────────────────────────────────────────
