@@ -24,9 +24,9 @@ function _intChangePageSize() {
 
 async function loadInternet() {
   await _populateUserDropdown('intUser');
-  const days   = document.getElementById('intDays').value;
+  const { since, until } = wpDP.getRange('intDays');
   const user   = document.getElementById('intUser').value.trim();
-  const params = new URLSearchParams({ tenant: state.tenant, days });
+  const params = new URLSearchParams({ tenant: state.tenant, since, until });
   if (user) params.set('user_id', user);
 
   // Reseta o filtro de categoria e a página ao recarregar
@@ -106,13 +106,9 @@ function renderSitesTable(sites, totalSec, catFilter = '') {
 
   const tbody     = document.querySelector('#intSitesTable tbody');
   const totalSites = sites.length;
-  const totalPages = Math.max(1, Math.ceil(totalSites / _intPageSize));
-
   // Garante que a página atual não ultrapasse o total
-  if (_intPage >= totalPages) _intPage = totalPages - 1;
-
-  const hasPrev = _intPage > 0;
-  const hasNext = _intPage < totalPages - 1;
+  const _totalPagesCheck = Math.max(1, Math.ceil(totalSites / _intPageSize));
+  if (_intPage >= _totalPagesCheck) _intPage = _totalPagesCheck - 1;
 
   if (!_intSitesCache.length) {
     tbody.innerHTML = `<tr><td colspan="7" class="empty-state">
@@ -131,89 +127,75 @@ function renderSitesTable(sites, totalSec, catFilter = '') {
     return;
   }
 
-  const pageSlice = sites.slice(_intPage * _intPageSize, (_intPage + 1) * _intPageSize);
+  // Slice for current page
+  const start   = _intPage * _intPageSize;
+  const pageRows = sites.slice(start, start + _intPageSize);
+  const totalPages = Math.ceil(sites.length / _intPageSize);
+  const hasPrev = _intPage > 0;
+  const hasNext = (_intPage + 1) < totalPages;
 
-  tbody.innerHTML = pageSlice.map(s => {
-    const pct     = totalSec > 0 ? (s.total_sec / totalSec * 100).toFixed(1) : '0';
-    const barFill = CAT_COLORS[s.category] || CAT_COLORS.uncategorized;
-    const bar     = `<div class="bar"><span style="width:${Math.min(+pct, 100)}%;background:${barFill}"></span></div>`;
-    const pill    = CAT_PILLS[s.category] || CAT_PILLS.uncategorized;
-    const users   = s.user_count === 1 ? '1 usuário' : s.user_count + ' usuários';
-    const safeName = s.site_name.replace(/'/g, "\\'").replace(/"/g, '&quot;');
-    const when    = s.last_access
-      ? new Date(s.last_access).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
-      : '—';
+  tbody.innerHTML = pageRows.map(s => {
+    const pct   = totalSec > 0 ? Math.round(s.total_sec / totalSec * 100) : 0;
+    const users = (s.users || []).map(u => {
+      const found = (state.lastTeam?.users || []).find(x => x.user_id === u);
+      return found ? displayName(found) : u.slice(0, 8);
+    }).join(', ');
+    const catBadge = _intCatBadge(s.category);
+    const when = s.last_access ? ptDateTime(s.last_access) : '—';
     return `<tr>
-      <td style="white-space:nowrap;color:var(--text-dim);font-size:12px">${when}</td>
-      <td style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${s.site_name}">${s.site_name}</td>
-      <td>${pill}</td>
-      <td>${fmtSec(s.total_sec)}</td>
-      <td>${bar} <span style="color:var(--text-dim);font-size:11px">${pct}%</span></td>
-      <td style="color:var(--text-dim)">${users}</td>
-      <td><button class="cat-btn" onclick="quickRule('${safeName}')">Categorizar</button></td>
+      <td>${when}</td>
+      <td class="site-name">${escHtml(s.site_name)}</td>
+      <td>${fmtH(s.total_sec)}h <small>(${pct}%)</small></td>
+      <td>${catBadge} <button class="ghost" style="font-size:11px;padding:2px 6px"
+            onclick="prefillRule(${JSON.stringify(s.site_name)})">Categorizar</button></td>
+      <td>${s.user_count}</td>
+      <td style="font-size:11px;color:var(--text-dim)">${users}</td>
     </tr>`;
   }).join('');
 
-  _renderIntPagination(hasPrev, hasNext, totalPages, totalSites);
+  _renderIntPagination(hasPrev, hasNext, totalPages, sites.length);
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Paginação
+// Badge de categoria
 // ─────────────────────────────────────────────────────────────────────
 
-function _renderIntPagination(hasPrev, hasNext, totalPages, totalSites) {
+function _intCatBadge(cat) {
+  return CAT_PILLS[cat] || CAT_PILLS.uncategorized;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Paginação client-side para Internet
+// ─────────────────────────────────────────────────────────────────────
+
+function _renderIntPagination(hasPrev, hasNext, totalPages, totalItems) {
   const container = document.getElementById('intPagination');
   if (!container) return;
 
-  // Label de contagem no cabeçalho
-  const label = document.getElementById('intCountLabel');
-  if (label) {
-    const catEl    = document.getElementById('intCategory');
-    const catLabel = catEl?.value ? ` · ${catEl.options[catEl.selectedIndex].text}` : '';
-    label.textContent = totalSites > 0
-      ? `— ${totalSites.toLocaleString('pt-BR')} sites${catLabel}`
-      : '';
-  }
-
-  if (!hasPrev && !hasNext) {
+  if (totalPages <= 1 && !hasPrev && !hasNext) {
     container.innerHTML = '';
     return;
   }
 
-  const currentPage = _intPage + 1;
-  const windowStart = Math.max(1, currentPage - 2);
-  const windowEnd   = Math.min(totalPages, currentPage + 2);
+  const showMax = 5;
+  let start = Math.max(0, _intPage - 2);
+  let end   = Math.min(totalPages - 1, start + showMax - 1);
+  if (end - start < showMax - 1) start = Math.max(0, end - showMax + 1);
 
-  const pageButtons = [];
-
-  if (windowStart > 1) {
-    pageButtons.push(`<button class="ev-page-btn ghost" onclick="_intGoTo(0)">1</button>`);
-    if (windowStart > 2) pageButtons.push(`<span class="ev-page-ellipsis">…</span>`);
+  let numbersHtml = '';
+  if (start > 0) numbersHtml += '<span class="ev-page-ellipsis">…</span>';
+  for (let i = start; i <= end; i++) {
+    numbersHtml += `<button class="ghost ev-page-btn${i === _intPage ? ' ev-page-active' : ''}"
+      onclick="_intPage=${i};renderSitesTable(_intFiltered,_intTotalCache)">${i + 1}</button>`;
   }
-
-  for (let p = windowStart; p <= windowEnd; p++) {
-    const active = p === currentPage ? ' ev-page-active' : '';
-    pageButtons.push(
-      `<button class="ev-page-btn ghost${active}" onclick="_intGoTo(${p - 1})">${p}</button>`
-    );
-  }
-
-  if (windowEnd < totalPages) {
-    if (windowEnd < totalPages - 1) pageButtons.push(`<span class="ev-page-ellipsis">…</span>`);
-    pageButtons.push(`<button class="ev-page-btn ghost" onclick="_intGoTo(${totalPages - 1})">${totalPages}</button>`);
-  }
+  if (end < totalPages - 1) numbersHtml += '<span class="ev-page-ellipsis">…</span>';
 
   container.innerHTML = `
     <div class="ev-pagination">
-      <button class="ghost ev-page-nav" ${hasPrev ? '' : 'disabled'} onclick="_intGoTo(${_intPage - 1})">← Anterior</button>
-      <div class="ev-page-numbers">${pageButtons.join('')}</div>
-      <button class="ghost ev-page-nav" ${hasNext ? '' : 'disabled'} onclick="_intGoTo(${_intPage + 1})">Próxima →</button>
+      <button class="ghost ev-page-nav" ${hasPrev ? '' : 'disabled'}
+        onclick="_intPage=${_intPage - 1};renderSitesTable(_intFiltered,_intTotalCache)">← Anterior</button>
+      <div class="ev-page-numbers">${numbersHtml}</div>
+      <button class="ghost ev-page-nav" ${hasNext ? '' : 'disabled'}
+        onclick="_intPage=${_intPage + 1};renderSitesTable(_intFiltered,_intTotalCache)">Próxima →</button>
     </div>`;
-}
-
-/** Navega para uma página específica e rerenderiza. */
-function _intGoTo(page) {
-  _intPage = page;
-  renderSitesTable(_intFiltered, _intTotalCache);
-  document.getElementById('intSitesTable')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }

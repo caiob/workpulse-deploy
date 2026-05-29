@@ -8,7 +8,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-<link rel="stylesheet" href="css/workforce.css?v=11">
+<link rel="stylesheet" href="css/workforce.css?v=13">
 <link rel="icon" type="image/jpeg" href="../assets/logo-workpulse.jpeg">
 </head>
 <body>
@@ -171,12 +171,7 @@
 
     <div class="toolbar">
       <div><label>Período</label>
-        <select id="rangeDays" onchange="loadOverview()">
-          <option value="1">Hoje</option>
-          <option value="7" selected>Últimos 7 dias</option>
-          <option value="14">Últimas 2 semanas</option>
-          <option value="30">Últimos 30 dias</option>
-        </select>
+        <div id="rangeDays"></div>
       </div>
       <div class="spacer"></div>
       <span id="lastRefreshLabel" style="color:var(--text-dim);font-size:12px;align-self:center"></span>
@@ -256,12 +251,7 @@
         <input id="peopleFilter" oninput="renderPeopleTable()" placeholder="nome, e-mail ou departamento" style="width:100%;max-width:360px">
       </div>
       <div><label>Período</label>
-        <select id="peopleRange" onchange="loadPeople()">
-          <option value="1">Hoje</option>
-          <option value="7" selected>Últimos 7 dias</option>
-          <option value="14">2 semanas</option>
-          <option value="30">30 dias</option>
-        </select>
+        <div id="peopleRange"></div>
       </div>
       <button class="ghost" onclick="loadPeople()">↻ Atualizar</button>
     </div>
@@ -323,11 +313,7 @@
 
     <div class="toolbar">
       <div><label>Período</label>
-        <select id="trendDays" onchange="loadTrends()">
-          <option value="14">2 semanas</option>
-          <option value="30" selected>30 dias</option>
-          <option value="90">90 dias</option>
-        </select>
+        <div id="trendDays"></div>
       </div>
       <div class="spacer"></div>
       <button class="ghost" onclick="loadTrends()">↻ Atualizar</button>
@@ -352,13 +338,7 @@
 
     <div class="toolbar">
       <div><label>Período</label>
-        <select id="evDays" onchange="loadEvents()">
-          <option value="1" selected>Hoje</option>
-          <option value="7">Últimos 7 dias</option>
-          <option value="15">15 dias</option>
-          <option value="30">30 dias</option>
-          <option value="60">60 dias</option>
-        </select>
+        <div id="evDays"></div>
       </div>
       <div><label>Usuário</label>
         <select id="evUser" style="min-width:180px"><option value="">Todos os usuários</option></select>
@@ -445,13 +425,7 @@
 
     <div class="toolbar">
       <div><label>Período</label>
-        <select id="intDays" onchange="loadInternet()">
-          <option value="1" selected>Hoje</option>
-          <option value="7">Últimos 7 dias</option>
-          <option value="15">15 dias</option>
-          <option value="30">30 dias</option>
-          <option value="90">90 dias</option>
-        </select>
+        <div id="intDays"></div>
       </div>
       <div><label>Usuário</label>
         <select id="intUser" style="min-width:200px"><option value="">Todos os usuários</option></select>
@@ -531,11 +505,7 @@
         </select>
       </div>
       <div><label>Período</label>
-        <select id="jorDays" onchange="loadJornada()">
-          <option value="7" selected>Últimos 7 dias</option>
-          <option value="14">2 semanas</option>
-          <option value="30">30 dias</option>
-        </select>
+        <div id="jorDays"></div>
       </div>
       <div class="spacer"></div>
       <span style="color:var(--text-dim);font-size:12px;align-self:center">
@@ -725,112 +695,67 @@
       </div>
     </div>
 
-    <!-- Departamentos -->
-    <div class="card no-bar" style="margin-bottom:18px" id="deptsSection">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+    <!-- Regras Ativas -->
+    <div class="card no-bar">
+      <div style="display:flex;align-items:baseline;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:4px">
         <div>
-          <h3 style="margin:0 0 4px;font-size:14px;font-weight:600;color:var(--text)">Departamentos</h3>
-          <p style="font-size:12px;color:var(--text-dim);margin:0">Crie departamentos e atribua colaboradores. O gráfico na aba Departamentos é alimentado por esta configuração.</p>
+          <h3 style="margin:0;display:inline">Regras Ativas</h3>
+          <span id="rulesCountLabel" style="font-size:12px;color:var(--text-dim);margin-left:6px"></span>
         </div>
-        <button class="ghost" onclick="loadDepts()" style="white-space:nowrap">↻ Atualizar</button>
+        <div id="rulesPagination"></div>
       </div>
-
-      <div style="display:flex;gap:8px;margin-bottom:18px;align-items:flex-end">
-        <div style="flex:1">
-          <label style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;display:block;margin-bottom:4px">Nome do departamento</label>
-          <input id="newDeptName" placeholder="Ex: TI, Contabilidade, RH..."
-            style="width:100%;background:var(--bg-2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px 12px;font-size:13px"
-            onkeydown="if(event.key==='Enter') createDept()">
-        </div>
-        <button class="primary" onclick="createDept()" style="height:38px;padding:0 18px">+ Criar</button>
-      </div>
-
-      <div id="deptsList"><p style="color:var(--text-muted);font-size:13px">Carregando...</p></div>
+      <p style="font-size:12px;color:var(--text-dim);margin:0 0 8px">Avaliadas em ordem — a primeira regra que casar é aplicada. Exclua e recrie para reordenar.</p>
+      <table id="rulesTable">
+        <thead>
+          <tr><th>Rótulo</th><th>Campo</th><th>Padrão</th><th>Tipo</th><th>Categoria</th><th></th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
     </div>
 
     <!-- Colaboradores -->
-    <div class="card no-bar" id="collabsSection">
+    <div class="card no-bar">
       <h3>Colaboradores</h3>
-      <p style="font-size:12px;color:var(--text-dim);margin:4px 0 14px">
-        Defina o nome amigável, e-mail, departamento e função para cada dispositivo monitorado.<br>
-        Quando o agente envia o nome de login do SO, ele é pré-preenchido automaticamente.
-      </p>
-
-      <!-- Formulário de edição inline -->
-      <div id="collabForm" class="config-form" style="display:none;padding:14px;background:var(--bg-2);border-radius:10px;margin-bottom:16px">
-        <input type="hidden" id="collabUserId">
-        <div>
-          <label>Device / ID</label>
-          <input id="collabDevice" disabled style="opacity:.5;min-width:160px">
-        </div>
-        <div>
-          <label>Nome amigável</label>
-          <input id="collabName" placeholder="Ex: João Silva" style="min-width:180px">
-        </div>
-        <div>
-          <label>E-mail</label>
-          <input id="collabEmail" type="email" placeholder="joao@empresa.com" style="min-width:180px">
-        </div>
-        <div>
-          <label>Departamento</label>
-          <input id="collabDept" list="deptDatalist" placeholder="Selecione ou digite..." style="min-width:160px" autocomplete="off">
-          <datalist id="deptDatalist"></datalist>
-        </div>
-        <div>
-          <label>Função</label>
-          <input id="collabRole" placeholder="Analista, Dev..." style="min-width:130px">
-        </div>
-        <div>
-          <label>&nbsp;</label>
-          <div style="display:flex;gap:8px">
-            <button class="primary" onclick="saveUser()">Salvar</button>
-            <button class="ghost" onclick="document.getElementById('collabForm').style.display='none'">Cancelar</button>
+      <div id="collabForm" style="display:none;margin-bottom:16px">
+        <p style="font-size:12px;color:var(--text-dim);margin:0 0 8px">Preencha os campos abaixo e clique em <strong>Salvar</strong>.</p>
+        <div class="toolbar" style="flex-wrap:wrap;gap:10px;align-items:flex-end">
+          <input type="hidden" id="collabUserId">
+          <div>
+            <label>Device / ID</label>
+            <input id="collabDevice" disabled style="opacity:.5;min-width:160px">
+          </div>
+          <div>
+            <label>Nome amigável</label>
+            <input id="collabName" placeholder="Ex: João Silva" style="min-width:180px">
+          </div>
+          <div>
+            <label>E-mail</label>
+            <input id="collabEmail" type="email" placeholder="joao@empresa.com" style="min-width:180px">
+          </div>
+          <div>
+            <label>Departamento</label>
+            <input id="collabDept" list="deptDatalist" placeholder="Selecione ou digite..." style="min-width:160px" autocomplete="off">
+            <datalist id="deptDatalist"></datalist>
+          </div>
+          <div>
+            <label>Função</label>
+            <input id="collabRole" placeholder="Analista, Dev..." style="min-width:130px">
+          </div>
+          <div>
+            <label>&nbsp;</label>
+            <div style="display:flex;gap:8px">
+              <button class="primary" onclick="saveUser()">Salvar</button>
+              <button class="ghost" onclick="document.getElementById(\'collabForm\').style.display=\'none\'">Cancelar</button>
+            </div>
           </div>
         </div>
       </div>
-
       <table id="collabsTable">
         <thead>
           <tr><th>Device</th><th>Nome amigável</th><th>E-mail</th><th>Departamento</th><th>Função</th><th>Última atividade</th><th></th></tr>
         </thead>
         <tbody></tbody>
       </table>
-    </div>
-
-    <!-- ── RELATÓRIOS AUTOMÁTICOS ── -->
-    <div class="card no-bar" style="margin-bottom:18px">
-      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:16px">
-        <div>
-          <h3 style="margin:0">Relatórios Automáticos</h3>
-          <p style="font-size:12px;color:var(--text-dim);margin:4px 0 0">
-            Envio agendado por e-mail (diário, semanal ou mensal) com dados de atividade da equipe.
-          </p>
-        </div>
-        <button class="primary" onclick="openCreateReportModal()">+ Novo Relatório</button>
-      </div>
-
-      <!-- estilos inline dos cards de relatório -->
-      <style>
-        .report-card{background:var(--bg-card,#1e293b);border:1px solid var(--border,#334155);border-radius:10px;padding:16px;margin-bottom:12px}
-        .report-card-header{display:flex;align-items:center;gap:10px;margin-bottom:6px}
-        .report-card-title{font-weight:700;font-size:15px}
-        .report-card-meta{display:flex;gap:16px;font-size:12px;color:var(--text-dim);margin-bottom:4px}
-        .report-card-sections{font-size:12px;color:var(--text-dim);margin-bottom:4px}
-        .report-card-recipients{margin-bottom:10px}
-        .report-card-actions{display:flex;flex-wrap:wrap;gap:8px}
-        .badge{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600}
-        .badge-ok{background:#16a34a22;color:#4ade80}
-        .badge-warn{background:#ca8a0422;color:#facc15}
-        .badge-error{background:#dc262622;color:#f87171}
-        .btn-danger-outline{border:1px solid var(--danger,#ef4444);color:var(--danger,#ef4444);background:transparent;cursor:pointer;border-radius:6px;padding:4px 10px;font-size:12px}
-        .btn-danger-outline:hover{background:#ef444422}
-        .checkbox-group{display:flex;flex-wrap:wrap;gap:12px;margin-top:6px}
-        .checkbox-label{display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer}
-      </style>
-
-      <div id="reportsListContainer">
-        <p class="empty-state">Carregando relatórios…</p>
-      </div>
     </div>
   </section>
 
@@ -840,18 +765,18 @@
 <div id="toast" class="toast hide"></div>
 
 <!-- ===== MÓDULOS JS (defer: executam após parse do DOM, em ordem) ===== -->
-<script src="js/wp-core.js?v=11" defer></script>
-<script src="js/wp-overview.js?v=11" defer></script>
-<script src="js/wp-people.js?v=11" defer></script>
-<script src="js/wp-departments.js?v=11" defer></script>
-<script src="js/wp-analytics.js?v=11" defer></script>
-<script src="js/wp-events.js?v=11" defer></script>
-<script src="js/wp-internet.js?v=11" defer></script>
-<script src="js/wp-jornada.js?v=11" defer></script>
-<script src="js/wp-settings.js?v=11" defer></script>
-<script src="js/wp-reports.js?v=11" defer></script>
-<script src="js/wp-nav.js?v=11" defer></script>
-<script src="js/wp-auth.js?v=11" defer></script>
+<script src="js/wp-core.js?v=13" defer></script>
+<script src="js/wp-datepicker.js?v=13" defer></script>
+<script src="js/wp-overview.js?v=13" defer></script>
+<script src="js/wp-people.js?v=13" defer></script>
+<script src="js/wp-departments.js?v=13" defer></script>
+<script src="js/wp-analytics.js?v=13" defer></script>
+<script src="js/wp-events.js?v=13" defer></script>
+<script src="js/wp-internet.js?v=13" defer></script>
+<script src="js/wp-jornada.js?v=13" defer></script>
+<script src="js/wp-settings.js?v=13" defer></script>
+<script src="js/wp-nav.js?v=13" defer></script>
+<script src="js/wp-auth.js?v=13" defer></script>
 
 </body>
 </html>

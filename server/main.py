@@ -975,8 +975,12 @@ def list_users(tenant: str):
 
 
 @app.get("/v1/users/{user_id}/summary", dependencies=[Depends(require_tenant_scope)])
-def user_summary(user_id: str, tenant: str, days: int = 7):
-    since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).isoformat()
+def user_summary(user_id: str, tenant: str, days: int = 7,
+                 since: str | None = None, until: str | None = None):
+    if since is None:
+        since = _since_for_days(days)
+    if until is None:
+        until = dt.datetime.now(dt.timezone.utc).isoformat()
     with db() as c:
         info = c.execute(
             "SELECT * FROM users WHERE tenant_id = %s AND user_id = %s",
@@ -990,16 +994,16 @@ def user_summary(user_id: str, tenant: str, days: int = 7):
                    SUM(CASE WHEN bucket='window' THEN duration_sec END) AS active,
                    SUM(CASE WHEN bucket='afk' AND data_json->>'status'='afk'
                             THEN duration_sec END) AS afk
-               FROM events WHERE tenant_id=%s AND user_id=%s AND ts>=%s""",
-            (tenant, user_id, since),
+               FROM events WHERE tenant_id=%s AND user_id=%s AND ts>=%s AND ts<=%s""",
+            (tenant, user_id, since, until),
         ).fetchone()
 
         top_apps = c.execute(
             """SELECT data_json->>'app' AS app, SUM(duration_sec) AS seconds
                FROM events
-               WHERE tenant_id=%s AND user_id=%s AND ts>=%s AND bucket='window'
+               WHERE tenant_id=%s AND user_id=%s AND ts>=%s AND ts<=%s AND bucket='window'
                GROUP BY app ORDER BY seconds DESC LIMIT 10""",
-            (tenant, user_id, since),
+            (tenant, user_id, since, until),
         ).fetchall()
 
         daily = c.execute(
@@ -1007,9 +1011,9 @@ def user_summary(user_id: str, tenant: str, days: int = 7):
                       SUM(CASE WHEN bucket='window' THEN duration_sec ELSE 0 END) AS active,
                       SUM(CASE WHEN bucket='afk' AND data_json->>'status'='afk'
                                THEN duration_sec ELSE 0 END) AS afk
-               FROM events WHERE tenant_id=%s AND user_id=%s AND ts>=%s
+               FROM events WHERE tenant_id=%s AND user_id=%s AND ts>=%s AND ts<=%s
                GROUP BY day ORDER BY day""",
-            (tenant, user_id, since),
+            (tenant, user_id, since, until),
         ).fetchall()
 
     return {
@@ -1057,13 +1061,17 @@ def update_user(user_id: str, body: UserUpdate, tenant: str, request: Request):
 # ===========================================================================
 
 @app.get("/v1/team/summary", dependencies=[Depends(require_tenant_scope)])
-def team_summary(tenant: str, days: int = 7):
-    cache_key = f"{tenant}:team_summary:{days}"
+def team_summary(tenant: str, days: int = 7,
+                 since: str | None = None, until: str | None = None):
+    if since is None:
+        since = _since_for_days(days)
+    if until is None:
+        until = dt.datetime.now(dt.timezone.utc).isoformat()
+    cache_key = f"{tenant}:team_summary:{since}:{until}"
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
 
-    since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).isoformat()
     with db() as c:
         per_user = c.execute(
             """SELECT u.user_id, u.display_name, u.email, u.department, u.last_seen,
@@ -1074,18 +1082,19 @@ def team_summary(tenant: str, days: int = 7):
                        WHERE d.tenant_id = u.tenant_id AND d.user_id = u.user_id
                        ORDER BY d.last_seen DESC LIMIT 1) AS agent_version
                FROM users u LEFT JOIN events e
-                    ON e.tenant_id = u.tenant_id AND e.user_id = u.user_id AND e.ts >= %s
+                    ON e.tenant_id = u.tenant_id AND e.user_id = u.user_id
+                    AND e.ts >= %s AND e.ts <= %s
                WHERE u.tenant_id = %s
                GROUP BY u.user_id, u.display_name, u.email, u.department, u.last_seen, u.tenant_id
                ORDER BY active DESC""",
-            (since, tenant),
+            (since, until, tenant),
         ).fetchall()
         global_top = c.execute(
             """SELECT data_json->>'app' AS app, SUM(duration_sec) AS seconds
                FROM events
-               WHERE tenant_id=%s AND ts>=%s AND bucket='window'
+               WHERE tenant_id=%s AND ts>=%s AND ts<=%s AND bucket='window'
                GROUP BY app ORDER BY seconds DESC LIMIT 15""",
-            (tenant, since),
+            (tenant, since, until),
         ).fetchall()
 
     result = {
@@ -1163,14 +1172,18 @@ def productivity_events_summary(
     days:    int = Query(7, le=90),
     user_id: str | None = None,
     bucket:  str | None = None,
+    since:   str | None = None,
+    until:   str | None = None,
 ):
+    if since is None:
+        since = _since_for_days(days)
+    if until is None:
+        until = dt.datetime.now(dt.timezone.utc).isoformat()
     _bucket   = bucket or "window"
-    cache_key = f"{tenant}:events_summary:{days}:{user_id or ''}:{_bucket}"
+    cache_key = f"{tenant}:events_summary:{since}:{until}:{user_id or ''}:{_bucket}"
     cached    = _cache_get(cache_key)
     if cached is not None:
         return cached
-
-    since = _since_for_days(days)
 
     with db() as c:
         rules = [dict(r) for r in c.execute(
@@ -1182,8 +1195,8 @@ def productivity_events_summary(
 
         agg_sql  = ("SELECT data_json->>'app' AS app, data_json->>'title' AS title,"
                     " SUM(duration_sec) AS total_sec"
-                    " FROM events WHERE tenant_id=%s AND bucket=%s AND ts>=%s")
-        agg_args: list = [tenant, _bucket, since]
+                    " FROM events WHERE tenant_id=%s AND bucket=%s AND ts>=%s AND ts<=%s")
+        agg_args: list = [tenant, _bucket, since, until]
         if user_id:
             agg_sql += " AND user_id=%s"; agg_args.append(user_id)
         agg_sql += nb_sql; agg_args += nb_args
@@ -1192,8 +1205,8 @@ def productivity_events_summary(
 
         day_sql  = ("SELECT substr(ts,1,10) AS day, data_json->>'app' AS app,"
                     " data_json->>'title' AS title, SUM(duration_sec) AS total_sec"
-                    " FROM events WHERE tenant_id=%s AND bucket=%s AND ts>=%s")
-        day_args: list = [tenant, _bucket, since]
+                    " FROM events WHERE tenant_id=%s AND bucket=%s AND ts>=%s AND ts<=%s")
+        day_args: list = [tenant, _bucket, since, until]
         if user_id:
             day_sql += " AND user_id=%s"; day_args.append(user_id)
         day_sql += nb_sql; day_args += nb_args
@@ -1268,14 +1281,18 @@ def license_info(tenant: str):
 
 
 @app.get("/v1/workforce/overview", dependencies=[Depends(require_tenant_scope)])
-def workforce_overview(tenant: str, days: int = 7):
-    cache_key = f"{tenant}:overview:{days}"
-    cached    = _cache_get(cache_key)
+def workforce_overview(tenant: str, days: int = 7,
+                       since: str | None = None, until: str | None = None):
+    now = dt.datetime.now(dt.timezone.utc)
+    if since is None:
+        since = _since_for_days(days)
+    if until is None:
+        until = now.isoformat()
+    cache_key        = f"{tenant}:overview:{since}:{until}"
+    cached           = _cache_get(cache_key)
     if cached is not None:
         return cached
 
-    now              = dt.datetime.now(dt.timezone.utc)
-    since            = (now - dt.timedelta(days=days)).isoformat()
     today_start      = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
     online_threshold = (now - dt.timedelta(minutes=10)).isoformat()
 
@@ -1287,8 +1304,8 @@ def workforce_overview(tenant: str, days: int = 7):
                    SUM(CASE WHEN bucket='afk' AND data_json->>'status'='afk'
                             THEN duration_sec END) AS afk,
                    SUM(CASE WHEN bucket='window' AND ts>=%s THEN duration_sec END) AS today_active
-               FROM events WHERE tenant_id=%s AND ts>=%s""",
-            (today_start, tenant, since),
+               FROM events WHERE tenant_id=%s AND ts>=%s AND ts<=%s""",
+            (today_start, tenant, since, until),
         ).fetchone()
         today_active = totals["today_active"] or 0
 
@@ -1299,9 +1316,9 @@ def workforce_overview(tenant: str, days: int = 7):
 
         hourly = c.execute(
             """SELECT CAST(substr(ts,12,2) AS INTEGER) AS hour, SUM(duration_sec) AS seconds
-               FROM events WHERE tenant_id=%s AND ts>=%s AND bucket='window'
+               FROM events WHERE tenant_id=%s AND ts>=%s AND ts<=%s AND bucket='window'
                GROUP BY hour ORDER BY hour""",
-            (tenant, since),
+            (tenant, since, until),
         ).fetchall()
 
         daily = c.execute(
@@ -1310,9 +1327,9 @@ def workforce_overview(tenant: str, days: int = 7):
                       SUM(CASE WHEN bucket='afk' AND data_json->>'status'='afk'
                                THEN duration_sec ELSE 0 END) AS afk,
                       COUNT(DISTINCT user_id) AS users
-               FROM events WHERE tenant_id=%s AND ts>=%s
+               FROM events WHERE tenant_id=%s AND ts>=%s AND ts<=%s
                GROUP BY day ORDER BY day""",
-            (tenant, since),
+            (tenant, since, until),
         ).fetchall()
 
         by_dept = c.execute(
@@ -1320,10 +1337,11 @@ def workforce_overview(tenant: str, days: int = 7):
                       COUNT(DISTINCT u.user_id) AS users,
                       COALESCE(SUM(CASE WHEN e.bucket='window' THEN e.duration_sec END), 0) AS active
                FROM users u
-               LEFT JOIN events e ON e.tenant_id=u.tenant_id AND e.user_id=u.user_id AND e.ts>=%s
+               LEFT JOIN events e ON e.tenant_id=u.tenant_id AND e.user_id=u.user_id
+                    AND e.ts>=%s AND e.ts<=%s
                WHERE u.tenant_id=%s
                GROUP BY dept ORDER BY active DESC""",
-            (since, tenant),
+            (since, until, tenant),
         ).fetchall()
 
         risk = c.execute(
@@ -1332,11 +1350,11 @@ def workforce_overview(tenant: str, days: int = 7):
                FROM users u
                LEFT JOIN (
                    SELECT user_id, SUM(duration_sec) AS total_sec
-                   FROM events WHERE tenant_id=%s AND ts>=%s AND bucket='window'
+                   FROM events WHERE tenant_id=%s AND ts>=%s AND ts<=%s AND bucket='window'
                    GROUP BY user_id
                ) e ON e.user_id = u.user_id
                WHERE u.tenant_id=%s""",
-            (tenant, since, tenant),
+            (tenant, since, until, tenant),
         ).fetchall()
 
     overwork, underwork = [], []
@@ -1369,14 +1387,18 @@ def workforce_overview(tenant: str, days: int = 7):
 
 
 @app.get("/v1/workforce/timeseries", dependencies=[Depends(require_tenant_scope)])
-def workforce_timeseries(tenant: str, days: int = 30, bucket: str = "window"):
-    since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).isoformat()
+def workforce_timeseries(tenant: str, days: int = 30, bucket: str = "window",
+                         since: str | None = None, until: str | None = None):
+    if since is None:
+        since = _since_for_days(days)
+    if until is None:
+        until = dt.datetime.now(dt.timezone.utc).isoformat()
     with db() as c:
         rows = c.execute(
             """SELECT substr(ts,1,10) AS day, SUM(duration_sec) AS seconds
-               FROM events WHERE tenant_id=%s AND ts>=%s AND bucket=%s
+               FROM events WHERE tenant_id=%s AND ts>=%s AND ts<=%s AND bucket=%s
                GROUP BY day ORDER BY day""",
-            (tenant, since, bucket),
+            (tenant, since, until, bucket),
         ).fetchall()
     return {"tenant": tenant, "bucket": bucket, "series": [dict(r) for r in rows]}
 
@@ -1445,8 +1467,13 @@ def productivity_internet(
     tenant:  str,
     days:    int = Query(7, le=90),
     user_id: str | None = None,
+    since:   str | None = None,
+    until:   str | None = None,
 ):
-    since = _since_for_days(days)
+    if since is None:
+        since = _since_for_days(days)
+    if until is None:
+        until = dt.datetime.now(dt.timezone.utc).isoformat()
 
     with db() as c:
         rules = [dict(r) for r in c.execute(
@@ -1457,8 +1484,8 @@ def productivity_internet(
         sql  = ("SELECT user_id, data_json->>'app' AS app, data_json->>'title' AS title,"
                 " SUM(duration_sec) AS total_sec, COUNT(*) AS events,"
                 " MIN(ts) AS first_ts, MAX(ts) AS last_ts"
-                " FROM events WHERE tenant_id=%s AND bucket='window' AND ts>=%s")
-        args: list = [tenant, since]
+                " FROM events WHERE tenant_id=%s AND bucket='window' AND ts>=%s AND ts<=%s")
+        args: list = [tenant, since, until]
         if user_id:
             sql += " AND user_id=%s"; args.append(user_id)
         sql += " GROUP BY user_id, app, title ORDER BY total_sec DESC"
@@ -1466,8 +1493,8 @@ def productivity_internet(
 
         dsql  = ("SELECT substr(ts,1,10) AS day, data_json->>'app' AS app,"
                  " data_json->>'title' AS title, SUM(duration_sec) AS total_sec"
-                 " FROM events WHERE tenant_id=%s AND bucket='window' AND ts>=%s")
-        dargs: list = [tenant, since]
+                 " FROM events WHERE tenant_id=%s AND bucket='window' AND ts>=%s AND ts<=%s")
+        dargs: list = [tenant, since, until]
         if user_id:
             dsql += " AND user_id=%s"; dargs.append(user_id)
         dsql += " GROUP BY day, app, title ORDER BY day"

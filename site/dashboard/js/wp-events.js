@@ -137,7 +137,7 @@ async function loadEvents(resetPage = true) {
 
   await _populateUserDropdown('evUser');
 
-  const days   = document.getElementById('evDays').value;
+  const { since, until } = wpDP.getRange('evDays');
   const user   = document.getElementById('evUser').value.trim();
   const bucket = document.getElementById('evBucket').value;
   const sig    = _tabAbort ? _tabAbort.signal : undefined;
@@ -145,7 +145,7 @@ async function loadEvents(resetPage = true) {
   _evPageSize = _evGetPageSize();
   const mode  = _evGroupMode();
 
-  const base      = `tenant=${encodeURIComponent(state.tenant)}&days=${days}&no_browser=true`;
+  const base      = `tenant=${encodeURIComponent(state.tenant)}&since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}&no_browser=true`;
   const userParam = user   ? `&user_id=${encodeURIComponent(user)}` : '';
   const bktParam  = bucket ? `&bucket=${encodeURIComponent(bucket)}` : '';
 
@@ -215,146 +215,22 @@ async function loadEvents(resetPage = true) {
         const saved = filtered.length - events.length;
         label.textContent = `— ${events.length} grupos (${filtered.length} aplicativos, ${saved} agrupados${catLabel})`;
       } else if (_evTotal > 0) {
-        label.textContent = `— ${filtered.length} de ${_evTotal.toLocaleString('pt-BR')} aplicativos${catLabel}`;
+        label.textContent = `— ${filtered.length} de ${_evTotal.toLocaleString()} eventos${catLabel}`;
       } else {
-        label.textContent = `— ${filtered.length} aplicativos${catLabel}`;
+        label.textContent = `— ${filtered.length} evento${filtered.length !== 1 ? 's' : ''}${catLabel}`;
       }
     }
 
-    const tb = document.querySelector('#eventsTable tbody');
-    if (!events.length) {
-      tb.innerHTML = '<tr><td colspan="6" class="empty-state">Nenhuma aplicação encontrada com estes filtros.</td></tr>';
-      _renderEvPagination(hasPrev, hasNext, totalPages);
-      return;
-    }
-
-    tb.innerHTML = events.map((e, idx) => {
-      const rowId    = `p${_evPage}_${idx}`;
-      const d        = e.data || {};
-      const appLabel = d.app ? `<strong>${d.app}</strong>` : '<span style="color:var(--text-muted)">—</span>';
-      const title    = d.title || '';
-      const cat      = CAT_PILLS[e.category] || CAT_PILLS.uncategorized;
-      const when     = e._ts_display || e.ts;
-      const ts       = when
-        ? new Date(when).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
-        : '—';
-      const userName  = displayName(state.people.find(p => p.user_id === e.user_id) || { user_id: e.user_id });
-      const dur       = fmtSec(e.duration_sec || 0);
-      const safePat   = (d.title || d.app || '').replace(/'/g, "\\'");
-      const safeField = d.title ? 'title' : 'app';
-      const isGroup   = (e._count || 1) > 1;
-
-      // Badge de contagem e botão de expansão
-      const countBadge = isGroup
-        ? `<span class="ev-count-badge">${e._count}×</span>`
-        : '';
-      const expandBtn = isGroup
-        ? `<button id="ev-btn-${rowId}" class="ev-expand-btn cat-btn" onclick="_toggleEvGroup('${rowId}')" title="Expandir eventos individuais">▶</button>`
-        : '';
-
-      // Linha pai
-      const parentRow = `<tr class="${isGroup ? 'ev-group-row' : ''}">
-        <td style="white-space:nowrap;color:var(--text-dim);font-size:12px">${ts}</td>
-        <td>${userName}</td>
-        <td>${dur}${countBadge}</td>
-        <td style="max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
-          ${appLabel}${title ? ` <span style="color:var(--text-dim);font-size:11px">— ${title}</span>` : ''}
-        </td>
-        <td>${cat}</td>
-        <td style="display:flex;gap:6px;align-items:center">
-          ${expandBtn}
-          <button class="cat-btn" onclick="quickRule('${safePat}','${safeField}')">Categorizar</button>
-        </td>
-      </tr>`;
-
-      // Sub-linhas (ocultas por padrão)
-      const subRows = isGroup
-        ? e._subEvents.map((sub, si) => {
-            const sd    = sub.data || {};
-            const sTs   = sub.ts
-              ? new Date(sub.ts).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
-              : '—';
-            const sDur  = fmtSec(sub.duration_sec || 0);
-            const sTitle = sd.title || '';
-            const sPat  = (sd.title || sd.app || '').replace(/'/g, "\\'");
-            const sField = sd.title ? 'title' : 'app';
-            return `<tr class="ev-sub-row ev-sub-${rowId} hide">
-              <td style="white-space:nowrap;color:var(--text-dim);font-size:11px;padding-left:28px">↳ ${sTs}</td>
-              <td></td>
-              <td style="color:var(--text-dim);font-size:12px">${sDur}</td>
-              <td style="max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--text-dim)">
-                ${sTitle || '<em style="opacity:.5">sem título</em>'}
-              </td>
-              <td></td>
-              <td><button class="cat-btn" style="font-size:11px" onclick="quickRule('${sPat}','${sField}')">Categorizar</button></td>
-            </tr>`;
-          }).join('')
-        : '';
-
-      return parentRow + subRows;
-    }).join('');
-
-    _renderEvPagination(hasPrev, hasNext, totalPages);
-
-  } catch (e) { toast('Erro ao carregar aplicativos: ' + e.message); }
+    renderEventRows(events);
+    _renderEvPagination();
+  } catch (e) {
+    _setConnectionStatus('erro', true);
+    toast('Falha ao carregar eventos: ' + e.message);
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Paginação
-// ─────────────────────────────────────────────────────────────────────
-
-/**
- * Renderiza os controles de paginação no cabeçalho do card.
- */
-function _renderEvPagination(hasPrev, hasNext, totalPages) {
-  const container = document.getElementById('evPagination');
-  if (!container) return;
-
-  if (!hasPrev && !hasNext) {
-    container.innerHTML = '';
-    return;
-  }
-
-  const currentPage = _evPage + 1;
-  const windowStart = Math.max(1, currentPage - 2);
-  const windowEnd   = Math.min(totalPages, currentPage + 2);
-
-  const pageButtons = [];
-
-  if (windowStart > 1) {
-    pageButtons.push(`<button class="ev-page-btn ghost" onclick="_evGoTo(0)">1</button>`);
-    if (windowStart > 2) pageButtons.push(`<span class="ev-page-ellipsis">…</span>`);
-  }
-
-  for (let p = windowStart; p <= windowEnd; p++) {
-    const active = p === currentPage ? ' ev-page-active' : '';
-    pageButtons.push(
-      `<button class="ev-page-btn ghost${active}" onclick="_evGoTo(${p - 1})">${p}</button>`
-    );
-  }
-
-  if (windowEnd < totalPages) {
-    if (windowEnd < totalPages - 1) pageButtons.push(`<span class="ev-page-ellipsis">…</span>`);
-    pageButtons.push(`<button class="ev-page-btn ghost" onclick="_evGoTo(${totalPages - 1})">${totalPages}</button>`);
-  }
-
-  container.innerHTML = `
-    <div class="ev-pagination">
-      <button class="ghost ev-page-nav" ${hasPrev ? '' : 'disabled'} onclick="_evGoTo(${_evPage - 1})">← Anterior</button>
-      <div class="ev-page-numbers">${pageButtons.join('')}</div>
-      <button class="ghost ev-page-nav" ${hasNext ? '' : 'disabled'} onclick="_evGoTo(${_evPage + 1})">Próxima →</button>
-    </div>`;
-}
-
-/** Navega para uma página específica e recarrega. */
-function _evGoTo(page) {
-  _evPage = page;
-  loadEvents(false);
-  document.getElementById('eventsTable')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-}
-
-// ─────────────────────────────────────────────────────────────────────
-// Gráfico diário
+// Chart diário de eventos
 // ─────────────────────────────────────────────────────────────────────
 
 function drawEvDailyChart(daily) {
@@ -371,18 +247,122 @@ function drawEvDailyChart(daily) {
         { label: 'Não-produtivo',    data: daily.map(d => +(d.unproductive  / 3600).toFixed(2)), backgroundColor: CAT_COLORS.unproductive,  borderRadius: 4, stack: 'a' },
         { label: 'Neutro',           data: daily.map(d => +(d.neutral       / 3600).toFixed(2)), backgroundColor: CAT_COLORS.neutral,        borderRadius: 4, stack: 'a' },
         { label: 'Não categorizado', data: daily.map(d => +(d.uncategorized / 3600).toFixed(2)), backgroundColor: CAT_COLORS.uncategorized,  borderRadius: 4, stack: 'a' },
-      ]
+      ],
     },
     options: {
       responsive: true, maintainAspectRatio: false,
       plugins: {
-        legend: { labels: { color: ct.label, font: { size: 11 }, boxWidth: 12 } },
-        tooltip: { callbacks: { label: c => ' ' + c.dataset.label + ': ' + c.parsed.y.toFixed(1) + 'h' } }
+        legend:  { labels: { color: ct.label, font: { size: 11 }, boxWidth: 12 } },
+        tooltip: { callbacks: { label: c => ' ' + c.dataset.label + ': ' + c.parsed.y.toFixed(1) + 'h' } },
       },
       scales: {
         x: { stacked: true, ticks: { color: ct.label }, grid: { color: ct.grid } },
-        y: { stacked: true, ticks: { color: ct.label, callback: v => v + 'h' }, grid: { color: ct.grid } }
-      }
-    }
+        y: { stacked: true, ticks: { color: ct.label, callback: v => v + 'h' }, grid: { color: ct.grid } },
+      },
+    },
   });
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Renderização da tabela de eventos
+// ─────────────────────────────────────────────────────────────────────
+
+function renderEventRows(events) {
+  const tbody = document.querySelector('#eventsTable tbody');
+  if (!tbody) return;
+
+  if (!events.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Nenhum evento encontrado para este período e filtros.</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = events.map((e, idx) => {
+    const rowId    = 'ev-' + idx;
+    const when     = e._ts_display || e.ts;
+    const whenFmt  = when ? ptDateTime(when) : '—';
+    const uid      = cleanUserId(e.user_id || '');
+    const uObj     = state.people.find(p => cleanUserId(p.user_id) === uid);
+    const uName    = uObj ? displayName(uObj) : uid;
+    const dur      = fmtSec(e.duration_sec || 0);
+    const app      = escHtml((e.data || {}).app || '—');
+    const title    = escHtml((e.data || {}).title || '');
+    const catBadge = CAT_PILLS[e.category] || CAT_PILLS.uncategorized;
+    const isGroup  = (e._count || 1) > 1;
+
+    const mainRow = `<tr>
+      <td style="font-size:12px;white-space:nowrap">${whenFmt}</td>
+      <td style="font-size:12px">${escHtml(uName)}</td>
+      <td style="white-space:nowrap">${dur}${isGroup ? ` <small>(${e._count})</small>` : ''}</td>
+      <td><strong style="font-size:12px">${app}</strong>${title ? `<br><span style="color:var(--text-dim);font-size:11px">${title}</span>` : ''}</td>
+      <td>${catBadge}</td>
+      <td style="text-align:center">
+        ${isGroup ? `<button id="ev-btn-${rowId}" class="ghost ev-page-btn" style="font-size:10px;padding:2px 6px" onclick="_toggleEvGroup('${rowId}')">▶</button>` : ''}
+      </td>
+    </tr>`;
+
+    let subRows = '';
+    if (isGroup && e._subEvents) {
+      subRows = e._subEvents.map(se => {
+        const sWhen  = se.ts ? ptDateTime(se.ts) : '—';
+        const sDur   = fmtSec(se.duration_sec || 0);
+        const sApp   = escHtml((se.data || {}).app || '—');
+        const sTitle = escHtml((se.data || {}).title || '');
+        const sCat   = CAT_PILLS[se.category] || CAT_PILLS.uncategorized;
+        return `<tr class="ev-sub-${rowId} hide" style="background:rgba(0,0,0,.08);font-size:11px">
+          <td style="padding-left:20px;font-size:11px">${sWhen}</td>
+          <td></td>
+          <td>${sDur}</td>
+          <td>${sApp}${sTitle ? `<br><span style="color:var(--text-dim)">${sTitle}</span>` : ''}</td>
+          <td>${sCat}</td>
+          <td></td>
+        </tr>`;
+      }).join('');
+    }
+
+    return mainRow + subRows;
+  }).join('');
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Paginação de eventos (server-side)
+// ─────────────────────────────────────────────────────────────────────
+
+function _renderEvPagination() {
+  const container = document.getElementById('evPagination');
+  if (!container) return;
+
+  const totalPages = _evTotal > 0
+    ? Math.max(1, Math.ceil(_evTotal / _evPageSize))
+    : _evPage + 1;
+  const hasPrev = _evPage > 0;
+  const hasNext = _evTotal > 0
+    ? (_evPage + 1) * _evPageSize < _evTotal
+    : false;
+
+  if (totalPages <= 1 && !hasPrev && !hasNext) {
+    container.innerHTML = '';
+    return;
+  }
+
+  const showMax = 5;
+  let start = Math.max(0, _evPage - 2);
+  let end   = Math.min(totalPages - 1, start + showMax - 1);
+  if (end - start < showMax - 1) start = Math.max(0, end - showMax + 1);
+
+  let numbersHtml = '';
+  if (start > 0) numbersHtml += '<span class="ev-page-ellipsis">…</span>';
+  for (let i = start; i <= end; i++) {
+    numbersHtml += `<button class="ghost ev-page-btn${i === _evPage ? ' ev-page-active' : ''}"
+      onclick="_evPage=${i};loadEvents(false)">${i + 1}</button>`;
+  }
+  if (end < totalPages - 1) numbersHtml += '<span class="ev-page-ellipsis">…</span>';
+
+  container.innerHTML = `
+    <div class="ev-pagination">
+      <button class="ghost ev-page-nav" ${hasPrev ? '' : 'disabled'}
+        onclick="_evPage=${_evPage - 1};loadEvents(false)">← Anterior</button>
+      <div class="ev-page-numbers">${numbersHtml}</div>
+      <button class="ghost ev-page-nav" ${hasNext ? '' : 'disabled'}
+        onclick="_evPage=${_evPage + 1};loadEvents(false)">Próxima →</button>
+    </div>`;
 }

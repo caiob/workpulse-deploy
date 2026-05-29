@@ -4,9 +4,9 @@
 
 async function loadDepartments() {
   try {
-    const days  = +(document.getElementById('rangeDays')?.value || 7);
+    const { since, until } = wpDP.getRange('rangeDays');
     const data  = state.lastOverview ||
-      await api(`/v1/workforce/overview?tenant=${encodeURIComponent(state.tenant)}&days=${days}`);
+      await api(`/v1/workforce/overview?tenant=${encodeURIComponent(state.tenant)}&since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`);
     const depts = data.by_department || [];
     const ct    = chartTheme();
 

@@ -5,9 +5,9 @@
 /* -------------------- ALERTAS -------------------- */
 async function loadAlerts() {
   try {
-    const days = +(document.getElementById('rangeDays')?.value || 7);
+    const { since, until } = wpDP.getRange('rangeDays');
     const data = state.lastOverview ||
-      await api(`/v1/workforce/overview?tenant=${encodeURIComponent(state.tenant)}&days=${days}`);
+      await api(`/v1/workforce/overview?tenant=${encodeURIComponent(state.tenant)}&since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`);
     const over  = data.alerts.overwork  || [];
     const under = data.alerts.underwork || [];
 
@@ -38,10 +38,10 @@ async function loadAlerts() {
 /* -------------------- TENDÊNCIAS -------------------- */
 async function loadTrends() {
   try {
-    const days = +document.getElementById('trendDays').value;
+    const { since: tSince, until: tUntil } = wpDP.getRange('trendDays');
     const [active, afk] = await Promise.all([
-      api(`/v1/workforce/timeseries?tenant=${encodeURIComponent(state.tenant)}&days=${days}&bucket=window`),
-      api(`/v1/workforce/timeseries?tenant=${encodeURIComponent(state.tenant)}&days=${days}&bucket=afk`),
+      api(`/v1/workforce/timeseries?tenant=${encodeURIComponent(state.tenant)}&since=${encodeURIComponent(tSince)}&until=${encodeURIComponent(tUntil)}&bucket=window`),
+      api(`/v1/workforce/timeseries?tenant=${encodeURIComponent(state.tenant)}&since=${encodeURIComponent(tSince)}&until=${encodeURIComponent(tUntil)}&bucket=afk`),
     ]);
     drawTrend('chartTrendActive', active.series, '#6c8cff', 'Tempo ativo');
     drawTrend('chartTrendAfk',    afk.series,    '#f59e0b', 'AFK');

@@ -103,4 +103,12 @@ function switchTab(name) {
   document.querySelectorAll('.nav-dropdown-menu').forEach(menu => {
     menu.addEventListener('click', e => e.stopPropagation());
   });
+
+  // ── Inicializa os date pickers de todas as abas ──────────────────
+  wpDP.init('rangeDays',   { defaultDays: 7,  onChange: () => { loadOverview(); loadAlerts(); } });
+  wpDP.init('peopleRange', { defaultDays: 7,  onChange: loadPeople });
+  wpDP.init('trendDays',   { defaultDays: 30, onChange: loadTrends });
+  wpDP.init('evDays',      { defaultDays: 1,  onChange: loadEvents });
+  wpDP.init('intDays',     { defaultDays: 1,  onChange: loadInternet });
+  wpDP.init('jorDays',     { defaultDays: 7,  onChange: loadJornada });
 })();

@@ -481,3 +481,6 @@ async function saveUser() {
     await loadCollabs();
   } catch (e) { toast('Erro ao salvar: ' + e.message); }
 }
+
+// Alias — chamado pela aba Internet para pré-preencher regra de site
+function prefillRule(siteName) { quickRule(siteName, "site"); }

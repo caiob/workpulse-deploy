@@ -56,12 +56,12 @@ echo "============================================================"
 echo " Site publicado!"
 echo
 echo "   Site institucional : https://${DOMAIN}"
-echo "   Painel do cliente  : https://${DOMAIN}/dashboard/workforce.html"
-echo "   Console admin      : https://${DOMAIN}/adm/admin.html"
-echo "   Documentacao API   : https://${DOMAIN}/docs/developers.html"
+echo "   Painel do cliente  : https://${DOMAIN}/dashboard"
+echo "   Console admin      : https://${DOMAIN}/adm"
+echo "   Documentacao API   : https://${DOMAIN}/docs"
 echo
-echo "   (caminhos antigos -- /workforce.html, /admin.html, /developers.html"
-echo "    e /sandbox.html -- continuam funcionando: redirecionam para os novos.)"
+echo "   (URLs com .html também funcionam caso o script"
+echo "    4-setup-clean-urls.sh ainda não tenha sido rodado.)"
 echo
 echo " Observação: a primeira vez que o CloudFront e o DNS propagam"
 echo " pode levar de 15 a 40 minutos. Se o site não abrir de imediato,"

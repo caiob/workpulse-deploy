@@ -12,10 +12,10 @@ function setAutoRefresh() {
 
 async function loadOverview() {
   try {
-    const days = +document.getElementById('rangeDays').value;
+    const { since, until } = wpDP.getRange('rangeDays');
     const [data, team] = await Promise.all([
-      api(`/v1/workforce/overview?tenant=${encodeURIComponent(state.tenant)}&days=${days}`),
-      api(`/v1/team/summary?tenant=${encodeURIComponent(state.tenant)}&days=${days}`),
+      api(`/v1/workforce/overview?tenant=${encodeURIComponent(state.tenant)}&since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`),
+      api(`/v1/team/summary?tenant=${encodeURIComponent(state.tenant)}&since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`),
     ]);
     state.lastOverview = data;
 

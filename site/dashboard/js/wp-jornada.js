@@ -58,15 +58,7 @@ function _jorHHfromFloat(v) {
 }
 
 /* ---------- Fetch chunked por dia ---------- */
-async function _jorFetchByDay(userId, days, bucket, signal) {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const dayStarts = [];
-  for (let i = 0; i < days; i++) {
-    const d = new Date(today);
-    d.setDate(d.getDate() - i);
-    dayStarts.push(d);
-  }
+async function _jorFetchByDay(userId, dayStarts, bucket, signal) {
   const CONC = 5;
   const all  = [];
   for (let i = 0; i < dayStarts.length; i += CONC) {
@@ -131,7 +123,12 @@ function computeJornadas(windowEvents, afkEvents) {
 /* ---------- Loader principal ---------- */
 async function loadJornada() {
   await _populateUserDropdown('jorUser');
-  const days = +document.getElementById('jorDays').value;
+  const { since: jorSince, until: jorUntil } = wpDP.getRange('jorDays');
+  const jorStart = new Date(jorSince); jorStart.setHours(0, 0, 0, 0);
+  const jorEnd   = new Date(jorUntil); jorEnd.setHours(0, 0, 0, 0);
+  const jorDayStarts = [];
+  for (let d = new Date(jorEnd); d >= jorStart; d.setDate(d.getDate() - 1))
+    jorDayStarts.push(new Date(d));
   const user = document.getElementById('jorUser').value.trim();
   const sig  = _tabAbort ? _tabAbort.signal : undefined;
 
@@ -152,8 +149,8 @@ async function loadJornada() {
 
   try {
     const [windowEv, afkEv] = await Promise.all([
-      _jorFetchByDay(user, days, 'window', sig),
-      _jorFetchByDay(user, days, 'afk',    sig),
+      _jorFetchByDay(user, jorDayStarts, 'window', sig),
+      _jorFetchByDay(user, jorDayStarts, 'afk',    sig),
     ]);
 
     const jornadas = computeJornadas(windowEv, afkEv);

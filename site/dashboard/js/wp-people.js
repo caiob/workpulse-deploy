@@ -4,8 +4,8 @@
 
 async function loadPeople() {
   try {
-    const days = +document.getElementById('peopleRange').value;
-    const data = await api(`/v1/team/summary?tenant=${encodeURIComponent(state.tenant)}&days=${days}`);
+    const { since, until } = wpDP.getRange('peopleRange');
+    const data = await api(`/v1/team/summary?tenant=${encodeURIComponent(state.tenant)}&since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`);
     state.people = data.users || [];
     renderPeopleTable();
   } catch (e) { toast('Erro ao carregar pessoas: ' + e.message); }
@@ -60,9 +60,9 @@ function _peoplePeriodLabel(days) {
 
 async function drillUser(uid, name) {
   try {
-    const days  = document.getElementById('peopleRange').value || '7';
-    const label = _peoplePeriodLabel(days);
-    const data  = await api(`/v1/users/${encodeURIComponent(uid)}/summary?tenant=${encodeURIComponent(state.tenant)}&days=${days}`);
+    const { since, until } = wpDP.getRange('peopleRange');
+    const label = _peoplePeriodLabel(wpDP.getDays('peopleRange'));
+    const data  = await api(`/v1/users/${encodeURIComponent(uid)}/summary?tenant=${encodeURIComponent(state.tenant)}&since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`);
     const total = (data.active_seconds || 0) + (data.afk_seconds || 0);
     const adh   = total > 0 ? Math.round((data.active_seconds || 0) / total * 100) : 0;
     const ct    = chartTheme();
