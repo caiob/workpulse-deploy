@@ -3,8 +3,24 @@
 // =====================================================================
 
 // Cache da última busca — permite filtrar por categoria sem nova chamada
-let _intSitesCache = [];
-let _intTotalCache = 0;
+let _intSitesCache  = [];
+let _intTotalCache  = 0;
+let _intFiltered    = [];   // cache pós-filtro de categoria
+let _intPage        = 0;    // página atual (0-indexed)
+let _intPageSize    = 100;  // itens por página
+
+/** Lê o valor atual do seletor de itens por página. */
+function _intGetPageSize() {
+  const sel = document.getElementById('intPageSize');
+  return sel ? parseInt(sel.value, 10) : _intPageSize;
+}
+
+/** Chamado quando o usuário muda o seletor "Por página". */
+function _intChangePageSize() {
+  _intPageSize = _intGetPageSize();
+  _intPage = 0;
+  renderSitesTable(_intFiltered, _intTotalCache);
+}
 
 async function loadInternet() {
   await _populateUserDropdown('intUser');
@@ -13,9 +29,10 @@ async function loadInternet() {
   const params = new URLSearchParams({ tenant: state.tenant, days });
   if (user) params.set('user_id', user);
 
-  // Reseta o filtro de categoria ao recarregar
+  // Reseta o filtro de categoria e a página ao recarregar
   const catSel = document.getElementById('intCategory');
   if (catSel) catSel.value = '';
+  _intPage = 0;
 
   try {
     const data  = await api('/v1/productivity/internet?' + params.toString());
@@ -33,7 +50,8 @@ async function loadInternet() {
     // Armazena no cache e renderiza
     _intSitesCache = data.sites || [];
     _intTotalCache = total;
-    renderSitesTable(_intSitesCache, _intTotalCache);
+    _intFiltered   = _intSitesCache;
+    renderSitesTable(_intFiltered, _intTotalCache);
   } catch (e) { toast('Erro ao carregar dados de internet: ' + e.message); }
 }
 
@@ -42,9 +60,10 @@ async function loadInternet() {
  * Chamada pelo onchange do select #intCategory.
  */
 function filterInternet() {
-  const cat   = document.getElementById('intCategory')?.value || '';
-  const sites = cat ? _intSitesCache.filter(s => s.category === cat) : _intSitesCache;
-  renderSitesTable(sites, _intTotalCache, cat);
+  const cat = document.getElementById('intCategory')?.value || '';
+  _intFiltered = cat ? _intSitesCache.filter(s => s.category === cat) : _intSitesCache;
+  _intPage = 0;
+  renderSitesTable(_intFiltered, _intTotalCache, cat);
 }
 
 function drawIntDailyChart(daily) {
@@ -78,18 +97,29 @@ function drawIntDailyChart(daily) {
 }
 
 /**
- * @param {Array}  sites     Lista de sites a renderizar (já filtrada)
- * @param {number} totalSec  Total geral (para % — sempre o total do período, não filtrado)
- * @param {string} [catFilter] Categoria ativa (para feedback visual)
+ * @param {Array}  sites      Lista de sites a renderizar (já filtrada por categoria)
+ * @param {number} totalSec   Total geral do período (para % — nunca filtrado)
+ * @param {string} [catFilter] Categoria ativa (para feedback no empty-state)
  */
 function renderSitesTable(sites, totalSec, catFilter = '') {
-  const tbody = document.querySelector('#intSitesTable tbody');
+  _intPageSize = _intGetPageSize();
+
+  const tbody     = document.querySelector('#intSitesTable tbody');
+  const totalSites = sites.length;
+  const totalPages = Math.max(1, Math.ceil(totalSites / _intPageSize));
+
+  // Garante que a página atual não ultrapasse o total
+  if (_intPage >= totalPages) _intPage = totalPages - 1;
+
+  const hasPrev = _intPage > 0;
+  const hasNext = _intPage < totalPages - 1;
 
   if (!_intSitesCache.length) {
     tbody.innerHTML = `<tr><td colspan="7" class="empty-state">
       <h4>Nenhum dado de browser encontrado.</h4>
       Verifique se há eventos do tipo <code>window</code> com app de browser (msedge.exe, chrome.exe, firefox.exe...).
     </td></tr>`;
+    _renderIntPagination(false, false, 1, 0);
     return;
   }
 
@@ -97,10 +127,13 @@ function renderSitesTable(sites, totalSec, catFilter = '') {
     const catEl  = document.getElementById('intCategory');
     const catTxt = catEl ? catEl.options[catEl.selectedIndex].text : catFilter;
     tbody.innerHTML = `<tr><td colspan="7" class="empty-state">Nenhum site encontrado na categoria <strong>${catTxt}</strong> para este período.</td></tr>`;
+    _renderIntPagination(false, false, 1, 0);
     return;
   }
 
-  tbody.innerHTML = sites.slice(0, 150).map(s => {
+  const pageSlice = sites.slice(_intPage * _intPageSize, (_intPage + 1) * _intPageSize);
+
+  tbody.innerHTML = pageSlice.map(s => {
     const pct     = totalSec > 0 ? (s.total_sec / totalSec * 100).toFixed(1) : '0';
     const barFill = CAT_COLORS[s.category] || CAT_COLORS.uncategorized;
     const bar     = `<div class="bar"><span style="width:${Math.min(+pct, 100)}%;background:${barFill}"></span></div>`;
@@ -120,4 +153,67 @@ function renderSitesTable(sites, totalSec, catFilter = '') {
       <td><button class="cat-btn" onclick="quickRule('${safeName}')">Categorizar</button></td>
     </tr>`;
   }).join('');
+
+  _renderIntPagination(hasPrev, hasNext, totalPages, totalSites);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Paginação
+// ─────────────────────────────────────────────────────────────────────
+
+function _renderIntPagination(hasPrev, hasNext, totalPages, totalSites) {
+  const container = document.getElementById('intPagination');
+  if (!container) return;
+
+  // Label de contagem no cabeçalho
+  const label = document.getElementById('intCountLabel');
+  if (label) {
+    const catEl    = document.getElementById('intCategory');
+    const catLabel = catEl?.value ? ` · ${catEl.options[catEl.selectedIndex].text}` : '';
+    label.textContent = totalSites > 0
+      ? `— ${totalSites.toLocaleString('pt-BR')} sites${catLabel}`
+      : '';
+  }
+
+  if (!hasPrev && !hasNext) {
+    container.innerHTML = '';
+    return;
+  }
+
+  const currentPage = _intPage + 1;
+  const windowStart = Math.max(1, currentPage - 2);
+  const windowEnd   = Math.min(totalPages, currentPage + 2);
+
+  const pageButtons = [];
+
+  if (windowStart > 1) {
+    pageButtons.push(`<button class="ev-page-btn ghost" onclick="_intGoTo(0)">1</button>`);
+    if (windowStart > 2) pageButtons.push(`<span class="ev-page-ellipsis">…</span>`);
+  }
+
+  for (let p = windowStart; p <= windowEnd; p++) {
+    const active = p === currentPage ? ' ev-page-active' : '';
+    pageButtons.push(
+      `<button class="ev-page-btn ghost${active}" onclick="_intGoTo(${p - 1})">${p}</button>`
+    );
+  }
+
+  if (windowEnd < totalPages) {
+    if (windowEnd < totalPages - 1) pageButtons.push(`<span class="ev-page-ellipsis">…</span>`);
+    pageButtons.push(`<button class="ev-page-btn ghost" onclick="_intGoTo(${totalPages - 1})">${totalPages}</button>`);
+  }
+
+  container.innerHTML = `
+    <div class="ev-pagination">
+      <button class="ghost ev-page-nav" ${hasPrev ? '' : 'disabled'} onclick="_intGoTo(${_intPage - 1})">← Anterior</button>
+      <div class="ev-page-numbers">${pageButtons.join('')}</div>
+      <button class="ghost ev-page-nav" ${hasNext ? '' : 'disabled'} onclick="_intGoTo(${_intPage + 1})">Próxima →</button>
+    </div>`;
+}
+
+/** Navega para uma página específica e rerenderiza. */
+function _intGoTo(page) {
+  _intPage = page;
+  renderSitesTable(_intFiltered, _intTotalCache);
+  document.getElementById('intSitesTable')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
