@@ -338,6 +338,17 @@ body.theme-light tr:hover td { background: rgba(0,0,0,.02); }
 .bar { width: 140px; background: var(--bg-2); border-radius: 8px; height: 6px; overflow: hidden; display: inline-block; vertical-align: middle; }
 .bar > span { display: block; height: 100%; background: linear-gradient(90deg, var(--primary), var(--accent)); border-radius: 8px; }
 
+/* Coluna "Site / Página" (aba Internet): conteúdo (URLs/títulos longos) pode ser
+   muito grande e estourava o layout da linha. Colapsa em uma única linha com "…"
+   no final, preservando o começo do texto. O max-width responsivo garante que a
+   linha sempre caiba na largura da tabela. Texto completo fica no tooltip (title). */
+#intSitesTable .site-name {
+  max-width: clamp(160px, 32vw, 560px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ---------- HEATMAP ---------- */
 .heat-row {
   display: grid; grid-template-columns: 80px repeat(24, 1fr); gap: 3px;

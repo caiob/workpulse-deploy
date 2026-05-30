@@ -449,7 +449,7 @@ Pickers por aba:
 | `intDays` | Internet | Hoje |
 | `jorDays` | Jornada de Trabalho | 7 dias |
 
-**Cache busting:** versão atual do site é `?v=15` (em todos os `<script>` e `<link>`
+**Cache busting:** versão atual do site é `?v=16` (em todos os `<script>` e `<link>`
 de `workforce.html`). Incrementar a cada deploy que muda JS/CSS.
 
 #### Aba Jornada de Trabalho (adicionada 2026-05-27)
@@ -577,3 +577,17 @@ frontend in `wp-reports.js`, UI card in aba Configurações of `workforce.html`)
   `</script>` (quebrava todo o JS da página).
 - **Jornada horário de entrada**: `_jorFetchByDay` usa `order=asc` — garante que
   os primeiros 1000 eventos incluam o início da manhã.
+
+**2026-05-30 updates:**
+- **Aba Internet — coluna "Site / Página" colapsada**: títulos/URLs longos (ex.: URLs
+  do Figma) estouravam a linha da tabela `#intSitesTable`. Adicionada regra CSS
+  `#intSitesTable .site-name` em `workforce.css` (`max-width: clamp(160px,32vw,560px)`
+  + `overflow:hidden; text-overflow:ellipsis; white-space:nowrap`) que trunca em uma
+  linha com "…", preservando o começo do texto e garantindo que a linha sempre caiba.
+  O texto completo fica no atributo `title` (tooltip) — adicionado à `<td class="site-name">`
+  em `wp-internet.js`. Cache-busting bump `?v=15` → `?v=16`.
+- **⚠️ Reincidência da truncação silenciosa (CRITICAL #1)**: o Edit tool truncou
+  `wp-internet.js` no final (cortou em "Próx" na última linha de `_renderIntPagination`).
+  Recuperado via heredoc `cat >>` conforme o procedimento da seção CRITICAL #1.
+  Lembrete: para qualquer arquivo grande, validar com `node --check` (JS) e checar
+  balanço de chaves/parênteses/backticks após editar.

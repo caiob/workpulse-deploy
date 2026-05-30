@@ -144,7 +144,7 @@ function renderSitesTable(sites, totalSec, catFilter = '') {
     const when = s.last_access ? ptDateTime(s.last_access) : '—';
     return `<tr>
       <td>${when}</td>
-      <td class="site-name">${escHtml(s.site_name)}</td>
+      <td class="site-name" title="${escHtml(s.site_name)}">${escHtml(s.site_name)}</td>
       <td>${fmtH(s.total_sec)}h <small>(${pct}%)</small></td>
       <td>${catBadge} <button class="ghost" style="font-size:11px;padding:2px 6px"
             onclick="prefillRule(${JSON.stringify(s.site_name)})">Categorizar</button></td>
@@ -195,7 +195,6 @@ function _renderIntPagination(hasPrev, hasNext, totalPages, totalItems) {
       <button class="ghost ev-page-nav" ${hasPrev ? '' : 'disabled'}
         onclick="_intPage=${_intPage - 1};renderSitesTable(_intFiltered,_intTotalCache)">← Anterior</button>
       <div class="ev-page-numbers">${numbersHtml}</div>
-      <button class="ghost ev-page-nav" ${hasNext ? '' : 'disabled'}
         onclick="_intPage=${_intPage + 1};renderSitesTable(_intFiltered,_intTotalCache)">Próxima →</button>
     </div>`;
 }
