@@ -619,3 +619,23 @@ frontend in `wp-reports.js`, UI card in aba Configurações of `workforce.html`)
   `os`, `LISTEN_ADDR`, `db`, `audit`, `_cache_bust`) já existiam no corpo atual.
   Resultado: `main.py` agora tem 2472 linhas e **compila** (`py_compile` OK). Splice
   feito em `/tmp` e copiado ao disco com verificação de `md5sum`.
+
+**2026-05-31 updates:**
+- **Login — campo "Endpoint da API" ocultado**: o `#loginUrl` em `workforce.html`
+  virou `<input type="hidden">` com valor fixo `https://api.workpulse.com.br`. O
+  `wp-auth.js` não mudou (ainda lê/escreve `#loginUrl.value`). Remove o vetor de
+  apontar o painel a um host malicioso. (Auth e-mail/senha completo será tratado à
+  parte — ver `PLANO_AUTH_EMAIL_SENHA.md` na pasta WORK PULSE: design plano-primeiro
+  com papéis admin/leitor, JWT, tabela `dash_users`, Admin Master via tenant+token.)
+- **Aba Configurações — Relatórios religada + correções**: o card "Relatórios
+  Automáticos" (com `#reportsListContainer`, botão `+ Novo Relatório` →
+  `openCreateReportModal()`) e o `<script src="js/wp-reports.js">` haviam sumido do
+  `workforce.html` (o `wp-settings.js` já chamava `loadReports()`, que ficava
+  indefinido). Restaurados a partir de `workpulse-deploy-v25.zip` (cujo `wp-reports.js`
+  é byte-idêntico ao atual). Ajuste de tema: `var(--bg-card,#1e293b)` → `var(--bg-2)`
+  (a var `--bg-card` não existe; cairia em fundo escuro no tema claro). Também
+  **removido o bloco "Regras Ativas" duplicado** (dois `id="rulesTable"` → um) e
+  **removidos 64 bytes NUL** no final do `workforce.html` (corrupção de cauda, tipo
+  CRITICAL #1, inofensiva ao render mas limpa agora). Validado: tags balanceadas
+  (section/div/table/style/script), `id="rulesTable"`=1, container=1. Lista de scripts
+  de `workforce.html` agora inclui `wp-reports.js?v=16`.
