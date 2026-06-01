@@ -1007,10 +1007,10 @@ def user_summary(user_id: str, tenant: str, days: int = 7,
         ).fetchone()
 
         top_apps = c.execute(
-            """SELECT data_json->>'app' AS app, SUM(duration_sec) AS seconds
+            """SELECT MIN(data_json->>'app') AS app, SUM(duration_sec) AS seconds
                FROM events
                WHERE tenant_id=%s AND user_id=%s AND ts>=%s AND ts<=%s AND bucket='window'
-               GROUP BY app ORDER BY seconds DESC LIMIT 10""",
+               GROUP BY LOWER(data_json->>'app') ORDER BY seconds DESC LIMIT 10""",
             (tenant, user_id, since, until),
         ).fetchall()
 
@@ -1098,10 +1098,10 @@ def team_summary(tenant: str, days: int = 7,
             (since, until, tenant),
         ).fetchall()
         global_top = c.execute(
-            """SELECT data_json->>'app' AS app, SUM(duration_sec) AS seconds
+            """SELECT MIN(data_json->>'app') AS app, SUM(duration_sec) AS seconds
                FROM events
                WHERE tenant_id=%s AND ts>=%s AND ts<=%s AND bucket='window'
-               GROUP BY app ORDER BY seconds DESC LIMIT 15""",
+               GROUP BY LOWER(data_json->>'app') ORDER BY seconds DESC LIMIT 15""",
             (tenant, since, until),
         ).fetchall()
 
@@ -1623,7 +1623,7 @@ def productivity_internet(
             continue
         site_name = _clean_title(row["title"] or "")
         category  = _apply_rules(site_name, app, rules)
-        key       = site_name
+        key       = site_name.casefold()
         if key not in site_agg:
             site_agg[key] = {"site_name": site_name, "category": category,
                               "total_sec": 0.0, "event_count": 0,
@@ -2352,4 +2352,121 @@ async def _reports_worker() -> None:
 # ---------------------------------------------------------------------------
 
 @app.get("/v1/reports", dependencies=[Depends(require_tenant_scope)])
-def list_reports(t
+def list_reports(tenant: str):
+    with db() as c:
+        rows = c.execute(
+            "SELECT * FROM report_configs WHERE tenant_id=%s ORDER BY id",
+            (tenant,),
+        ).fetchall()
+    return {"reports": [dict(r) for r in rows]}
+
+
+@app.post("/v1/reports", dependencies=[Depends(require_tenant_scope)])
+def create_report(tenant: str, body: ReportConfigIn):
+    tid = tenant
+    with db() as c:
+        row = c.execute(
+            """INSERT INTO report_configs
+               (tenant_id, name, recipients, frequency, sections, user_filter, enabled)
+               VALUES (%s,%s,%s,%s,%s,%s,%s)
+               RETURNING *""",
+            (
+                tid, body.name,
+                json.dumps(body.recipients),
+                body.frequency,
+                json.dumps(body.sections),
+                json.dumps(body.user_filter) if body.user_filter is not None else None,
+                body.enabled,
+            ),
+        ).fetchone()
+    return dict(row)
+
+
+@app.put("/v1/reports/{cfg_id}", dependencies=[Depends(require_tenant_scope)])
+def update_report(cfg_id: int, tenant: str, body: ReportConfigIn):
+    tid = tenant
+    with db() as c:
+        row = c.execute(
+            """UPDATE report_configs
+               SET name=%s, recipients=%s, frequency=%s, sections=%s,
+                   user_filter=%s, enabled=%s, updated_at=NOW()
+               WHERE id=%s AND tenant_id=%s
+               RETURNING *""",
+            (
+                body.name,
+                json.dumps(body.recipients),
+                body.frequency,
+                json.dumps(body.sections),
+                json.dumps(body.user_filter) if body.user_filter is not None else None,
+                body.enabled,
+                cfg_id, tid,
+            ),
+        ).fetchone()
+    if not row:
+        raise HTTPException(404, "Report config not found")
+    return dict(row)
+
+
+@app.delete("/v1/reports/{cfg_id}", dependencies=[Depends(require_tenant_scope)])
+def delete_report(cfg_id: int, tenant: str):
+    tid = tenant
+    with db() as c:
+        result = c.execute(
+            "DELETE FROM report_configs WHERE id=%s AND tenant_id=%s",
+            (cfg_id, tid),
+        )
+    if result.rowcount == 0:
+        raise HTTPException(404, "Report config not found")
+    return {"status": "deleted"}
+
+
+@app.post("/v1/reports/{cfg_id}/send", dependencies=[Depends(require_tenant_scope)])
+def send_report_now(cfg_id: int, tenant: str):
+    """Envio imediato (test button)."""
+    tid = tenant
+    with db() as c:
+        row = c.execute(
+            "SELECT * FROM report_configs WHERE id=%s AND tenant_id=%s",
+            (cfg_id, tid),
+        ).fetchone()
+    if not row:
+        raise HTTPException(404, "Report config not found")
+    cfg  = dict(row)
+    t = threading.Thread(
+        target=_run_report,
+        args=(cfg, tid, dt.date.today().strftime("%d/%m/%Y")),
+        daemon=True,
+    )
+    t.start()
+    return {"status": "queued"}
+
+
+@app.get("/v1/reports/{cfg_id}/history", dependencies=[Depends(require_tenant_scope)])
+def report_history(cfg_id: int, tenant: str):
+    tid = tenant
+    with db() as c:
+        rows = c.execute(
+            """SELECT * FROM report_history
+               WHERE config_id=%s AND tenant_id=%s
+               ORDER BY sent_at DESC LIMIT 50""",
+            (cfg_id, tid),
+        ).fetchall()
+    return {"history": [dict(r) for r in rows]}
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+def serve() -> None:
+    import uvicorn
+    concurrency = int(os.getenv("WEB_CONCURRENCY", "2"))
+    host, _, port_s = LISTEN_ADDR.rpartition(":")
+    uvicorn.run(
+        "main:app",
+        host=host or "0.0.0.0",
+        port=int(port_s or 8080),
+        workers=concurrency,
+    )
+
+
+if __name__ == "__main__":
+    serve()

@@ -591,3 +591,31 @@ frontend in `wp-reports.js`, UI card in aba Configurações of `workforce.html`)
   Recuperado via heredoc `cat >>` conforme o procedimento da seção CRITICAL #1.
   Lembrete: para qualquer arquivo grande, validar com `node --check` (JS) e checar
   balanço de chaves/parênteses/backticks após editar.
+- **Normalização case-insensitive na agregação de apps/sites**: `Slack.exe` vs
+  `slack.exe` (e `Explorer.exe` vs `explorer.exe`) eram contados como apps distintos
+  na sumarização. Correções:
+  - `server/main.py` — `team_summary` (donut "Top Aplicações" da Visão Geral) e
+    `user_summary` (drilldown): `GROUP BY app` → `GROUP BY LOWER(data_json->>'app')`
+    com `MIN(data_json->>'app')` como nome de exibição (determinístico).
+  - `server/main.py` — `productivity_internet`: chave do `site_agg` passou de
+    `site_name` para `site_name.casefold()` (mescla títulos idênticos com casing
+    diferente; nome de exibição = primeiro visto). `events_summary` NÃO precisou
+    mudar — só soma por categoria e as regras já fazem `lower()`.
+  - `site/dashboard/js/wp-events.js` (aba Aplicativos): `groupByApp` passou a usar
+    `app.toLowerCase()` como chave do Map (exibição = primeiro visto), e o modo
+    sequencial (`collapseEvents`) compara `app` em lowercase.
+  - Validado com simulação SQLite (GROUP BY LOWER + MIN) e Node (groupByApp).
+- **✅ CORRIGIDO — `server/main.py` estava truncado em `list_reports` (CRITICAL #1)**:
+  o `main.py` no disco (e dentro de `workpulse-deploy.zip`) estava truncado na
+  assinatura `def list_reports(t` (linha ~2355) e não compilava. Era anterior às
+  mudanças acima (confirmado: `.bak` e o zip byte-idênticos antes da edição). A
+  seção de Relatórios (`list_reports`/`create_report`/`update_report`/
+  `delete_report`/`send_report_now`/`report_history`) e o bloco `# Entry point` +
+  `serve()` foram **restaurados a partir de `workpulse-deploy-v39.zip`** (cujos
+  `ReportConfigIn`/`ReportConfigOut`, `_do_reports` e `_reports_worker` são
+  byte-idênticos aos do arquivo atual — feature de Relatórios não mudou entre as
+  versões; só endpoints novos como `/v1/jornada` divergiam no corpo). Confirmado que
+  todos os símbolos referenciados pelos handlers (`_run_report`, `threading`, `json`,
+  `os`, `LISTEN_ADDR`, `db`, `audit`, `_cache_bust`) já existiam no corpo atual.
+  Resultado: `main.py` agora tem 2472 linhas e **compila** (`py_compile` OK). Splice
+  feito em `/tmp` e copiado ao disco com verificação de `md5sum`.

@@ -47,7 +47,7 @@ function collapseEvents(events) {
   for (let i = 1; i < events.length; i++) {
     const e        = events[i];
     const sameUser = cur.user_id === e.user_id;
-    const sameApp  = ((cur.data || {}).app || '') === ((e.data || {}).app || '');
+    const sameApp  = ((cur.data || {}).app || '').toLowerCase() === ((e.data || {}).app || '').toLowerCase();
 
     if (sameUser && sameApp) {
       cur.duration_sec = (cur.duration_sec || 0) + (e.duration_sec || 0);
@@ -85,8 +85,9 @@ function groupByApp(events) {
 
   for (const e of events) {
     const app = (e.data || {}).app || '(desconhecido)';
-    if (!appMap.has(app)) {
-      appMap.set(app, {
+    const key = app.toLowerCase();
+    if (!appMap.has(key)) {
+      appMap.set(key, {
         ...e,
         data:         { app, title: '' },
         _count:       0,
@@ -95,7 +96,7 @@ function groupByApp(events) {
         _ts_display:  e.ts,  // mais recente do grupo (1º encontrado em ts DESC)
       });
     }
-    const g = appMap.get(app);
+    const g = appMap.get(key);
     g.duration_sec += (e.duration_sec || 0);
     g._count++;
     g._subEvents.push(e);
