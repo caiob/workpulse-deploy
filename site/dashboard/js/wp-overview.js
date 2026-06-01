@@ -53,7 +53,7 @@ function drawDailyChart(daily) {
   state.charts.daily = new Chart(ctx, {
     type: 'bar',
     data: {
-      labels: daily.map(d => ptDate(d.day)),
+      labels: daily.map(d => ptDate(d.day + 'T12:00:00')),
       datasets: [
         { label: 'Ativo (h)', data: daily.map(d => +(d.active / 3600).toFixed(2)),
           backgroundColor: 'rgba(108,140,255,.85)', borderRadius: 4, stack: 'a' },

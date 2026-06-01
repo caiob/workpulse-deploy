@@ -71,6 +71,13 @@
     transition: background 200ms var(--easing);
   }
   .nav-cta:hover { background: var(--blue-hover); text-decoration: none; }
+  .nav-actions { display: flex; align-items: center; gap: 18px; }
+  .nav-login {
+    color: var(--blue); text-decoration: none;
+    font-size: 12px; font-weight: 500;
+    transition: opacity 200ms var(--easing);
+  }
+  .nav-login:hover { opacity: 0.7; text-decoration: none; }
 
   /* ===== Hero ===== */
   .hero {
@@ -519,7 +526,10 @@
       <li><a href="#pricing">Planos</a></li>
       <li><a href="docs/developers.html">Desenvolvedores</a></li>
     </ul>
-    <a href="#cta" class="nav-cta">Começar piloto</a>
+    <div class="nav-actions">
+      <a href="/dashboard" class="nav-login">Acesso cliente</a>
+      <a href="#cta" class="nav-cta">Começar piloto</a>
+    </div>
   </div>
 </nav>
 

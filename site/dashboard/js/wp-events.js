@@ -242,7 +242,7 @@ function drawEvDailyChart(daily) {
   state.charts.evDaily = new Chart(ctx, {
     type: 'bar',
     data: {
-      labels: daily.map(d => ptDate(d.day + 'T00:00:00Z')),
+      labels: daily.map(d => ptDate(d.day + 'T12:00:00')),
       datasets: [
         { label: 'Produtivo',        data: daily.map(d => +(d.productive    / 3600).toFixed(2)), backgroundColor: CAT_COLORS.productive,    borderRadius: 4, stack: 'a' },
         { label: 'Não-produtivo',    data: daily.map(d => +(d.unproductive  / 3600).toFixed(2)), backgroundColor: CAT_COLORS.unproductive,  borderRadius: 4, stack: 'a' },

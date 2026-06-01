@@ -1319,14 +1319,14 @@ def productivity_events_summary(
         agg_sql += " GROUP BY app, title"
         agg_rows = c.execute(agg_sql, agg_args).fetchall()
 
-        day_sql  = ("SELECT substr(ts,1,10) AS day, data_json->>'app' AS app,"
+        day_sql  = ("SELECT substr(ts,1,13) AS h, data_json->>'app' AS app,"
                     " data_json->>'title' AS title, SUM(duration_sec) AS total_sec"
                     " FROM events WHERE tenant_id=%s AND bucket=%s AND ts>=%s AND ts<=%s")
         day_args: list = [tenant, _bucket, since, until]
         if user_id:
             day_sql += " AND user_id=%s"; day_args.append(user_id)
         day_sql += nb_sql; day_args += nb_args
-        day_sql += " GROUP BY day, app, title ORDER BY day"
+        day_sql += " GROUP BY h, app, title ORDER BY h"
         day_raw = c.execute(day_sql, day_args).fetchall()
 
     totals: dict[str, float] = {
@@ -1343,7 +1343,7 @@ def productivity_events_summary(
 
     daily_agg: dict[str, dict[str, float]] = {}
     for row in day_raw:
-        day      = row["day"]
+        day      = _utc_hour_to_local_day(row["h"])
         app_name = row["app"] or ""
         title    = _clean_title(row["title"] or "")
         cat      = _apply_rules(title, app_name, rules)
@@ -1396,6 +1396,18 @@ def license_info(tenant: str):
     }
 
 
+# Offset fixo do fuso para "fechar o dia" nos gráficos diários do painel.
+# Brasil (America/Sao_Paulo) = UTC-3, sem horário de verão desde 2019.
+DASH_TZ_OFFSET_HOURS = -3
+
+
+def _utc_hour_to_local_day(h: str) -> str:
+    """Converte 'YYYY-MM-DDTHH' (UTC) na data local (BRT) 'YYYY-MM-DD'."""
+    base = dt.datetime(int(h[0:4]), int(h[5:7]), int(h[8:10]), int(h[11:13]),
+                       tzinfo=dt.timezone.utc) + dt.timedelta(hours=DASH_TZ_OFFSET_HOURS)
+    return base.strftime("%Y-%m-%d")
+
+
 @app.get("/v1/workforce/overview", dependencies=[Depends(require_tenant_scope)])
 def workforce_overview(tenant: str, days: int = 7,
                        since: str | None = None, until: str | None = None):
@@ -1437,14 +1449,21 @@ def workforce_overview(tenant: str, days: int = 7,
             (tenant, since, until),
         ).fetchall()
 
-        daily = c.execute(
-            """SELECT substr(ts,1,10) AS day,
+        # Agrupa por HORA UTC; o re-bucket para data LOCAL (BRT) é feito em Python
+        # (ver DASH_TZ_OFFSET_HOURS) para que cada dia local seja uma única barra.
+        # substr é portável (PostgreSQL + harness sqlite).
+        _hour_dur = c.execute(
+            """SELECT substr(ts,1,13) AS h,
                       SUM(CASE WHEN bucket='window' THEN duration_sec ELSE 0 END) AS active,
                       SUM(CASE WHEN bucket='afk' AND data_json->>'status'='afk'
-                               THEN duration_sec ELSE 0 END) AS afk,
-                      COUNT(DISTINCT user_id) AS users
+                               THEN duration_sec ELSE 0 END) AS afk
                FROM events WHERE tenant_id=%s AND ts>=%s AND ts<=%s
-               GROUP BY day ORDER BY day""",
+               GROUP BY h""",
+            (tenant, since, until),
+        ).fetchall()
+        _hour_usr = c.execute(
+            """SELECT DISTINCT substr(ts,1,13) AS h, user_id
+               FROM events WHERE tenant_id=%s AND ts>=%s AND ts<=%s""",
             (tenant, since, until),
         ).fetchall()
 
@@ -1483,6 +1502,19 @@ def workforce_overview(tenant: str, days: int = 7,
         if 0 < avg_h < 2:
             underwork.append({"user_id": r["user_id"], "display_name": r["display_name"],
                               "avg_day_hours": round(avg_h, 1)})
+
+    # Re-bucketiza horas UTC em datas LOCAIS (BRT, offset fixo). 1 barra por dia local.
+    _daily_map: dict[str, dict] = {}
+    for _r in _hour_dur:
+        _d = _utc_hour_to_local_day(_r["h"])
+        _e = _daily_map.setdefault(_d, {"day": _d, "active": 0.0, "afk": 0.0, "_users": set()})
+        _e["active"] += _r["active"] or 0.0
+        _e["afk"]    += _r["afk"] or 0.0
+    for _r in _hour_usr:
+        _d = _utc_hour_to_local_day(_r["h"])
+        _daily_map.setdefault(_d, {"day": _d, "active": 0.0, "afk": 0.0, "_users": set()})["_users"].add(_r["user_id"])
+    daily = [{"day": v["day"], "active": v["active"], "afk": v["afk"], "users": len(v["_users"])}
+             for v in sorted(_daily_map.values(), key=lambda x: x["day"])]
 
     result = {
         "tenant": tenant, "since": since, "days": days,
@@ -1607,13 +1639,13 @@ def productivity_internet(
         sql += " GROUP BY user_id, app, title ORDER BY total_sec DESC"
         raw_rows = c.execute(sql, args).fetchall()
 
-        dsql  = ("SELECT substr(ts,1,10) AS day, data_json->>'app' AS app,"
+        dsql  = ("SELECT substr(ts,1,13) AS h, data_json->>'app' AS app,"
                  " data_json->>'title' AS title, SUM(duration_sec) AS total_sec"
                  " FROM events WHERE tenant_id=%s AND bucket='window' AND ts>=%s AND ts<=%s")
         dargs: list = [tenant, since, until]
         if user_id:
             dsql += " AND user_id=%s"; dargs.append(user_id)
-        dsql += " GROUP BY day, app, title ORDER BY day"
+        dsql += " GROUP BY h, app, title ORDER BY h"
         daily_raw = c.execute(dsql, dargs).fetchall()
 
     site_agg: dict[str, dict] = {}
@@ -1662,7 +1694,7 @@ def productivity_internet(
         app = row["app"] or ""
         if not _is_browser(app):
             continue
-        day       = row["day"]
+        day       = _utc_hour_to_local_day(row["h"])
         site_name = _clean_title(row["title"] or "")
         category  = _apply_rules(site_name, app, rules)
         if day not in daily_agg:

@@ -24,6 +24,9 @@ function _intChangePageSize() {
 
 async function loadInternet() {
   await _populateUserDropdown('intUser');
+  if (!state.people || !state.people.length) {
+    try { const _d = await api(`/v1/users?tenant=${encodeURIComponent(state.tenant)}`); state.people = _d.users || []; } catch (_) {}
+  }
   const { since, until } = wpDP.getRange('intDays');
   const user   = document.getElementById('intUser').value.trim();
   const params = new URLSearchParams({ tenant: state.tenant, since, until });
@@ -74,7 +77,7 @@ function drawIntDailyChart(daily) {
   state.charts.intDaily = new Chart(ctx, {
     type: 'bar',
     data: {
-      labels: daily.map(d => ptDate(d.day + 'T00:00:00Z')),
+      labels: daily.map(d => ptDate(d.day + 'T12:00:00')),
       datasets: [
         { label: 'Produtivo',        data: daily.map(d => +(d.productive    / 3600).toFixed(2)), backgroundColor: CAT_COLORS.productive,    borderRadius: 4, stack: 'a' },
         { label: 'Não-produtivo',    data: daily.map(d => +(d.unproductive  / 3600).toFixed(2)), backgroundColor: CAT_COLORS.unproductive,  borderRadius: 4, stack: 'a' },
@@ -111,7 +114,7 @@ function renderSitesTable(sites, totalSec, catFilter = '') {
   if (_intPage >= _totalPagesCheck) _intPage = _totalPagesCheck - 1;
 
   if (!_intSitesCache.length) {
-    tbody.innerHTML = `<tr><td colspan="7" class="empty-state">
+    tbody.innerHTML = `<tr><td colspan="6" class="empty-state">
       <h4>Nenhum dado de browser encontrado.</h4>
       Verifique se há eventos do tipo <code>window</code> com app de browser (msedge.exe, chrome.exe, firefox.exe...).
     </td></tr>`;
@@ -122,7 +125,7 @@ function renderSitesTable(sites, totalSec, catFilter = '') {
   if (!sites.length) {
     const catEl  = document.getElementById('intCategory');
     const catTxt = catEl ? catEl.options[catEl.selectedIndex].text : catFilter;
-    tbody.innerHTML = `<tr><td colspan="7" class="empty-state">Nenhum site encontrado na categoria <strong>${catTxt}</strong> para este período.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="6" class="empty-state">Nenhum site encontrado na categoria <strong>${catTxt}</strong> para este período.</td></tr>`;
     _renderIntPagination(false, false, 1, 0);
     return;
   }
@@ -137,8 +140,8 @@ function renderSitesTable(sites, totalSec, catFilter = '') {
   tbody.innerHTML = pageRows.map(s => {
     const pct   = totalSec > 0 ? Math.round(s.total_sec / totalSec * 100) : 0;
     const users = (s.users || []).map(u => {
-      const found = (state.lastTeam?.users || []).find(x => x.user_id === u);
-      return found ? displayName(found) : u.slice(0, 8);
+      const found = (state.people || []).find(x => x.user_id === u);
+      return found ? displayName(found) : cleanUserId(u);
     }).join(', ');
     const catBadge = _intCatBadge(s.category);
     const when = s.last_access ? ptDateTime(s.last_access) : '—';
@@ -147,9 +150,9 @@ function renderSitesTable(sites, totalSec, catFilter = '') {
       <td class="site-name" title="${escHtml(s.site_name)}">${escHtml(s.site_name)}</td>
       <td>${fmtH(s.total_sec)}h <small>(${pct}%)</small></td>
       <td>${catBadge} <button class="ghost" style="font-size:11px;padding:2px 6px"
-            onclick="prefillRule(${JSON.stringify(s.site_name)})">Categorizar</button></td>
+            onclick="prefillRule(${escHtml(JSON.stringify(s.site_name))})">Categorizar</button></td>
       <td>${s.user_count}</td>
-      <td style="font-size:11px;color:var(--text-dim)">${users}</td>
+      <td style="text-align:center"><span class="usr-badge" title="${escHtml(users) || 'sem usuários'}" style="cursor:help;color:var(--text-dim);display:inline-flex" aria-label="${escHtml(users)}"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span></td>
     </tr>`;
   }).join('');
 
@@ -195,6 +198,7 @@ function _renderIntPagination(hasPrev, hasNext, totalPages, totalItems) {
       <button class="ghost ev-page-nav" ${hasPrev ? '' : 'disabled'}
         onclick="_intPage=${_intPage - 1};renderSitesTable(_intFiltered,_intTotalCache)">← Anterior</button>
       <div class="ev-page-numbers">${numbersHtml}</div>
+      <button class="ghost ev-page-nav" ${hasNext ? '' : 'disabled'}
         onclick="_intPage=${_intPage + 1};renderSitesTable(_intFiltered,_intTotalCache)">Próxima →</button>
     </div>`;
 }

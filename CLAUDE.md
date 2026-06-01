@@ -639,3 +639,56 @@ frontend in `wp-reports.js`, UI card in aba Configurações of `workforce.html`)
   CRITICAL #1, inofensiva ao render mas limpa agora). Validado: tags balanceadas
   (section/div/table/style/script), `id="rulesTable"`=1, container=1. Lista de scripts
   de `workforce.html` agora inclui `wp-reports.js?v=16`.
+- **Site institucional**: adicionado link "Acesso cliente" → `/dashboard` na navbar de
+  `site/index.html` (ao lado de "Começar piloto"; classes `.nav-actions`/`.nav-login`).
+- **Removidos 6 arquivos `.bak`** de `site/` (seriam publicados pelo `s3 sync --delete`).
+
+**2026-05-31 — fuso nos gráficos diários (Visão Geral):**
+- **Sintoma**: "Horas trabalhadas por dia" mostrava o dia anterior / dividia um dia
+  local em duas barras. Causa dupla: (1) backend agrupava por **data UTC**
+  (`substr(ts,1,10)`) enquanto o date picker manda janelas em **meia-noite local
+  (BRT)** convertida p/ UTC → um dia local cruza duas datas UTC; (2) frontend rotulava
+  com `ptDate(d.day)`, e `new Date("YYYY-MM-DD")` é meia-noite **UTC**, exibida em BRT
+  como o dia anterior.
+- **Correção backend** (`workforce_overview`): agrupa por **hora UTC** (`substr(ts,1,13)`)
+  e re-bucketiza em Python para **data local** via `DASH_TZ_OFFSET_HOURS=-3` (Brasil,
+  sem DST). Cada dia local = uma barra. Mantém o shape de `daily` (`day/active/afk/users`).
+  SQL portável (`substr`, `data_json->>`, `DISTINCT`). Validado com simulação SQLite.
+- **Correção frontend** (`wp-overview.js`): rótulo agora `ptDate(d.day + 'T12:00:00')`
+  (interpreta como data local, sem deslocar −3h).
+- **Pendente (mesma classe de bug, fora do escopo pedido)**: as abas **Aplicativos**
+  (`wp-events.js`) e **Internet** (`wp-internet.js`) usam `ptDate(d.day + 'T00:00:00Z')`
+  e bucketing UTC nos respectivos gráficos diários — têm o mesmo deslocamento de rótulo.
+  Não alterados nesta rodada; aplicar a mesma lógica se/quando solicitado.
+
+**2026-05-31 — fuso em Aplicativos/Internet + bugs da aba Internet:**
+- **Fuso (gráficos diários)**: aplicada a mesma correção da Visão Geral às abas
+  **Aplicativos** (`events_summary`) e **Internet** (`productivity_internet`): SQL
+  diário agrupa por **hora UTC** (`substr(ts,1,13) AS h`) e o loop Python converte
+  para data local via `_utc_hour_to_local_day()` (agora função de módulo, reusada
+  pelos 3 endpoints). Rótulos no front (`wp-events.js`, `wp-internet.js`) passaram de
+  `ptDate(d.day + 'T00:00:00Z')` para `ptDate(d.day + 'T12:00:00')`.
+  - Ainda em UTC (fora do escopo): `workforce_timeseries` (Tendências) e
+    `user_summary` daily (drill-down de Pessoas) — mesmos ajustes pendentes.
+- **Bug 1 — cabeçalho trocado**: o `<thead>` de `#intSitesTable` estava com
+  Categoria/Tempo total invertidos vs. o `<tbody>`, com um `<th>` vazio sobrando e
+  "% do browser" desalinhado. `<thead>` reescrito para 6 colunas batendo com o corpo:
+  `Quando | Site / Página | Tempo total | Categoria | Nº usuários | Usuários`
+  (`colspan` dos empty-states 7→6).
+- **Bug 2 — dados vazando no botão Categorizar**: `onclick="prefillRule(${JSON.stringify(s.site_name)})"`
+  quebrava o atributo HTML quando o título tinha `"`/`<`/`>`. Agora
+  `prefillRule(${escHtml(JSON.stringify(s.site_name))})` — escapa para o contexto de
+  atributo; o browser decodifica ao executar o onclick.
+- **Bug 3 — coluna Usuários inútil**: `state.lastTeam` nunca era setado (só lido) →
+  caía sempre em `u.slice(0,8)` ("asaptech" para todos). Agora resolve via
+  `state.people` (carregado no `loadInternet` se vazio) → `displayName` (nome amigável)
+  e, no fallback, `cleanUserId(u)` (nome da máquina completo, não truncado).
+- **Bug paginação Internet (regressão própria)**: a linha de abertura do botão
+  "Próxima" (`<button class="ghost ev-page-nav" ${hasNext ? '' : 'disabled'}`) tinha
+  se perdido na restauração via heredoc do início desta sessão — o `</div>` ia direto
+  ao `onclick=...`, vazando o botão como texto. Linha restaurada em `_renderIntPagination`.
+  Lição: ao restaurar trechos via heredoc/`head -n`, conferir o bloco inteiro, não só a
+  última linha.
+- **Coluna Usuários → ícone com tooltip**: para não estourar o layout com listas longas
+  de nomes, a célula agora mostra um ícone (SVG de usuários) e os nomes aparecem no
+  `title` (hover). A contagem fica na coluna "Nº usuários".
