@@ -14,8 +14,13 @@
 </head>
 <body>
 
-<!-- Barra de loading global -->
-<div id="globalLoader" class="global-loader hide"></div>
+<!-- Overlay de carregamento global -->
+<div id="globalLoader" class="global-loader hide" role="status" aria-live="polite" aria-label="Carregando">
+  <div class="gl-box">
+    <div class="gl-spinner"></div>
+    <div class="gl-text">Carregando…</div>
+  </div>
+</div>
 
 <!-- ===== MODAL DE LOGIN ===== -->
 <div id="login" class="login-shade">
@@ -225,7 +230,7 @@
       <div class="card span-12 no-bar">
         <h3>Quando a equipe trabalha</h3>
         <p style="font-size:12px;color:var(--text-dim);margin:4px 0 16px">
-          Distribuição agregada por hora do dia (UTC). Cores mais saturadas indicam concentração de atividade.
+          Distribuição agregada por hora do dia (horário local). Cores mais saturadas indicam concentração de atividade.
         </p>
         <div id="heatmap"></div>
         <div class="heat-legend">

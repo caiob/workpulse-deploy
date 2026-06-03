@@ -163,6 +163,58 @@ function _acctInitMenu() {
 }
 
 /* ══════════════════════════════════════════════════════════════════
+   CONTROLE DE SESSÃO — expira por inatividade
+   ══════════════════════════════════════════════════════════════════ */
+
+// Sessão expira após 30 min sem atividade (clique/tecla/scroll/foco renovam).
+const WP_SESSION_IDLE_MS = 30 * 60 * 1000;
+let _wpIdleTimer = null;
+let _wpLastWrite = 0;
+let _wpWatchInit = false;
+
+/** Renova o carimbo de atividade no localStorage (compartilhado entre abas).
+ *  Throttle de 20s; grava na hora quando force=true (ex.: no login). */
+function _wpTouchSession(force) {
+  const now = Date.now();
+  if (force || now - _wpLastWrite > 20000) {
+    localStorage.setItem('wp_last_active', String(now));
+    _wpLastWrite = now;
+  }
+}
+
+/** True se a sessão estourou o tempo de inatividade. */
+function _wpSessionExpired() {
+  const la = parseInt(localStorage.getItem('wp_last_active') || '0', 10);
+  return !la || (Date.now() - la) > WP_SESSION_IDLE_MS;
+}
+
+/** Encerra a sessão por inatividade: limpa o token e reabre o login. */
+function _wpExpireSession() {
+  localStorage.removeItem('wp_token');
+  localStorage.removeItem('wp_last_active');
+  state.token = '';
+  if (_wpIdleTimer) { clearInterval(_wpIdleTimer); _wpIdleTimer = null; }
+  const tk = document.getElementById('loginToken');
+  if (tk) tk.value = '';
+  document.getElementById('login').classList.remove('hide');
+  _showLoginError('Sessão expirada por inatividade. Faça login novamente.');
+}
+
+/** Monitora atividade e checa inatividade a cada 30s. */
+function _wpStartIdleWatch() {
+  if (!_wpWatchInit) {
+    ['mousedown', 'keydown', 'scroll', 'touchstart', 'visibilitychange'].forEach(ev =>
+      window.addEventListener(ev, () => { if (state.token) _wpTouchSession(false); }, { passive: true })
+    );
+    _wpWatchInit = true;
+  }
+  if (_wpIdleTimer) clearInterval(_wpIdleTimer);
+  _wpIdleTimer = setInterval(() => {
+    if (state.token && _wpSessionExpired()) _wpExpireSession();
+  }, 30000);
+}
+
+/* ══════════════════════════════════════════════════════════════════
    LOGIN
    ══════════════════════════════════════════════════════════════════ */
 
@@ -215,6 +267,7 @@ async function doLogin() {
     localStorage.setItem('wp_url',    url);
     localStorage.setItem('wp_tenant', tenant);
     localStorage.setItem('wp_token',  token);
+    _wpTouchSession(true);
 
     document.getElementById('login').classList.add('hide');
 
@@ -224,6 +277,7 @@ async function doLogin() {
     _loadLicenseInfo();
 
     loadOverview();
+    _wpStartIdleWatch();
 
   } catch (e) {
     if (e.name === 'AbortError') {
@@ -240,6 +294,8 @@ async function doLogin() {
 function logout() {
   _closeAccountMenu();
   localStorage.removeItem('wp_token');
+  localStorage.removeItem('wp_last_active');
+  if (_wpIdleTimer) { clearInterval(_wpIdleTimer); _wpIdleTimer = null; }
   state.token = '';
   document.getElementById('login').classList.remove('hide');
   _clearLoginError();
@@ -256,19 +312,22 @@ function logout() {
   // Inicializa menu de conta
   _acctInitMenu();
 
-  // Restaura sessão salva
+  // Restaura sessão salva (só se não estiver expirada por inatividade)
   const url    = localStorage.getItem('wp_url');
   const tenant = localStorage.getItem('wp_tenant');
   const token  = localStorage.getItem('wp_token');
 
-  if (url && tenant && token) {
-    document.getElementById('loginUrl').value    = url;
-    document.getElementById('loginTenant').value = tenant;
-    document.getElementById('loginToken').value  = token;
+  // Prefill de conveniência (sempre): endpoint oculto + tenant
+  if (url)    document.getElementById('loginUrl').value    = url;
+  if (tenant) document.getElementById('loginTenant').value = tenant;
+
+  if (url && tenant && token && !_wpSessionExpired()) {
+    document.getElementById('loginToken').value = token;
     state.url    = url;
     state.tenant = tenant;
     state.token  = token;
     document.getElementById('login').classList.add('hide');
+    _wpTouchSession(true);   // renova o carimbo ao retomar
 
     // Preenche menu de conta
     _acctSetTenant(tenant, tenant);
@@ -276,5 +335,11 @@ function logout() {
     _loadLicenseInfo();
 
     loadOverview();
+    _wpStartIdleWatch();
+  } else if (token) {
+    // Havia sessão salva, mas expirou → exige novo login
+    localStorage.removeItem('wp_token');
+    localStorage.removeItem('wp_last_active');
+    state.token = '';
   }
 })();

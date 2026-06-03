@@ -137,13 +137,19 @@ async function _populateUserDropdown(selectId) {
 
 /* ---------- Loading bar global ---------- */
 let _loaderCount = 0;
+let _loaderTimer = null;
 function _showLoader() {
-  if (++_loaderCount === 1)
-    document.getElementById('globalLoader').classList.remove('hide');
+  if (++_loaderCount === 1) {
+    // Só revela o overlay se a carga passar de 300ms (evita piscar em chamadas rápidas).
+    _loaderTimer = setTimeout(() => {
+      document.getElementById('globalLoader').classList.remove('hide');
+    }, 300);
+  }
 }
 function _hideLoader() {
   if (--_loaderCount <= 0) {
     _loaderCount = 0;
+    if (_loaderTimer) { clearTimeout(_loaderTimer); _loaderTimer = null; }
     document.getElementById('globalLoader').classList.add('hide');
   }
 }

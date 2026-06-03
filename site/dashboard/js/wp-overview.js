@@ -148,7 +148,7 @@ function drawHeatmap(hourly, daily) {
     });
   });
   if (!Object.keys(byHour).length && hourly.length) {
-    hourly.forEach(h => { byHour[h.hour] = (byHour[h.hour] || 0) + (h.active || 0); });
+    hourly.forEach(h => { byHour[h.hour] = (byHour[h.hour] || 0) + (h.seconds || 0); });
   }
 
   const maxVal = Math.max(...Object.values(byHour), 1);

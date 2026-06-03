@@ -592,19 +592,32 @@ button.cat-btn:hover { background: rgba(108,140,255,.12); }
   padding: 5px 8px; font-size: 12px; flex: 1;
 }
 
-/* ---------- GLOBAL LOADER ---------- */
+/* ---------- GLOBAL LOADER (overlay) ---------- */
 .global-loader {
-  position: fixed; top: 0; left: 0; right: 0;
-  height: 3px;
-  background: linear-gradient(90deg, var(--primary) 0%, #34d399 50%, var(--primary) 100%);
-  background-size: 200% 100%;
-  animation: loaderMove 1.4s linear infinite;
-  z-index: 9999; pointer-events: none;
+  position: fixed; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(8, 12, 28, 0.55);
+  -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px);
+  z-index: 9999;
+  animation: glFade .15s ease;
 }
-@keyframes loaderMove {
-  0%   { background-position: 100% 0; }
-  100% { background-position: -100% 0; }
+body.theme-light .global-loader { background: rgba(232, 237, 246, 0.62); }
+@keyframes glFade { from { opacity: 0; } to { opacity: 1; } }
+
+.gl-box {
+  display: flex; flex-direction: column; align-items: center; gap: 14px;
+  padding: 26px 34px; border-radius: 16px;
+  background: var(--panel, var(--bg-2)); border: 1px solid var(--border-soft);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, .28);
 }
+.gl-spinner {
+  width: 44px; height: 44px; border-radius: 50%;
+  border: 4px solid var(--border-soft);
+  border-top-color: var(--primary);
+  animation: glSpin .8s linear infinite;
+}
+@keyframes glSpin { to { transform: rotate(360deg); } }
+.gl-text { font-size: 14px; font-weight: 500; color: var(--text); letter-spacing: .02em; }
 
 /* ---------- THEME TOGGLE (Settings) ---------- */
 .theme-toggle-card {

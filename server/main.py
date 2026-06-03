@@ -1516,6 +1516,12 @@ def workforce_overview(tenant: str, days: int = 7,
     daily = [{"day": v["day"], "active": v["active"], "afk": v["afk"], "users": len(v["_users"])}
              for v in sorted(_daily_map.values(), key=lambda x: x["day"])]
 
+    # Re-bucketiza horas UTC -> hora LOCAL (BRT) para o heatmap "Quando a equipe trabalha".
+    _hourly_local: dict[int, float] = {}
+    for _hr in hourly:
+        _lh = (int(_hr["hour"]) + DASH_TZ_OFFSET_HOURS) % 24
+        _hourly_local[_lh] = _hourly_local.get(_lh, 0.0) + (_hr["seconds"] or 0.0)
+
     result = {
         "tenant": tenant, "since": since, "days": days,
         "totals": {
@@ -1525,7 +1531,7 @@ def workforce_overview(tenant: str, days: int = 7,
             "afk_seconds":          totals["afk"]          or 0,
             "today_active_seconds": today_active,
         },
-        "hourly":        [{"hour": r["hour"], "seconds": r["seconds"]} for r in hourly],
+        "hourly":        [{"hour": h, "seconds": _hourly_local[h]} for h in sorted(_hourly_local)],
         "daily":         [dict(r) for r in daily],
         "by_department": [dict(r) for r in by_dept],
         "alerts":        {"overwork": overwork[:10], "underwork": underwork[:10]},

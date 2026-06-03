@@ -524,7 +524,6 @@
       <li><a href="#features">Recursos</a></li>
       <li><a href="#compare">Comparar</a></li>
       <li><a href="#pricing">Planos</a></li>
-      <li><a href="docs/developers.html">Desenvolvedores</a></li>
     </ul>
     <div class="nav-actions">
       <a href="/dashboard" class="nav-login">Acesso cliente</a>
@@ -646,9 +645,8 @@
       <div class="feature tall reveal" style="background: white; border: 1px solid var(--gray-2);">
         <div class="f-content">
           <div class="f-eyebrow">Console</div>
-          <h3 class="f-title">Três painéis.<br>Cada um para um público.</h3>
-          <p class="f-sub">Visão geral para gestores. Workforce dashboard para RH. Console super-admin para a TI. Tudo em HTML estático com Chart.js — auditável linha por linha pelo seu time.</p>
-          <a href="docs/developers.html" class="f-link">Conheça a API →</a>
+          <h3 class="f-title">Acesso ajustado<br>por perfil.</h3>
+          <p class="f-sub">Cada colaborador vê exatamente o que precisa. Você define os perfis, as permissões e o nível de detalhe — o WorkPulse se adapta à sua estrutura, não o contrário.</p>
         </div>
         <div class="f-visual">
           <div class="vis-dash">
@@ -719,10 +717,9 @@ $ workpulse-cli <span class="key">issue</span> \<br>
           <tr><td>Console centralizado p/ TI</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td><td class="no">—</td></tr>
           <tr><td>Funciona offline</td><td class="yes">✓</td><td class="partial">parcial</td><td class="no">—</td><td class="yes">✓</td></tr>
           <tr><td>Multi-tenant nativo</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td><td class="no">—</td></tr>
-          <tr><td>On-premise / air-gapped</td><td class="yes">✓</td><td class="no">—</td><td class="no">—</td><td class="yes">✓</td></tr>
           <tr><td>Agente Rust (binário leve)</td><td class="yes">✓</td><td class="no">—</td><td class="no">—</td><td class="yes">✓</td></tr>
           <tr><td>LGPD + GDPR ready</td><td class="yes">✓</td><td class="yes">✓</td><td class="partial">parcial</td><td class="yes">✓</td></tr>
-          <tr><td>SLA enterprise + SSO</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td><td class="no">—</td></tr>
+          <tr><td>Perfis de acesso configuráveis</td><td class="yes">✓</td><td class="no">—</td><td class="partial">parcial</td><td class="no">—</td></tr>
         </tbody>
       </table>
     </div>
@@ -739,44 +736,51 @@ $ workpulse-cli <span class="key">issue</span> \<br>
     <div class="pricing-cards reveal">
       <div class="price-card">
         <div class="price-name">Starter</div>
-        <div class="price-num">R$ 29<small>/assento/mês</small></div>
-        <div class="price-cap">faturamento anual · até 25 assentos</div>
+        <div class="price-num">R$ 29,90<small>/assento/mês</small></div>
+        <div class="price-cap">faturamento anual · até 50 assentos</div>
         <ul class="price-list">
           <li>Agentes Win/Mac/Linux</li>
-          <li>Console e relatórios</li>
+          <li>Resumo executivo</li>
           <li>Categorização básica</li>
+          <li>Funciona offline</li>
+          <li>Relatório mensal</li>
+          <li>Nome do app em primeiro plano</li>
+          <li>Perfis de uso básico</li>
+          <li>Retenção de logs: 30 meses</li>
           <li>Suporte por e-mail</li>
-          <li>SLA 99,5%</li>
         </ul>
         <button class="price-cta">Começar piloto</button>
       </div>
 
       <div class="price-card featured">
         <div class="price-name">Business</div>
-        <div class="price-num">R$ 49<small>/assento/mês</small></div>
-        <div class="price-cap">faturamento anual · até 250 assentos</div>
+        <div class="price-num">R$ 49,90<small>/assento/mês</small></div>
+        <div class="price-cap">faturamento anual · até 150 assentos</div>
         <ul class="price-list">
           <li>Tudo do Starter</li>
           <li>Categorização avançada</li>
           <li>API pública e webhooks</li>
-          <li>SSO (SAML / OIDC)</li>
-          <li>Suporte e-mail + chat</li>
-          <li>SLA 99,9%</li>
+          <li>Relatórios diário e semanal</li>
+          <li>Jornada de trabalho</li>
+          <li>Análise e tendências</li>
+          <li>Alerta de sobrecarga</li>
+          <li>Alerta de baixo engajamento</li>
+          <li>Perfis de uso avançado</li>
+          <li>Retenção de logs: 1 ano</li>
         </ul>
         <button class="price-cta">Falar com vendas</button>
       </div>
 
       <div class="price-card">
         <div class="price-name">Enterprise</div>
-        <div class="price-num">Sob consulta</div>
-        <div class="price-cap">SaaS, nuvem privada ou on-premise</div>
+        <div class="price-num">R$ 59,90<small>/assento/mês</small></div>
+        <div class="price-cap">acima de 150 assentos</div>
         <ul class="price-list">
           <li>Tudo do Business</li>
-          <li>On-premise / air-gapped</li>
-          <li>Categorização + ML</li>
+          <li>Perfis de uso personalizável</li>
+          <li>Retenção de logs: 2 anos</li>
           <li>CSM dedicado</li>
-          <li>Suporte 24/7</li>
-          <li>SLA 99,95%</li>
+          <li>Suporte por e-mail</li>
         </ul>
         <button class="price-cta">Conversar</button>
       </div>
@@ -790,7 +794,6 @@ $ workpulse-cli <span class="key">issue</span> \<br>
   <p>30 dias de piloto. Sem cartão de crédito. Implantação acompanhada por nosso time.</p>
   <div class="cta-final-btns">
     <a href="mailto:comercial@workpulse.com.br" class="btn-primary">Iniciar piloto de 30 dias</a>
-    <a href="docs/developers.html" class="btn-secondary">Ler a documentação técnica</a>
   </div>
 </section>
 
@@ -803,13 +806,11 @@ $ workpulse-cli <span class="key">issue</span> \<br>
         <li><a href="#features">Recursos</a></li>
         <li><a href="#privacy">Privacidade</a></li>
         <li><a href="#pricing">Planos</a></li>
-        <li><a href="docs/developers.html">Desenvolvedores</a></li>
       </ul>
     </div>
     <div class="foot-col">
       <h4>Recursos</h4>
       <ul>
-        <li><a href="docs/developers.html#docs">Documentação</a></li>
         <li><a href="docs/developers.html#api">API REST</a></li>
         <li><a href="docs/sandbox.html">Sandbox</a></li>
         <li><a href="docs/developers.html#sdks">SDKs</a></li>

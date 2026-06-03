@@ -692,3 +692,40 @@ frontend in `wp-reports.js`, UI card in aba Configurações of `workforce.html`)
 - **Coluna Usuários → ícone com tooltip**: para não estourar o layout com listas longas
   de nomes, a célula agora mostra um ícone (SVG de usuários) e os nomes aparecem no
   `title` (hover). A contagem fica na coluna "Nº usuários".
+- **Heatmap "Quando a equipe trabalha" vazio (Visão Geral)**: `drawHeatmap` somava
+  `h.active` no fallback, mas o backend manda `hourly` como `{hour, seconds}` → todas as
+  células viravam `NaN` → sem cor. Corrigido para `h.seconds` em `wp-overview.js`. (O
+  laço sobre `daily[].by_hour` é código morto — esse campo nunca vem na resposta; mantido
+  inofensivo.)
+- **Heatmap em horário local**: o `hourly` (consumido só pelo heatmap) passou a ser
+  re-bucketizado para **hora local BRT** no backend (Python, usando `DASH_TZ_OFFSET_HOURS`
+  — `(hora_utc + offset) % 24`; evita o operador `%` no SQL, que é armadilha do psycopg2).
+  Subtítulo do card em `workforce.html` atualizado de "(UTC)" para "(horário local)".
+
+**2026-05-31 — sessão expira por inatividade (30 min):**
+- Antes, o painel restaurava `wp_url/wp_tenant/wp_token` do `localStorage` no
+  `bootstrap()` sem nunca expirar → abria sempre logado. Adicionado timeout de
+  **inatividade de 30 min** em `wp-auth.js` (`WP_SESSION_IDLE_MS`):
+  - `_wpTouchSession()` grava `wp_last_active` (throttle 20s; `force` no login/retomada).
+  - `_wpSessionExpired()` compara `now - wp_last_active` com o limite.
+  - `_wpStartIdleWatch()` registra atividade (`mousedown/keydown/scroll/touchstart/
+    visibilitychange`) e checa a cada 30s; `_wpExpireSession()` faz auto-logout
+    (limpa token, reabre o login com aviso "Sessão expirada por inatividade").
+  - `bootstrap()` só restaura a sessão se `!_wpSessionExpired()`; senão limpa o token
+    vencido e exige novo login (mantém o prefill do tenant por conveniência).
+  - `logout()` também limpa `wp_last_active` e o timer.
+  - Tudo frontend, baseado no token atual (dash_token). O login e-mail/senha completo
+    segue no `PLANO_AUTH_EMAIL_SENHA.md` para depois.
+
+**2026-05-31 — loader global mais visível (overlay):**
+- A barrinha fina no topo (`.global-loader`, 3px) era pouco perceptível. Trocada por um
+  **overlay de tela cheia** esmaecido + desfocado, com card central (spinner + "Carregando…"),
+  temático (claro/escuro). Reaproveita os mesmos gatilhos `_showLoader`/`_hideLoader`
+  (contador) chamados em `api()`/`apiFetch()` — nenhuma chamada precisou ser religada.
+  - `wp-core.js`: `_showLoader` agora usa **delay de 300ms** (`setTimeout`) antes de
+    revelar o overlay; `_hideLoader` cancela o timer. Assim chamadas rápidas (<300ms)
+    não piscam o modal; só cargas mais longas mostram o overlay.
+  - `workforce.html`: `#globalLoader` agora contém `.gl-box > .gl-spinner + .gl-text`
+    (com `role="status"`/`aria-live`). `.hide` (com `!important`) continua escondendo.
+  - `workforce.css`: `.global-loader` virou flex full-screen com backdrop temático
+    (`body.theme-light` tem variante clara) + `.gl-spinner` (anel girando) + `.gl-box`.
