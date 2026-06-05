@@ -11,10 +11,11 @@ let _appsFiltered = [];   // resultado do filtro de apps
 let _sitesFiltered= [];   // resultado do filtro de sites
 let _depts        = [];   // [{id, name, user_count, users:[...]}]
 
-// Estado de paginação
-let _rulesPage = 0; const _RULES_PAGE_SIZE = 20;
-let _appsPage  = 0; const _APPS_PAGE_SIZE  = 60;
-let _sitesPage = 0; const _SITES_PAGE_SIZE = 60;
+// Estado de paginação (padrão: 10 por página; a pessoa pode aumentar no seletor)
+let _rulesPage   = 0; let _RULES_PAGE_SIZE   = 10;
+let _appsPage    = 0; let _APPS_PAGE_SIZE    = 10;
+let _sitesPage   = 0; let _SITES_PAGE_SIZE   = 10;
+let _collabsPage = 0; let _COLLABS_PAGE_SIZE = 10;
 
 /* ─────────────────────────────────────────────────────────────────
    Helper genérico de paginação (reutilizado nas 3 seções)
@@ -25,6 +26,7 @@ function _renderCfgPagination(containerId, labelId, page, total, pageSize, goToF
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const hasPrev    = page > 0;
   const hasNext    = page < totalPages - 1;
+  const sizeFn     = goToFn.replace('GoTo', 'SetSize');  // ex.: _rulesGoTo -> _rulesSetSize
 
   if (labelEl) {
     labelEl.textContent = total > 0 ? `— ${total.toLocaleString('pt-BR')} ${itemLabel}` : '';
@@ -32,33 +34,49 @@ function _renderCfgPagination(containerId, labelId, page, total, pageSize, goToF
 
   if (!container) return;
 
-  if (!hasPrev && !hasNext) { container.innerHTML = ''; return; }
+  // Cabe tudo no menor tamanho (10): sem paginação nem seletor.
+  if (total <= 10) { container.innerHTML = ''; return; }
 
-  const cur         = page + 1;
-  const winStart    = Math.max(1, cur - 2);
-  const winEnd      = Math.min(totalPages, cur + 2);
-  const btns        = [];
+  // Seletor "por página" — sempre visível quando há mais de 10 itens,
+  // mesmo numa única página (permite voltar a um tamanho menor).
+  const sizeSel =
+    `<select class="cfg-page-size" title="Itens por página" onchange="${sizeFn}(this.value)">` +
+    [10, 25, 50, 100].map(n => `<option value="${n}"${n === pageSize ? ' selected' : ''}>${n}/página</option>`).join('') +
+    `</select>`;
 
-  if (winStart > 1) {
-    btns.push(`<button class="ev-page-btn ghost" onclick="${goToFn}(0)">1</button>`);
-    if (winStart > 2) btns.push(`<span class="ev-page-ellipsis">…</span>`);
-  }
-  for (let p = winStart; p <= winEnd; p++) {
-    const active = p === cur ? ' ev-page-active' : '';
-    btns.push(`<button class="ev-page-btn ghost${active}" onclick="${goToFn}(${p - 1})">${p}</button>`);
-  }
-  if (winEnd < totalPages) {
-    if (winEnd < totalPages - 1) btns.push(`<span class="ev-page-ellipsis">…</span>`);
-    btns.push(`<button class="ev-page-btn ghost" onclick="${goToFn}(${totalPages - 1})">${totalPages}</button>`);
+  // Navegação só quando há mais de uma página.
+  let nav = '';
+  if (hasPrev || hasNext) {
+    const cur      = page + 1;
+    const winStart = Math.max(1, cur - 2);
+    const winEnd   = Math.min(totalPages, cur + 2);
+    const btns     = [];
+    if (winStart > 1) {
+      btns.push(`<button class="ev-page-btn ghost" onclick="${goToFn}(0)">1</button>`);
+      if (winStart > 2) btns.push(`<span class="ev-page-ellipsis">…</span>`);
+    }
+    for (let p = winStart; p <= winEnd; p++) {
+      const active = p === cur ? ' ev-page-active' : '';
+      btns.push(`<button class="ev-page-btn ghost${active}" onclick="${goToFn}(${p - 1})">${p}</button>`);
+    }
+    if (winEnd < totalPages) {
+      if (winEnd < totalPages - 1) btns.push(`<span class="ev-page-ellipsis">…</span>`);
+      btns.push(`<button class="ev-page-btn ghost" onclick="${goToFn}(${totalPages - 1})">${totalPages}</button>`);
+    }
+    nav =
+      `<button class="ghost ev-page-nav" ${hasPrev ? '' : 'disabled'} onclick="${goToFn}(${page - 1})">← Anterior</button>` +
+      `<div class="ev-page-numbers">${btns.join('')}</div>` +
+      `<button class="ghost ev-page-nav" ${hasNext ? '' : 'disabled'} onclick="${goToFn}(${page + 1})">Próxima →</button>`;
   }
 
-  container.innerHTML = `
-    <div class="ev-pagination">
-      <button class="ghost ev-page-nav" ${hasPrev ? '' : 'disabled'} onclick="${goToFn}(${page - 1})">← Anterior</button>
-      <div class="ev-page-numbers">${btns.join('')}</div>
-      <button class="ghost ev-page-nav" ${hasNext ? '' : 'disabled'} onclick="${goToFn}(${page + 1})">Próxima →</button>
-    </div>`;
+  container.innerHTML = `<div class="ev-pagination">${sizeSel}${nav}</div>`;
 }
+
+/* Seletores de "itens por página" (chamados pelo <select> da paginação). */
+function _rulesSetSize(v)   { _RULES_PAGE_SIZE   = Math.max(1, parseInt(v, 10) || 10); _rulesPage   = 0; _renderRulesPage(); }
+function _appsSetSize(v)    { _APPS_PAGE_SIZE    = Math.max(1, parseInt(v, 10) || 10); _appsPage    = 0; _renderAppsPage(); }
+function _sitesSetSize(v)   { _SITES_PAGE_SIZE   = Math.max(1, parseInt(v, 10) || 10); _sitesPage   = 0; _renderSitesPage(); }
+function _collabsSetSize(v) { _COLLABS_PAGE_SIZE = Math.max(1, parseInt(v, 10) || 10); _collabsPage = 0; _renderCollabsPage(); }
 
 /* -------------------- LOAD CONFIG -------------------- */
 async function loadConfig() {
@@ -405,17 +423,32 @@ async function loadCollabs() {
   try {
     const data = await api('/v1/users?tenant=' + encodeURIComponent(state.tenant));
     state.collabs = data.users || [];
-    renderCollabsTable(state.collabs);
+    _collabsPage  = 0;
+    _renderCollabsPage();
   } catch (e) { toast('Erro ao carregar colaboradores: ' + e.message); }
 }
 
+// Mantido para compatibilidade — atualiza o cache e re-renderiza paginado
 function renderCollabsTable(users) {
+  if (users) state.collabs = users;
+  _collabsPage = 0;
+  _renderCollabsPage();
+}
+
+function _renderCollabsPage() {
   const tb = document.querySelector('#collabsTable tbody');
-  if (!users.length) {
+  if (!tb) return;
+  const users = state.collabs || [];
+  const total = users.length;
+
+  if (!total) {
     tb.innerHTML = '<tr><td colspan="7" class="empty-state">Nenhum colaborador encontrado.</td></tr>';
+    _renderCfgPagination('collabsPagination', 'collabsCountLabel', 0, 0, _COLLABS_PAGE_SIZE, '_collabsGoTo', 'colaboradores');
     return;
   }
-  tb.innerHTML = users.map(u => {
+
+  const slice = users.slice(_collabsPage * _COLLABS_PAGE_SIZE, (_collabsPage + 1) * _COLLABS_PAGE_SIZE);
+  tb.innerHTML = slice.map(u => {
     const uid     = u.user_id || '';
     const safeUid = uid.replace(/'/g, "\\'");
     return `<tr>
@@ -428,6 +461,14 @@ function renderCollabsTable(users) {
       <td><button class="cat-btn" onclick="editUser('${safeUid}')">✏ Editar</button></td>
     </tr>`;
   }).join('');
+
+  _renderCfgPagination('collabsPagination', 'collabsCountLabel', _collabsPage, total, _COLLABS_PAGE_SIZE, '_collabsGoTo', 'colaboradores');
+}
+
+function _collabsGoTo(page) {
+  _collabsPage = page;
+  _renderCollabsPage();
+  document.getElementById('collabsTable')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 function editUser(uid) {

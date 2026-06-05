@@ -715,6 +715,16 @@ body.theme-light .global-loader { background: rgba(232, 237, 246, 0.62); }
   color: #fff !important;
   border-color: var(--primary) !important;
 }
+.cfg-page-size {
+  background: transparent; color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 4px 26px 4px 9px; font-size: 12px; cursor: pointer;
+  margin-right: 8px; line-height: 1.4;
+  -webkit-appearance: none; -moz-appearance: none; appearance: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6' fill='none'><path d='M1 1l4 4 4-4' stroke='%238c97c4' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+  background-repeat: no-repeat; background-position: right 9px center;
+}
+.cfg-page-size:hover { border-color: var(--primary); }
 
 /* =============================================================================
    WP Date Picker
@@ -1154,3 +1164,140 @@ body.theme-light .acct-dropdown {
 .acct-action-logout { color: var(--danger); }
 .acct-action-logout:hover { background: rgba(239,68,68,.08); }
 .acct-action-logout svg { color: var(--danger); }
+
+/* =====================================================================
+   RESPONSIVO — Celular / Tablet
+   ---------------------------------------------------------------------
+   Tudo abaixo vive DENTRO de @media (max-width). Acima de 768px o painel
+   permanece 100% idêntico ao layout original (nenhuma regra desktop é
+   alterada). Adicionado em 2026-06 para tornar o painel utilizável no
+   celular sem mudar nada do comportamento JavaScript.
+   ===================================================================== */
+
+/* ---------- TABLET e CELULAR (≤ 768px) ---------- */
+@media (max-width: 768px) {
+
+  /* — Topbar: marca + conta na 1ª linha; navegação ocupa a 2ª linha — */
+  header.topbar {
+    flex-wrap: wrap;
+    padding: 10px 14px;
+    gap: 10px;
+    row-gap: 10px;
+  }
+  .brand { font-size: 17px; }
+  .brand-logo { height: 30px; width: 30px; }
+
+  /* Navegação principal vai para a própria linha, abaixo da marca/conta.
+     São apenas 3 itens (Visão Geral, Coletas, Análises) — cabem numa linha. */
+  nav.tabs {
+    order: 3;
+    flex: 1 0 100%;
+    justify-content: center;
+    gap: 6px;
+  }
+  /* Marca (logo + WorkPulse) sempre na 1ª linha; a conta encolhe e trunca
+     o nome se faltar espaço, em vez de pular para uma 2ª linha. */
+  .brand { flex-shrink: 0; }
+  .topbar .actions { flex-shrink: 1; min-width: 0; }
+  .acct-wrap, .acct-trigger { min-width: 0; }
+  /* No celular mostramos só o avatar + seta (sem o nome da empresa). */
+  .acct-trigger-name { display: none; }
+
+  /* Menus dropdown da navegação nunca ultrapassam a borda da tela.
+     O de "Análises" (mais à direita) abre alinhado à direita do gatilho. */
+  .nav-dropdown-menu { max-width: calc(100vw - 24px); }
+  .nav-dropdown[data-group="analises"] .nav-dropdown-menu { left: auto; right: 0; }
+
+  /* No celular o dropdown abre/fecha SÓ pelo toque (classe .open via JS).
+     Desativa a abertura por :hover — no touch ela fica "presa" e impedia o
+     menu de recolher ao tocar de novo no mesmo botão. */
+  .nav-dropdown:hover .nav-dropdown-menu {
+    opacity: 0; visibility: hidden;
+    transform: translateY(-6px); pointer-events: none;
+  }
+  .nav-dropdown.open .nav-dropdown-menu {
+    opacity: 1; visibility: visible;
+    transform: translateY(0); pointer-events: auto;
+  }
+  .nav-dropdown:hover .nav-dd-trigger .dd-arrow { transform: none; }
+  .nav-dropdown.open  .nav-dd-trigger .dd-arrow { transform: rotate(180deg); }
+
+  /* — Conteúdo principal: margens e tipografia proporcionais — */
+  main { padding: 18px 14px; }
+  .page-title { font-size: 23px; }
+  .page-sub  { font-size: 13px; margin-bottom: 18px; }
+  .grid { gap: 14px; }
+  .card { padding: 16px 16px; }
+
+  /* — Grids definidos via style inline no HTML (precisam de !important) — */
+  /* Jornada: KPIs em repeat(5,1fr) -> 2 colunas */
+  #tab-jornada .kpi-row { grid-template-columns: repeat(2, 1fr) !important; }
+  /* Configurações: "Apps detectados | Sites detectados" (1fr 1fr) -> empilha */
+  #tab-config div[style*="1fr 1fr"] { grid-template-columns: 1fr !important; }
+
+  /* — Tabelas largas: rolagem horizontal LOCALIZADA na própria tabela —
+     (os cards tinham overflow:hidden e recortavam o conteúdo).
+     display:block + overflow-x faz só a tabela rolar; cabeçalhos/toolbars
+     acima permanecem com largura total. */
+  table {
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    white-space: nowrap;
+  }
+  /* Células de "estado vazio" (colspan com texto de ajuda) podem quebrar linha */
+  table td.empty-state { white-space: normal; }
+
+  /* — Toolbars: aproveitam melhor a largura — */
+  .toolbar { padding: 12px; gap: 10px; }
+  .toolbar .spacer { display: none; }
+
+  /* — Visão Geral: barra compacta — 3 controles justificados (esquerda /
+     centro / direita); rótulos e "Atualizado às…" ocultos; botão Atualizar
+     fica só com o ícone ↻, alinhado à direita. — */
+  #tab-overview .toolbar { justify-content: space-between; }
+  #tab-overview .toolbar label { display: none; }
+  #tab-overview #lastRefreshLabel { display: none; }
+  #tab-overview .toolbar .ghost .btn-label { display: none; }
+
+  /* — Date picker: cabe na tela; presets sobre o calendário — */
+  .wp-dp-panel { min-width: 0; width: calc(100vw - 24px); max-width: 440px; }
+  .wp-dp-body  { flex-direction: column; }
+  .wp-dp-sidebar {
+    flex-direction: row; flex-wrap: wrap;
+    min-width: 0; gap: 6px;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+  .wp-dp-ps { padding: 6px 10px; }
+  .wp-dp-ps-custom { margin-top: 0; border-top: none; padding-top: 0; }
+
+  /* — Heatmap: mantém células tocáveis com rolagem horizontal — */
+  #heatmap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .heat-row { min-width: 520px; }
+
+  /* — Login: caixa nunca maior que a tela — */
+  .login-box { width: 100%; max-width: 380px; padding: 28px 22px; margin: 0 14px; }
+
+  /* — Menu de conta: nunca ultrapassa a borda — */
+  .acct-dropdown { width: min(278px, calc(100vw - 24px)); }
+
+  /* — Modais: respiro menor — */
+  .modal-overlay { padding: 14px; }
+  .modal-box { padding: 20px 18px; }
+
+  /* — Toast ocupa a base da tela — */
+  .toast { left: 14px; right: 14px; bottom: 14px; text-align: center; }
+}
+
+/* ---------- CELULAR ESTREITO (≤ 480px) ---------- */
+@media (max-width: 480px) {
+  .page-title { font-size: 20px; }
+  .stat { font-size: 30px; }
+  .kpi-card .kpi-val { font-size: 24px; }
+  .kpi-row { grid-template-columns: repeat(2, 1fr); }
+  main { padding: 14px 10px; }
+  .card { padding: 14px 12px; }
+  .toolbar { padding: 10px; }
+}
+

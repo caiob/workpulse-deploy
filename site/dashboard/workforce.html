@@ -9,7 +9,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-<link rel="stylesheet" href="css/workforce.css?v=16">
+<link rel="stylesheet" href="css/workforce.css?v=19">
 <link rel="icon" type="image/jpeg" href="../assets/logo-workpulse.jpeg">
 </head>
 <body>
@@ -48,7 +48,6 @@
   <div class="brand">
     <img src="../assets/logo-workpulse.jpeg" alt="WorkPulse" class="brand-logo">
     WorkPulse
-    <span class="product">Painel</span>
   </div>
 
   <!-- Navegação principal com dropdowns -->
@@ -172,7 +171,7 @@
   <!-- ── VISÃO GERAL ── -->
   <section id="tab-overview">
     <h1 class="page-title">Como sua <span class="em">equipe</span> está trabalhando.</h1>
-    <p class="page-sub">Visão consolidada de presença, foco e padrões de trabalho. Atualizado a cada minuto.</p>
+    <p class="page-sub">Visão consolidada de presença, foco e padrões de trabalho.</p>
 
     <div class="toolbar">
       <div><label>Período</label>
@@ -188,7 +187,7 @@
           <option value="600">10 min</option>
         </select>
       </div>
-      <button class="ghost" onclick="loadOverview()">↻ Atualizar</button>
+      <button class="ghost" onclick="loadOverview()">↻ <span class="btn-label">Atualizar</span></button>
     </div>
 
     <div class="grid">
@@ -702,8 +701,14 @@
 
 
     <!-- Colaboradores -->
-    <div class="card no-bar" style="margin-bottom:18px">
-      <h3>Colaboradores</h3>
+    <div class="card no-bar" id="collabsSection" style="margin-bottom:18px">
+      <div style="display:flex;align-items:baseline;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:4px">
+        <div>
+          <h3 style="margin:0;display:inline">Colaboradores</h3>
+          <span id="collabsCountLabel" style="font-size:12px;color:var(--text-dim);margin-left:6px"></span>
+        </div>
+        <div id="collabsPagination"></div>
+      </div>
       <div id="collabForm" style="display:none;margin-bottom:16px">
         <p style="font-size:12px;color:var(--text-dim);margin:0 0 8px">Preencha os campos abaixo e clique em <strong>Salvar</strong>.</p>
         <div class="toolbar" style="flex-wrap:wrap;gap:10px;align-items:flex-end">
@@ -801,5 +806,21 @@
 <script src="js/wp-reports.js?v=16" defer></script>
 <script src="js/wp-nav.js?v=16" defer></script>
 <script src="js/wp-auth.js?v=16" defer></script>
+
+<!-- Mobile: relabela apenas o TEXTO exibido da opção "off" do auto-refresh.
+     Não altera o value ("0") nem a lógica de setAutoRefresh(). -->
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  var sel = document.getElementById('autoRefreshSel');
+  if (!sel) return;
+  var opt = sel.querySelector('option[value="0"]');
+  if (!opt) return;
+  var mq = window.matchMedia('(max-width: 768px)');
+  function apply() { opt.textContent = mq.matches ? 'Refresh Off' : 'Desativado'; }
+  apply();
+  if (mq.addEventListener) mq.addEventListener('change', apply);
+  else if (mq.addListener) mq.addListener(apply);
+});
+</script>
 </body>
 </html>

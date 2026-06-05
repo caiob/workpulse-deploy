@@ -729,3 +729,22 @@ frontend in `wp-reports.js`, UI card in aba Configurações of `workforce.html`)
     (com `role="status"`/`aria-live`). `.hide` (com `!important`) continua escondendo.
   - `workforce.css`: `.global-loader` virou flex full-screen com backdrop temático
     (`body.theme-light` tem variante clara) + `.gl-spinner` (anel girando) + `.gl-box`.
+
+**2026-05-31 — Configurações: paginação padrão 10 + seletor "por página":**
+- As listas da aba Configurações (Regras Ativas, Aplicativos Detectados, Sites
+  Detectados, Colaboradores) ficavam grandes. Padrão de página baixado para **10**
+  (`_RULES/_APPS/_SITES/_COLLABS_PAGE_SIZE`, agora `let` e = 10).
+- `_renderCfgPagination` (em `wp-settings.js`) ganhou um `<select>` "10/25/50/100 por
+  página" — sempre visível quando há > 10 itens (mesmo em página única, para voltar a
+  um tamanho menor). O setter é derivado do `goToFn` (`_xGoTo` → `_xSetSize`), então as
+  6 chamadas existentes não mudaram. Setters novos: `_rulesSetSize/_appsSetSize/
+  _sitesSetSize/_collabsSetSize`.
+- **Colaboradores agora pagina** (antes mostrava todos): `loadCollabs`/`renderCollabsTable`
+  passam por `_renderCollabsPage()` + `_collabsGoTo()`; `workforce.html` ganhou
+  `#collabsCountLabel` + `#collabsPagination` no cabeçalho e `id="collabsSection"` no
+  card (que o `editUser` já usava para rolar). Validado com `node --check`.
+- **Estilo do dropdown**: o `<select class="cfg-page-size">` ficava com a aparência
+  nativa do browser (destoava). Adicionada regra `.cfg-page-size` em `workforce.css`
+  (fundo transparente, `border`/`border-radius` temáticos, seta SVG custom via
+  `appearance:none`) para casar com os botões `.ghost`/`.ev-page-nav`. Removido o
+  `style=""` inline do select no `wp-settings.js`.
