@@ -406,3 +406,18 @@
     border-radius: 6px; color: var(--danger); font-size: 12px;
     font-family: var(--mono); display: none; line-height: 1.5;
   }
+
+  /* ============================================================
+     TENANTS & LICENÇAS — linhas de empresa expansíveis
+     ============================================================ */
+  .tl-main { cursor: pointer; }
+  .tl-main:hover td { background: rgba(108,140,255,.06); }
+  .tl-caret { text-align: center; color: var(--text-dim); }
+  .tl-arrow { display: inline-block; font-size: 10px; transition: transform .15s; }
+  .tl-arrow.open { transform: rotate(90deg); color: var(--primary); }
+  .tl-detail > td.tl-detail-cell { background: var(--bg-2); padding: 0 12px 12px 40px; }
+  table.tl-sub { width: 100%; margin: 2px 0; }
+  table.tl-sub th { font-size: 9.5px; padding: 8px 10px; }
+  table.tl-sub td { padding: 7px 10px; }
+  table.tl-sub tr:last-child td { border-bottom: none; }
+  table.tl-sub tr:hover td { background: rgba(108,140,255,.04); }

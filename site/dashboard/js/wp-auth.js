@@ -190,10 +190,8 @@ function _wpSessionExpired() {
 
 /** Encerra a sessão por inatividade: limpa o token e reabre o login. */
 function _wpExpireSession() {
-  localStorage.removeItem('wp_token');
-  localStorage.removeItem('wp_last_active');
-  state.token = '';
-  if (_wpIdleTimer) { clearInterval(_wpIdleTimer); _wpIdleTimer = null; }
+  try { fetch(state.url + '/v1/auth/logout', { method: 'POST', credentials: 'include' }); } catch (_) {}
+  _resetSessionState();
   const tk = document.getElementById('loginToken');
   if (tk) tk.value = '';
   document.getElementById('login').classList.remove('hide');
@@ -230,116 +228,231 @@ function _clearLoginError() {
 
 async function doLogin() {
   _clearLoginError();
+  const email = document.getElementById('loginEmail').value.trim();
+  const senha = document.getElementById('loginPassword').value;
+  if (!email || !senha) { _showLoginError('Informe e-mail e senha.'); return; }
 
-  const url    = document.getElementById('loginUrl').value.trim().replace(/\/$/, '');
-  const tenant = document.getElementById('loginTenant').value.trim();
-  const token  = document.getElementById('loginToken').value.trim();
-
-  if (!url || !tenant || !token) {
-    _showLoginError('Preencha todos os campos para continuar.');
-    return;
-  }
-
-  const btn          = document.querySelector('#login button.primary');
+  const btn = document.querySelector('#login button.primary');
   const originalText = btn.textContent;
-  btn.textContent = 'Verificando...';
-  btn.disabled    = true;
-
+  btn.textContent = 'Verificando...'; btn.disabled = true;
   try {
-    const controller = new AbortController();
-    const tid = setTimeout(() => controller.abort(), 12000);
-
-    const r = await fetch(
-      url + '/v1/workforce/overview?tenant=' + encodeURIComponent(tenant) + '&days=1',
-      { headers: { 'X-Admin-Token': token }, signal: controller.signal }
-    );
-    clearTimeout(tid);
-
-    if (r.status === 401 || r.status === 403) {
-      _showLoginError('Token inválido ou sem permissão. Verifique suas credenciais.');
-      return;
-    }
-
-    // Salva estado
-    state.url    = url;
-    state.tenant = tenant;
-    state.token  = token;
-    localStorage.setItem('wp_url',    url);
-    localStorage.setItem('wp_tenant', tenant);
-    localStorage.setItem('wp_token',  token);
-    _wpTouchSession(true);
-
-    document.getElementById('login').classList.add('hide');
-
-    // Preenche o menu de conta
-    _acctSetTenant(tenant, tenant);
-    _acctSyncTheme();
-    _loadLicenseInfo();
-
-    loadOverview();
-    _wpStartIdleWatch();
-
+    const r = await fetch(state.url + '/v1/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ email, senha }),
+    });
+    if (r.status === 423) { _showLoginError('Conta temporariamente bloqueada. Tente novamente em alguns minutos.'); return; }
+    if (r.status === 403) { _showLoginError('Conta desativada. Contate o administrador.'); return; }
+    if (!r.ok)            { _showLoginError('E-mail ou senha inválidos.'); return; }
+    const data = await r.json();
+    _applySession(data);
+    state.email = email;
+    if (data.must_change_pw) { _openChangePassword(true); return; }
+    _enterApp();
   } catch (e) {
-    if (e.name === 'AbortError') {
-      _showLoginError('Servidor não respondeu. Verifique o Endpoint da API.');
-    } else {
-      _showLoginError('Erro de conexão: ' + e.message);
-    }
+    _showLoginError('Erro de conexão: ' + e.message);
   } finally {
-    btn.textContent = originalText;
-    btn.disabled    = false;
+    btn.textContent = originalText; btn.disabled = false;
   }
 }
 
-function logout() {
+/* Acesso técnico (break-glass) — Tenant + Token, para suporte/recuperação. */
+async function doTechLogin() {
+  _clearLoginError();
+  const tenant = document.getElementById('loginTenant').value.trim();
+  const token  = document.getElementById('loginToken').value.trim();
+  if (!tenant || !token) { _showLoginError('Informe Tenant e Token de acesso técnico.'); return; }
+  try {
+    const r = await fetch(state.url + '/v1/workforce/overview?tenant=' + encodeURIComponent(tenant) + '&days=1',
+      { headers: { 'X-Admin-Token': token }, credentials: 'include' });
+    if (r.status === 401 || r.status === 403) { _showLoginError('Tenant ou token inválido.'); return; }
+    state.authed = true; state.breakGlass = true; state.token = token; state.tenant = tenant;
+    state.role = 'admin_master'; state.displayName = 'Acesso técnico'; state.email = 'suporte (token)'; state.mustChangePw = false;
+    _wpTouchSession(true);
+    _enterApp();
+  } catch (e) { _showLoginError('Erro de conexão: ' + e.message); }
+}
+
+/* Esqueci minha senha — envia link por e-mail (autoatendimento). */
+async function doForgot() {
+  const email = document.getElementById('loginEmail').value.trim();
+  if (!email) { _showLoginError('Digite seu e-mail no campo acima e clique novamente em “Esqueci minha senha”.'); return; }
+  try {
+    await fetch(state.url + '/v1/auth/forgot', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      credentials: 'include', body: JSON.stringify({ email }),
+    });
+  } catch (_) {}
+  _showLoginError('Se o e-mail existir, enviaremos um link para redefinir a senha.');
+}
+
+/* Mostra/oculta o bloco de acesso técnico no login. */
+function toggleTechAccess() {
+  const b = document.getElementById('techAccess');
+  if (b) b.style.display = (b.style.display === 'none' || !b.style.display) ? 'block' : 'none';
+}
+
+
+async function logout() {
   _closeAccountMenu();
-  localStorage.removeItem('wp_token');
-  localStorage.removeItem('wp_last_active');
-  if (_wpIdleTimer) { clearInterval(_wpIdleTimer); _wpIdleTimer = null; }
-  state.token = '';
+  try { await fetch(state.url + '/v1/auth/logout', { method: 'POST', credentials: 'include' }); } catch (_) {}
+  _resetSessionState();
   document.getElementById('login').classList.remove('hide');
   _clearLoginError();
+}
+
+function _resetSessionState() {
+  state.authed = false; state.breakGlass = false; state.token = '';
+  state.role = ''; state.email = ''; state.mustChangePw = false;
+  localStorage.removeItem('wp_last_active');
+  if (_wpIdleTimer) { clearInterval(_wpIdleTimer); _wpIdleTimer = null; }
+}
+
+/* Chamado por wp-core quando uma chamada retorna 401. */
+function _handleAuthFail() {
+  _resetSessionState();
+  const el = document.getElementById('login');
+  if (el) el.classList.remove('hide');
+  _showLoginError('Sessão expirada. Faça login novamente.');
 }
 
 /* ══════════════════════════════════════════════════════════════════
    BOOTSTRAP
    ══════════════════════════════════════════════════════════════════ */
+function _applySession(data) {
+  state.authed = true; state.breakGlass = false; state.token = '__session__';
+  state.tenant = data.tenant || ''; state.role = data.role || '';
+  state.displayName = data.display_name || ''; state.mustChangePw = !!data.must_change_pw;
+  _wpTouchSession(true);
+}
+
+function _enterApp() {
+  document.getElementById('login').classList.add('hide');
+  _acctSetTenant(state.tenant, state.tenant);
+  _acctSetUser();
+  _acctSyncTheme();
+  _applyRoleUI();
+  _loadLicenseInfo();
+  loadOverview();
+  _wpStartIdleWatch();
+}
+
+/* Preenche o nome do usuário logado no menu de conta. */
+function _acctSetUser() {
+  const el = document.getElementById('acctUserName');
+  if (!el) return;
+  el.textContent = state.displayName || state.email || '—';
+  el.title = state.email || '';
+}
+
+/* Mostra/oculta elementos conforme o perfil (data-role="admin_master"). */
+function _applyRoleUI() {
+  const isAdmin = state.role === 'admin_master' || state.role === 'wp_admin';
+  document.querySelectorAll('[data-role="admin_master"]').forEach(el => {
+    el.style.display = isAdmin ? '' : 'none';
+  });
+}
+
+/* ── Política de senha (espelha o backend: 10+ chars, 3 de 4 classes) ── */
+function _pwPolicyOk(pw) {
+  if (!pw || pw.length < 10) return false;
+  let c = 0;
+  if (/[a-z]/.test(pw)) c++; if (/[A-Z]/.test(pw)) c++;
+  if (/[0-9]/.test(pw)) c++; if (/[^A-Za-z0-9]/.test(pw)) c++;
+  return c >= 3;
+}
+
+/* ── Troca de senha (primeiro acesso ou voluntária) ── */
+function _openChangePassword(forced) {
+  const m = document.getElementById('changePw'); if (!m) return;
+  const fb = document.getElementById('cpForcedMsg'); if (fb) fb.style.display = forced ? 'block' : 'none';
+  const err = document.getElementById('cpError'); if (err) err.style.display = 'none';
+  ['cpCurrent','cpNew','cpNew2'].forEach(id => { const e = document.getElementById(id); if (e) e.value = ''; });
+  m.dataset.forced = forced ? '1' : '';
+  m.classList.remove('hide');
+  document.getElementById('login').classList.add('hide');
+}
+
+function _closeChangePassword() {
+  const m = document.getElementById('changePw');
+  if (m && !m.dataset.forced) m.classList.add('hide');
+}
+
+async function submitChangePassword() {
+  const cur = document.getElementById('cpCurrent').value;
+  const n1  = document.getElementById('cpNew').value;
+  const n2  = document.getElementById('cpNew2').value;
+  const err = document.getElementById('cpError');
+  const show = (m) => { err.textContent = m; err.style.display = 'block'; };
+  if (n1 !== n2) { show('As senhas não coincidem.'); return; }
+  if (!_pwPolicyOk(n1)) { show('A senha deve ter 10+ caracteres e ao menos 3 de 4 tipos: minúscula, maiúscula, número e símbolo.'); return; }
+  try {
+    await apiFetch('POST', '/v1/auth/password', { senha_atual: cur, senha_nova: n1 });
+    state.mustChangePw = false;
+    const m = document.getElementById('changePw'); m.dataset.forced = ''; m.classList.add('hide');
+    if (!state.authed) { document.getElementById('login').classList.remove('hide'); }
+    else { _enterApp(); toast('Senha alterada com sucesso.'); }
+  } catch (e) { show('Não foi possível alterar: ' + (e.message || 'senha atual incorreta')); }
+}
+
+/* ── Definir senha via link de e-mail (?action=set-password) ── */
+function _openSetPassword(token) {
+  const m = document.getElementById('setPw'); if (!m) return;
+  m.dataset.token = token; m.classList.remove('hide');
+  document.getElementById('login').classList.add('hide');
+}
+
+async function submitSetPassword() {
+  const m  = document.getElementById('setPw');
+  const n1 = document.getElementById('spNew').value;
+  const n2 = document.getElementById('spNew2').value;
+  const err = document.getElementById('spError');
+  const show = (x) => { err.textContent = x; err.style.display = 'block'; };
+  if (n1 !== n2) { show('As senhas não coincidem.'); return; }
+  if (!_pwPolicyOk(n1)) { show('Senha fraca: 10+ caracteres e 3 de 4 tipos.'); return; }
+  try {
+    const r = await fetch(state.url + '/v1/auth/set-password', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      credentials: 'include', body: JSON.stringify({ token: m.dataset.token, senha: n1 }),
+    });
+    if (!r.ok) { const t = await r.text(); show('Falha: ' + t); return; }
+    m.classList.add('hide');
+    history.replaceState({}, '', location.pathname);
+    document.getElementById('login').classList.remove('hide');
+    _showLoginError('Senha definida! Faça login com sua nova senha.');
+  } catch (e) { show('Erro: ' + e.message); }
+}
+
 (function bootstrap() {
-  // Aplica tema salvo
   const savedTheme = localStorage.getItem('wp_theme') || 'dark';
   applyTheme(savedTheme);
-
-  // Inicializa menu de conta
   _acctInitMenu();
 
-  // Restaura sessão salva (só se não estiver expirada por inatividade)
-  const url    = localStorage.getItem('wp_url');
-  const tenant = localStorage.getItem('wp_tenant');
-  const token  = localStorage.getItem('wp_token');
-
-  // Prefill de conveniência (sempre): endpoint oculto + tenant
-  if (url)    document.getElementById('loginUrl').value    = url;
-  if (tenant) document.getElementById('loginTenant').value = tenant;
-
-  if (url && tenant && token && !_wpSessionExpired()) {
-    document.getElementById('loginToken').value = token;
-    state.url    = url;
-    state.tenant = tenant;
-    state.token  = token;
-    document.getElementById('login').classList.add('hide');
-    _wpTouchSession(true);   // renova o carimbo ao retomar
-
-    // Preenche menu de conta
-    _acctSetTenant(tenant, tenant);
-    _acctSyncTheme();
-    _loadLicenseInfo();
-
-    loadOverview();
-    _wpStartIdleWatch();
-  } else if (token) {
-    // Havia sessão salva, mas expirou → exige novo login
-    localStorage.removeItem('wp_token');
-    localStorage.removeItem('wp_last_active');
-    state.token = '';
+  // Link de redefinição/definição de senha
+  const params = new URLSearchParams(location.search);
+  if (params.get('action') === 'set-password' && params.get('token')) {
+    _openSetPassword(params.get('token'));
+    return;
   }
+
+  // Restaura sessão por cookie (GET /v1/auth/me)
+  (async () => {
+    try {
+      const r = await fetch(state.url + '/v1/auth/me', { credentials: 'include' });
+      if (!r.ok) throw 0;
+      const me = await r.json();
+      if (_wpSessionExpired()) {
+        try { await fetch(state.url + '/v1/auth/logout', { method: 'POST', credentials: 'include' }); } catch (_) {}
+        throw 0;
+      }
+      state.authed = true; state.breakGlass = false; state.token = '__session__';
+      state.tenant = me.tenant || ''; state.role = me.role || ''; state.displayName = me.display_name || '';
+      state.email = me.email || '';
+      _wpTouchSession(true);
+      _enterApp();
+    } catch (_) {
+      document.getElementById('login').classList.remove('hide');
+    }
+  })();
 })();

@@ -644,19 +644,27 @@ def require_admin(x_admin_token: Annotated[str | None, Header()] = None) -> None
 
 
 def require_tenant_scope(
+    request: Request,
     tenant: str,
     x_admin_token: Annotated[str | None, Header()] = None,
 ) -> None:
-    if not x_admin_token:
-        raise HTTPException(status_code=401, detail="missing token")
-    if secrets.compare_digest(x_admin_token, ADMIN_TOKEN):
+    # 1) Sessão por cookie (auth v2): usuário do próprio tenant ou Admin WorkPulse.
+    sid = request.cookies.get("wp_sess")
+    if sid:
+        u = _load_session_user(sid)
+        if u and (u.get("role") == "wp_admin" or u.get("tenant_id") == tenant):
+            return
+    # 2) Token master da plataforma (break-glass / compatibilidade).
+    if x_admin_token and secrets.compare_digest(x_admin_token, ADMIN_TOKEN):
         return
-    with db() as c:
-        row = c.execute(
-            "SELECT dash_token FROM tenants WHERE id = %s", (tenant,)
-        ).fetchone()
-    if row and row["dash_token"] and secrets.compare_digest(x_admin_token, row["dash_token"]):
-        return
+    # 3) dash_token do tenant (break-glass / compatibilidade).
+    if x_admin_token:
+        with db() as c:
+            row = c.execute(
+                "SELECT dash_token FROM tenants WHERE id = %s", (tenant,)
+            ).fetchone()
+        if row and row["dash_token"] and secrets.compare_digest(x_admin_token, row["dash_token"]):
+            return
     raise HTTPException(status_code=403, detail="token invalido para este tenant")
 
 
@@ -2490,6 +2498,785 @@ def report_history(cfg_id: int, tenant: str):
             (cfg_id, tid),
         ).fetchall()
     return {"history": [dict(r) for r in rows]}
+
+
+# ===========================================================================
+# AUTH v2 — Login por e-mail/senha, perfis e gestão de acessos
+# (bloco aditivo; ver PLANO_AUTH_EMAIL_SENHA_V2.md)
+# ===========================================================================
+import hashlib as _hashlib
+from fastapi import Response, Cookie
+from argon2 import PasswordHasher as _Argon2PH
+
+# --- Configuração de auth (envs com defaults seguros) ----------------------
+SESSION_COOKIE     = "wp_sess"
+SESSION_TTL_HOURS  = int(os.getenv("WORKPULSE_SESSION_TTL_HOURS", "12"))
+LOCKOUT_MAX        = int(os.getenv("WORKPULSE_LOCKOUT_MAX", "5"))
+LOCKOUT_MINUTES    = int(os.getenv("WORKPULSE_LOCKOUT_MINUTES", "15"))
+COOKIE_SECURE      = os.getenv("WORKPULSE_COOKIE_SECURE", "true").lower() != "false"
+COOKIE_SAMESITE    = os.getenv("WORKPULSE_COOKIE_SAMESITE", "strict")
+PANEL_BASE_URL     = os.getenv("WORKPULSE_PANEL_URL", "https://workpulse.com.br/dashboard")
+PLATFORM_NOTIFY    = os.getenv("WORKPULSE_NOTIFY_EMAIL", FROM_EMAIL)
+TOKEN_TTL_HOURS    = int(os.getenv("WORKPULSE_PWTOKEN_TTL_HOURS", "48"))
+
+CLIENT_ROLES   = ("admin_master", "supervisor")
+ALL_ROLES      = ("admin_master", "supervisor", "wp_admin")
+
+# --- Tabelas novas (aditivas; init_db() as cria se não existirem) ----------
+_SCHEMA_STMTS.extend([
+    """
+    CREATE TABLE IF NOT EXISTS dash_users (
+        id             BIGSERIAL PRIMARY KEY,
+        tenant_id      TEXT REFERENCES tenants(id) ON DELETE CASCADE,
+        email          TEXT NOT NULL,
+        password_hash  TEXT NOT NULL,
+        display_name   TEXT,
+        role           TEXT NOT NULL DEFAULT 'supervisor'
+                       CHECK (role IN ('admin_master','supervisor','wp_admin')),
+        status         TEXT NOT NULL DEFAULT 'active'
+                       CHECK (status IN ('active','disabled')),
+        must_change_pw BOOLEAN NOT NULL DEFAULT TRUE,
+        twofa_secret   TEXT,
+        twofa_enabled  BOOLEAN NOT NULL DEFAULT FALSE,
+        failed_logins  INTEGER NOT NULL DEFAULT 0,
+        locked_until   TIMESTAMPTZ,
+        last_login     TIMESTAMPTZ,
+        created_by     BIGINT,
+        created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_dash_users_email ON dash_users (lower(email))",
+    "CREATE INDEX IF NOT EXISTS idx_dash_users_tenant ON dash_users(tenant_id)",
+    """
+    CREATE TABLE IF NOT EXISTS dash_sessions (
+        id          TEXT PRIMARY KEY,
+        user_id     BIGINT NOT NULL REFERENCES dash_users(id) ON DELETE CASCADE,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        expires_at  TIMESTAMPTZ NOT NULL,
+        ip          TEXT,
+        user_agent  TEXT,
+        revoked     BOOLEAN NOT NULL DEFAULT FALSE
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_dash_sessions_user ON dash_sessions(user_id)",
+    """
+    CREATE TABLE IF NOT EXISTS dash_user_tokens (
+        token_hash  TEXT PRIMARY KEY,
+        user_id     BIGINT NOT NULL REFERENCES dash_users(id) ON DELETE CASCADE,
+        purpose     TEXT NOT NULL CHECK (purpose IN ('set_password','reset_password')),
+        expires_at  TIMESTAMPTZ NOT NULL,
+        used_at     TIMESTAMPTZ
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS dash_seat_alloc (
+        tenant_id   TEXT NOT NULL,
+        user_id     TEXT NOT NULL,
+        allocated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (tenant_id, user_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS dash_license_requests (
+        id          BIGSERIAL PRIMARY KEY,
+        tenant_id   TEXT NOT NULL,
+        requested_by TEXT,
+        plan        TEXT,
+        seats       INTEGER,
+        message     TEXT,
+        status      TEXT NOT NULL DEFAULT 'open',
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+])
+
+# --- Hash de senha (argon2id) ----------------------------------------------
+_ph = _Argon2PH()
+
+def hash_password(pw: str) -> str:
+    return _ph.hash(pw)
+
+def verify_password(stored_hash: str, pw: str) -> bool:
+    try:
+        _ph.verify(stored_hash, pw)
+        return True
+    except Exception:
+        return False
+
+def validate_password_policy(pw: str) -> None:
+    if not pw or len(pw) < 10:
+        raise HTTPException(400, "A senha deve ter ao menos 10 caracteres.")
+    classes = sum([
+        bool(_re.search(r"[a-z]", pw)),
+        bool(_re.search(r"[A-Z]", pw)),
+        bool(_re.search(r"[0-9]", pw)),
+        bool(_re.search(r"[^A-Za-z0-9]", pw)),
+    ])
+    if classes < 3:
+        raise HTTPException(
+            400,
+            "A senha deve conter ao menos 3 de 4 tipos: minúscula, maiúscula, número e símbolo.",
+        )
+
+# --- Utilitários de tempo/token --------------------------------------------
+def _now_utc() -> dt.datetime:
+    return dt.datetime.now(dt.timezone.utc)
+
+def _parse_ts(v) -> dt.datetime | None:
+    if v is None:
+        return None
+    if isinstance(v, dt.datetime):
+        return v if v.tzinfo else v.replace(tzinfo=dt.timezone.utc)
+    try:
+        d = dt.datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+        return d if d.tzinfo else d.replace(tzinfo=dt.timezone.utc)
+    except Exception:
+        return None
+
+def _gen_secret() -> str:
+    return secrets.token_urlsafe(32)
+
+def _hash_token(t: str) -> str:
+    return _hashlib.sha256(t.encode("utf-8")).hexdigest()
+
+def _to_bool(v) -> bool:
+    return v in (True, 1, "t", "true", "TRUE", "1")
+
+# --- E-mail genérico (SES) -------------------------------------------------
+def _send_email_html(recipients: list[str], subject: str, body_html: str) -> None:
+    import boto3 as _boto3
+    msg = email.mime.multipart.MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"]    = FROM_EMAIL
+    msg["To"]      = ", ".join(recipients)
+    msg.attach(email.mime.text.MIMEText(body_html, "html", "utf-8"))
+    client = _boto3.client("ses", region_name=SES_REGION)
+    client.send_raw_email(
+        Source=FROM_EMAIL,
+        Destinations=recipients,
+        RawMessage={"Data": msg.as_bytes()},
+    )
+
+def _send_password_token(user_row: dict, purpose: str) -> str:
+    """Gera token de uso único, envia o link por e-mail (SES) e retorna o link."""
+    raw = _gen_secret()
+    th  = _hash_token(raw)
+    exp = (_now_utc() + dt.timedelta(hours=TOKEN_TTL_HOURS)).isoformat()
+    with db() as c:
+        c.execute(
+            "DELETE FROM dash_user_tokens WHERE user_id=%s AND purpose=%s",
+            (user_row["id"], purpose),
+        )
+        c.execute(
+            """INSERT INTO dash_user_tokens (token_hash, user_id, purpose, expires_at)
+               VALUES (%s,%s,%s,%s)""",
+            (th, user_row["id"], purpose, exp),
+        )
+    link = f"{PANEL_BASE_URL}/?action=set-password&token={raw}"
+    acao = "definir sua senha de acesso" if purpose == "set_password" else "redefinir sua senha"
+    html = (
+        f"<p>Olá {user_row.get('display_name') or ''},</p>"
+        f"<p>Use o link abaixo para {acao} no Painel WorkPulse "
+        f"(válido por {TOKEN_TTL_HOURS} horas):</p>"
+        f'<p><a href="{link}">{link}</a></p>'
+        f"<p>Se você não solicitou, ignore este e-mail.</p>"
+    )
+    try:
+        _send_email_html([user_row["email"]], "WorkPulse — acesso ao painel", html)
+    except Exception as exc:
+        print(f"[auth] AVISO: falha ao enviar e-mail de senha: {exc}", flush=True)
+    return link
+
+# --- Sessões ---------------------------------------------------------------
+def _load_session_user(sid: str) -> dict | None:
+    if not sid:
+        return None
+    with db() as c:
+        row = c.execute(
+            """SELECT u.id, u.tenant_id, u.email, u.display_name, u.role, u.status,
+                      s.expires_at AS s_exp, s.revoked AS s_revoked
+               FROM dash_sessions s JOIN dash_users u ON u.id = s.user_id
+               WHERE s.id = %s""",
+            (sid,),
+        ).fetchone()
+    if not row:
+        return None
+    r = dict(row)
+    if _to_bool(r.get("s_revoked")):
+        return None
+    exp = _parse_ts(r.get("s_exp"))
+    if exp and exp < _now_utc():
+        return None
+    if r.get("status") != "active":
+        return None
+    return r
+
+def _create_session(user_id, ip: str | None, ua: str | None) -> str:
+    sid = _gen_secret()
+    exp = (_now_utc() + dt.timedelta(hours=SESSION_TTL_HOURS)).isoformat()
+    with db() as c:
+        c.execute(
+            """INSERT INTO dash_sessions (id, user_id, created_at, expires_at, ip, user_agent, revoked)
+               VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+            (sid, user_id, _now_utc().isoformat(), exp, ip, (ua or "")[:300], False),
+        )
+    return sid
+
+def _revoke_user_sessions(user_id) -> None:
+    with db() as c:
+        c.execute("UPDATE dash_sessions SET revoked=%s WHERE user_id=%s", (True, user_id))
+
+def _set_session_cookie(response: Response, sid: str) -> None:
+    response.set_cookie(
+        key=SESSION_COOKIE, value=sid, max_age=SESSION_TTL_HOURS * 3600,
+        httponly=True, secure=COOKIE_SECURE, samesite=COOKIE_SAMESITE, path="/",
+    )
+
+def _clear_session_cookie(response: Response) -> None:
+    response.delete_cookie(key=SESSION_COOKIE, path="/")
+
+# --- Contexto de autenticação / autorização --------------------------------
+def _session_ctx(request: Request, x_admin_token: str | None, tenant: str | None) -> dict | None:
+    sid = request.cookies.get(SESSION_COOKIE)
+    if sid:
+        u = _load_session_user(sid)
+        if u:
+            return {
+                "user_id": u["id"], "email": u["email"], "role": u["role"],
+                "tenant": u["tenant_id"], "display_name": u.get("display_name"),
+                "via": "session",
+            }
+    if x_admin_token:
+        if secrets.compare_digest(x_admin_token, ADMIN_TOKEN):
+            return {"user_id": None, "email": "platform@token", "role": "wp_admin",
+                    "tenant": tenant, "display_name": "Admin WorkPulse (token)", "via": "master_token"}
+        if tenant:
+            with db() as c:
+                row = c.execute("SELECT dash_token FROM tenants WHERE id=%s", (tenant,)).fetchone()
+            if row and row["dash_token"] and secrets.compare_digest(x_admin_token, row["dash_token"]):
+                return {"user_id": None, "email": "tenant@token", "role": "admin_master",
+                        "tenant": tenant, "display_name": "Admin Master (token)", "via": "tenant_token"}
+    return None
+
+def require_session(
+    request: Request,
+    x_admin_token: Annotated[str | None, Header()] = None,
+    tenant: str | None = None,
+) -> dict:
+    ctx = _session_ctx(request, x_admin_token, tenant)
+    if not ctx:
+        raise HTTPException(401, "não autenticado")
+    if ctx["via"] == "session" and ctx["role"] != "wp_admin" and tenant and ctx["tenant"] != tenant:
+        raise HTTPException(403, "tenant fora do escopo da sessão")
+    return ctx
+
+def require_role(*roles: str):
+    allowed = set(roles)
+    def _dep(ctx: Annotated[dict, Depends(require_session)]) -> dict:
+        role = ctx["role"]
+        if role == "wp_admin":
+            return ctx
+        if role in allowed:
+            return ctx
+        raise HTTPException(403, "permissão insuficiente para esta ação")
+    return _dep
+
+def _client_ip(request: Request) -> str | None:
+    fwd = request.headers.get("x-forwarded-for")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.client.host if request.client else None
+
+def _user_public(row: dict) -> dict:
+    return {
+        "id": row.get("id"),
+        "tenant_id": row.get("tenant_id"),
+        "email": row.get("email"),
+        "display_name": row.get("display_name"),
+        "role": row.get("role"),
+        "status": row.get("status"),
+        "must_change_pw": _to_bool(row.get("must_change_pw")),
+        "last_login": row.get("last_login"),
+        "created_at": row.get("created_at"),
+    }
+
+# --- Modelos ---------------------------------------------------------------
+class LoginIn(BaseModel):
+    email: str
+    senha: str
+
+class ChangePasswordIn(BaseModel):
+    senha_atual: str
+    senha_nova: str
+
+class SetPasswordIn(BaseModel):
+    token: str
+    senha: str
+
+class ForgotIn(BaseModel):
+    email: str
+
+class TenantUserCreate(BaseModel):
+    email: str
+    display_name: str | None = None
+    role: str = "supervisor"
+
+class TenantUserUpdate(BaseModel):
+    display_name: str | None = None
+    role: str | None = None
+    status: str | None = None
+
+class AdminUserCreate(BaseModel):
+    tenant_id: str | None = None
+    email: str
+    display_name: str | None = None
+    role: str = "admin_master"
+
+class SeatAssignIn(BaseModel):
+    user_id: str
+    allocated: bool
+
+class LicenseRequestIn(BaseModel):
+    plan: str | None = None
+    seats: int | None = None
+    message: str | None = None
+
+def _norm_email(e: str) -> str:
+    return (e or "").strip().lower()
+
+def _email_taken(email_norm: str, exclude_id=None) -> bool:
+    with db() as c:
+        if exclude_id is None:
+            row = c.execute("SELECT id FROM dash_users WHERE lower(email)=%s", (email_norm,)).fetchone()
+        else:
+            row = c.execute(
+                "SELECT id FROM dash_users WHERE lower(email)=%s AND id<>%s",
+                (email_norm, exclude_id),
+            ).fetchone()
+    return row is not None
+
+# ===========================================================================
+# Endpoints — Autenticação
+# ===========================================================================
+@app.post("/v1/auth/login")
+def auth_login(body: LoginIn, request: Request, response: Response):
+    email_norm = _norm_email(body.email)
+    ip = _client_ip(request)
+    with db() as c:
+        row = c.execute(
+            "SELECT * FROM dash_users WHERE lower(email)=%s", (email_norm,)
+        ).fetchone()
+    generic = HTTPException(401, "e-mail ou senha inválidos")
+    if not row:
+        audit("anon", "login.fail", target=email_norm, detail="user_not_found", ip=ip)
+        raise generic
+    user = dict(row)
+    if user.get("status") != "active":
+        audit(user["email"], "login.fail", detail="disabled", ip=ip)
+        raise HTTPException(403, "conta desativada — contate o administrador")
+    locked = _parse_ts(user.get("locked_until"))
+    if locked and locked > _now_utc():
+        raise HTTPException(423, "conta temporariamente bloqueada — tente novamente em alguns minutos")
+    if not verify_password(user["password_hash"], body.senha):
+        failed = int(user.get("failed_logins") or 0) + 1
+        lock_until = None
+        if failed >= LOCKOUT_MAX:
+            lock_until = (_now_utc() + dt.timedelta(minutes=LOCKOUT_MINUTES)).isoformat()
+        with db() as c:
+            c.execute(
+                "UPDATE dash_users SET failed_logins=%s, locked_until=%s, updated_at=%s WHERE id=%s",
+                (failed, lock_until, _now_utc().isoformat(), user["id"]),
+            )
+        audit(user["email"], "login.fail", detail=f"bad_password({failed})", ip=ip)
+        raise generic
+    # sucesso
+    with db() as c:
+        c.execute(
+            "UPDATE dash_users SET failed_logins=0, locked_until=NULL, last_login=%s, updated_at=%s WHERE id=%s",
+            (_now_utc().isoformat(), _now_utc().isoformat(), user["id"]),
+        )
+    sid = _create_session(user["id"], ip, request.headers.get("user-agent"))
+    _set_session_cookie(response, sid)
+    audit(user["email"], "login.ok", detail=f"tenant={user.get('tenant_id')}", ip=ip)
+    return {
+        "ok": True,
+        "role": user["role"],
+        "tenant": user.get("tenant_id"),
+        "display_name": user.get("display_name"),
+        "must_change_pw": _to_bool(user.get("must_change_pw")),
+    }
+
+@app.post("/v1/auth/logout")
+def auth_logout(request: Request, response: Response):
+    sid = request.cookies.get(SESSION_COOKIE)
+    if sid:
+        with db() as c:
+            c.execute("UPDATE dash_sessions SET revoked=%s WHERE id=%s", (True, sid))
+    _clear_session_cookie(response)
+    return {"ok": True}
+
+@app.get("/v1/auth/me")
+def auth_me(ctx: Annotated[dict, Depends(require_session)]):
+    return {
+        "email": ctx["email"],
+        "role": ctx["role"],
+        "tenant": ctx["tenant"],
+        "display_name": ctx["display_name"],
+        "via": ctx["via"],
+    }
+
+@app.post("/v1/auth/password")
+def auth_change_password(body: ChangePasswordIn, request: Request,
+                         ctx: Annotated[dict, Depends(require_session)]):
+    if ctx["via"] != "session" or not ctx.get("user_id"):
+        raise HTTPException(400, "troca de senha indisponível para acesso por token")
+    with db() as c:
+        row = c.execute("SELECT * FROM dash_users WHERE id=%s", (ctx["user_id"],)).fetchone()
+    if not row or not verify_password(row["password_hash"], body.senha_atual):
+        raise HTTPException(403, "senha atual incorreta")
+    validate_password_policy(body.senha_nova)
+    with db() as c:
+        c.execute(
+            "UPDATE dash_users SET password_hash=%s, must_change_pw=%s, updated_at=%s WHERE id=%s",
+            (hash_password(body.senha_nova), False, _now_utc().isoformat(), ctx["user_id"]),
+        )
+    audit(ctx["email"], "password.change", ip=_client_ip(request))
+    return {"ok": True}
+
+@app.post("/v1/auth/set-password")
+def auth_set_password(body: SetPasswordIn, request: Request, response: Response):
+    validate_password_policy(body.senha)
+    th = _hash_token(body.token)
+    with db() as c:
+        tok = c.execute(
+            "SELECT * FROM dash_user_tokens WHERE token_hash=%s", (th,)
+        ).fetchone()
+    if not tok:
+        raise HTTPException(400, "token inválido")
+    tok = dict(tok)
+    if tok.get("used_at"):
+        raise HTTPException(400, "token já utilizado")
+    exp = _parse_ts(tok.get("expires_at"))
+    if exp and exp < _now_utc():
+        raise HTTPException(400, "token expirado")
+    with db() as c:
+        c.execute(
+            "UPDATE dash_users SET password_hash=%s, must_change_pw=%s, failed_logins=0, locked_until=NULL, updated_at=%s WHERE id=%s",
+            (hash_password(body.senha), False, _now_utc().isoformat(), tok["user_id"]),
+        )
+        c.execute(
+            "UPDATE dash_user_tokens SET used_at=%s WHERE token_hash=%s",
+            (_now_utc().isoformat(), th),
+        )
+        urow = c.execute("SELECT * FROM dash_users WHERE id=%s", (tok["user_id"],)).fetchone()
+    _revoke_user_sessions(tok["user_id"])
+    audit(urow["email"] if urow else str(tok["user_id"]), "password.set", ip=_client_ip(request))
+    return {"ok": True}
+
+@app.post("/v1/auth/forgot")
+def auth_forgot(body: ForgotIn, request: Request):
+    email_norm = _norm_email(body.email)
+    with db() as c:
+        row = c.execute(
+            "SELECT * FROM dash_users WHERE lower(email)=%s AND status='active'", (email_norm,)
+        ).fetchone()
+    if row:
+        _send_password_token(dict(row), "reset_password")
+        audit(email_norm, "password.forgot", ip=_client_ip(request))
+    # Resposta sempre 200 — não revela existência da conta
+    return {"ok": True}
+
+# ===========================================================================
+# Endpoints — Gestão de logins do tenant (Admin Master do cliente)
+# ===========================================================================
+@app.get("/v1/tenant-users")
+def tenant_users_list(tenant: str, ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
+    with db() as c:
+        rows = c.execute(
+            "SELECT * FROM dash_users WHERE tenant_id=%s ORDER BY created_at", (tid,)
+        ).fetchall()
+    return {"users": [_user_public(dict(r)) for r in rows]}
+
+@app.post("/v1/tenant-users")
+def tenant_users_create(body: TenantUserCreate, tenant: str, request: Request,
+                        ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
+    if body.role not in CLIENT_ROLES:
+        raise HTTPException(400, "perfil inválido (use admin_master ou supervisor)")
+    email_norm = _norm_email(body.email)
+    if not email_norm or "@" not in email_norm:
+        raise HTTPException(400, "e-mail inválido")
+    if _email_taken(email_norm):
+        raise HTTPException(409, "e-mail já cadastrado")
+    tmp_hash = hash_password(_gen_secret())  # senha aleatória; usuário define via link de e-mail
+    with db() as c:
+        row = c.execute(
+            """INSERT INTO dash_users (tenant_id, email, password_hash, display_name, role, status, must_change_pw, created_by, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,%s,'active',%s,%s,%s,%s) RETURNING *""",
+            (tid, body.email.strip(), tmp_hash, body.display_name, body.role, True,
+             ctx.get("user_id"), _now_utc().isoformat(), _now_utc().isoformat()),
+        ).fetchone()
+    set_link = _send_password_token(dict(row), "set_password")
+    audit(ctx["email"], "tenant_user.create", target=email_norm, detail=f"tenant={tid};role={body.role}", ip=_client_ip(request))
+    return {"ok": True, "user": _user_public(dict(row)), "set_password_link": set_link}
+
+def _fetch_tenant_user(uid: int, tid: str, role: str) -> dict:
+    with db() as c:
+        if role == "wp_admin":
+            row = c.execute("SELECT * FROM dash_users WHERE id=%s", (uid,)).fetchone()
+        else:
+            row = c.execute("SELECT * FROM dash_users WHERE id=%s AND tenant_id=%s", (uid, tid)).fetchone()
+    if not row:
+        raise HTTPException(404, "usuário não encontrado")
+    return dict(row)
+
+@app.put("/v1/tenant-users/{uid}")
+def tenant_users_update(uid: int, body: TenantUserUpdate, tenant: str, request: Request,
+                        ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
+    user = _fetch_tenant_user(uid, tid, ctx["role"])
+    sets, params = [], []
+    if body.display_name is not None:
+        sets.append("display_name=%s"); params.append(body.display_name)
+    if body.role is not None:
+        if body.role not in CLIENT_ROLES:
+            raise HTTPException(400, "perfil inválido")
+        sets.append("role=%s"); params.append(body.role)
+    if body.status is not None:
+        if body.status not in ("active", "disabled"):
+            raise HTTPException(400, "status inválido")
+        sets.append("status=%s"); params.append(body.status)
+    if not sets:
+        raise HTTPException(400, "nada para atualizar")
+    sets.append("updated_at=%s"); params.append(_now_utc().isoformat())
+    params.append(uid)
+    with db() as c:
+        c.execute(f"UPDATE dash_users SET {', '.join(sets)} WHERE id=%s", tuple(params))
+    if body.status == "disabled":
+        _revoke_user_sessions(uid)
+    audit(ctx["email"], "tenant_user.update", target=user["email"], detail=str(body.dict(exclude_none=True)), ip=_client_ip(request))
+    return {"ok": True}
+
+@app.post("/v1/tenant-users/{uid}/block")
+def tenant_users_block(uid: int, tenant: str, request: Request,
+                       ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
+    user = _fetch_tenant_user(uid, tid, ctx["role"])
+    with db() as c:
+        c.execute("UPDATE dash_users SET status='disabled', updated_at=%s WHERE id=%s",
+                  (_now_utc().isoformat(), uid))
+    _revoke_user_sessions(uid)
+    audit(ctx["email"], "tenant_user.block", target=user["email"], ip=_client_ip(request))
+    return {"ok": True}
+
+@app.post("/v1/tenant-users/{uid}/reset-password")
+def tenant_users_reset(uid: int, tenant: str, request: Request,
+                       ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
+    user = _fetch_tenant_user(uid, tid, ctx["role"])
+    reset_link = _send_password_token(user, "reset_password")
+    audit(ctx["email"], "tenant_user.reset_password", target=user["email"], ip=_client_ip(request))
+    return {"ok": True, "reset_password_link": reset_link}
+
+@app.delete("/v1/tenant-users/{uid}")
+def tenant_users_delete(uid: int, tenant: str, request: Request,
+                        ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    # Soft-delete (regra do projeto): desativa + revoga sessões. Hard-delete só via /admin/users.
+    tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
+    user = _fetch_tenant_user(uid, tid, ctx["role"])
+    with db() as c:
+        c.execute("UPDATE dash_users SET status='disabled', updated_at=%s WHERE id=%s",
+                  (_now_utc().isoformat(), uid))
+    _revoke_user_sessions(uid)
+    audit(ctx["email"], "tenant_user.softdelete", target=user["email"], ip=_client_ip(request))
+    return {"ok": True, "mode": "soft"}
+
+# ===========================================================================
+# Endpoints — Gestão de logins pela plataforma (Admin WorkPulse, cross-tenant)
+# ===========================================================================
+@app.get("/v1/admin/users")
+def admin_users_list(ctx: Annotated[dict, Depends(require_role("wp_admin"))], tenant: str | None = None):
+    with db() as c:
+        if tenant:
+            rows = c.execute("SELECT * FROM dash_users WHERE tenant_id=%s ORDER BY created_at", (tenant,)).fetchall()
+        else:
+            rows = c.execute("SELECT * FROM dash_users ORDER BY tenant_id NULLS FIRST, created_at").fetchall()
+    return {"users": [_user_public(dict(r)) for r in rows]}
+
+@app.post("/v1/admin/users")
+def admin_users_create(body: AdminUserCreate, request: Request,
+                       ctx: Annotated[dict, Depends(require_role("wp_admin"))]):
+    if body.role not in ALL_ROLES:
+        raise HTTPException(400, "perfil inválido")
+    if body.role == "wp_admin":
+        tid = None
+    else:
+        if not body.tenant_id:
+            raise HTTPException(400, "tenant_id obrigatório para perfis de cliente")
+        with db() as c:
+            t = c.execute("SELECT id FROM tenants WHERE id=%s", (body.tenant_id,)).fetchone()
+        if not t:
+            raise HTTPException(404, "tenant não encontrado")
+        tid = body.tenant_id
+    email_norm = _norm_email(body.email)
+    if not email_norm or "@" not in email_norm:
+        raise HTTPException(400, "e-mail inválido")
+    if _email_taken(email_norm):
+        raise HTTPException(409, "e-mail já cadastrado")
+    tmp_hash = hash_password(_gen_secret())  # senha aleatória; usuário define via link de e-mail
+    with db() as c:
+        row = c.execute(
+            """INSERT INTO dash_users (tenant_id, email, password_hash, display_name, role, status, must_change_pw, created_by, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,%s,'active',%s,%s,%s,%s) RETURNING *""",
+            (tid, body.email.strip(), tmp_hash, body.display_name, body.role, True,
+             ctx.get("user_id"), _now_utc().isoformat(), _now_utc().isoformat()),
+        ).fetchone()
+    set_link = _send_password_token(dict(row), "set_password")
+    audit(ctx["email"], "admin_user.create", target=email_norm, detail=f"tenant={tid};role={body.role}", ip=_client_ip(request))
+    return {"ok": True, "user": _user_public(dict(row)), "set_password_link": set_link}
+
+@app.put("/v1/admin/users/{uid}")
+def admin_users_update(uid: int, body: TenantUserUpdate, request: Request,
+                       ctx: Annotated[dict, Depends(require_role("wp_admin"))]):
+    with db() as c:
+        row = c.execute("SELECT * FROM dash_users WHERE id=%s", (uid,)).fetchone()
+    if not row:
+        raise HTTPException(404, "usuário não encontrado")
+    sets, params = [], []
+    if body.display_name is not None:
+        sets.append("display_name=%s"); params.append(body.display_name)
+    if body.role is not None:
+        if body.role not in ALL_ROLES:
+            raise HTTPException(400, "perfil inválido")
+        sets.append("role=%s"); params.append(body.role)
+    if body.status is not None:
+        if body.status not in ("active", "disabled"):
+            raise HTTPException(400, "status inválido")
+        sets.append("status=%s"); params.append(body.status)
+    if not sets:
+        raise HTTPException(400, "nada para atualizar")
+    sets.append("updated_at=%s"); params.append(_now_utc().isoformat())
+    params.append(uid)
+    with db() as c:
+        c.execute(f"UPDATE dash_users SET {', '.join(sets)} WHERE id=%s", tuple(params))
+    if body.status == "disabled":
+        _revoke_user_sessions(uid)
+    audit(ctx["email"], "admin_user.update", target=row["email"], detail=str(body.dict(exclude_none=True)), ip=_client_ip(request))
+    return {"ok": True}
+
+@app.post("/v1/admin/users/{uid}/reset-password")
+def admin_users_reset(uid: int, request: Request,
+                      ctx: Annotated[dict, Depends(require_role("wp_admin"))]):
+    with db() as c:
+        row = c.execute("SELECT * FROM dash_users WHERE id=%s", (uid,)).fetchone()
+    if not row:
+        raise HTTPException(404, "usuário não encontrado")
+    reset_link = _send_password_token(dict(row), "reset_password")
+    audit(ctx["email"], "admin_user.reset_password", target=row["email"], ip=_client_ip(request))
+    return {"ok": True, "reset_password_link": reset_link}
+
+@app.delete("/v1/admin/users/{uid}")
+def admin_users_delete(uid: int, request: Request,
+                       ctx: Annotated[dict, Depends(require_role("wp_admin"))], hard: bool = False):
+    with db() as c:
+        row = c.execute("SELECT * FROM dash_users WHERE id=%s", (uid,)).fetchone()
+    if not row:
+        raise HTTPException(404, "usuário não encontrado")
+    _revoke_user_sessions(uid)
+    if hard:
+        with db() as c:
+            c.execute("DELETE FROM dash_users WHERE id=%s", (uid,))
+        audit(ctx["email"], "admin_user.harddelete", target=row["email"], ip=_client_ip(request))
+        return {"ok": True, "mode": "hard"}
+    with db() as c:
+        c.execute("UPDATE dash_users SET status='disabled', updated_at=%s WHERE id=%s",
+                  (_now_utc().isoformat(), uid))
+    audit(ctx["email"], "admin_user.softdelete", target=row["email"], ip=_client_ip(request))
+    return {"ok": True, "mode": "soft"}
+
+# ===========================================================================
+# Endpoints — Licenças do tenant (Admin Master: ver, alocar seats, solicitar)
+# ===========================================================================
+@app.get("/v1/tenant-license")
+def tenant_license_get(tenant: str, ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
+    with db() as c:
+        lic = c.execute(
+            "SELECT plan, seats, issued, expires, revoked FROM licenses WHERE tenant_id=%s ORDER BY issued DESC LIMIT 1",
+            (tid,),
+        ).fetchone()
+        alloc = c.execute("SELECT user_id FROM dash_seat_alloc WHERE tenant_id=%s", (tid,)).fetchall()
+        colabs = c.execute(
+            "SELECT user_id, display_name, email, department FROM users WHERE tenant_id=%s ORDER BY display_name",
+            (tid,),
+        ).fetchall()
+    allocated_ids = {a["user_id"] for a in alloc}
+    seats = int(lic["seats"]) if lic and lic.get("seats") is not None else 0
+    colaboradores = []
+    for r in colabs:
+        d = dict(r)
+        d["allocated"] = d["user_id"] in allocated_ids
+        colaboradores.append(d)
+    return {
+        "license": (dict(lic) if lic else None),
+        "seats": seats,
+        "allocated": len(allocated_ids),
+        "available": max(0, seats - len(allocated_ids)),
+        "colaboradores": colaboradores,
+    }
+
+@app.post("/v1/tenant-license/assign")
+def tenant_license_assign(body: SeatAssignIn, tenant: str, request: Request,
+                          ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
+    with db() as c:
+        lic = c.execute(
+            "SELECT seats FROM licenses WHERE tenant_id=%s ORDER BY issued DESC LIMIT 1", (tid,)
+        ).fetchone()
+        seats = int(lic["seats"]) if lic and lic.get("seats") is not None else 0
+        cur = c.execute("SELECT COUNT(*) AS n FROM dash_seat_alloc WHERE tenant_id=%s", (tid,)).fetchone()["n"]
+    if body.allocated:
+        if cur >= seats:
+            raise HTTPException(409, "todos os assentos (seats) da licença já estão em uso")
+        with db() as c:
+            c.execute(
+                "INSERT INTO dash_seat_alloc (tenant_id, user_id, allocated_at) VALUES (%s,%s,%s) ON CONFLICT (tenant_id, user_id) DO NOTHING",
+                (tid, body.user_id, _now_utc().isoformat()),
+            )
+        action = "assign"
+    else:
+        with db() as c:
+            c.execute("DELETE FROM dash_seat_alloc WHERE tenant_id=%s AND user_id=%s", (tid, body.user_id))
+        action = "unassign"
+    audit(ctx["email"], f"license.seat_{action}", target=body.user_id, detail=f"tenant={tid}", ip=_client_ip(request))
+    return {"ok": True}
+
+@app.post("/v1/tenant-license/request")
+def tenant_license_request(body: LicenseRequestIn, tenant: str, request: Request,
+                           ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
+    with db() as c:
+        c.execute(
+            """INSERT INTO dash_license_requests (tenant_id, requested_by, plan, seats, message, status, created_at)
+               VALUES (%s,%s,%s,%s,%s,'open',%s)""",
+            (tid, ctx["email"], body.plan, body.seats, body.message, _now_utc().isoformat()),
+        )
+    html = (
+        f"<p>Nova solicitação de licença.</p>"
+        f"<ul><li>Tenant: {tid}</li><li>Solicitante: {ctx['email']}</li>"
+        f"<li>Plano: {body.plan or '-'}</li><li>Seats: {body.seats or '-'}</li></ul>"
+        f"<p>Mensagem: {body.message or '-'}</p>"
+    )
+    try:
+        _send_email_html([PLATFORM_NOTIFY], f"WorkPulse — solicitação de licença ({tid})", html)
+    except Exception as exc:
+        print(f"[auth] AVISO: falha ao notificar plataforma: {exc}", flush=True)
+    audit(ctx["email"], "license.request", target=tid, detail=f"plan={body.plan};seats={body.seats}", ip=_client_ip(request))
+    return {"ok": True}
+
+
 
 # ---------------------------------------------------------------------------
 # Entry point

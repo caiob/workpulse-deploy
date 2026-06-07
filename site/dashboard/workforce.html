@@ -28,15 +28,68 @@
     <h2>Painel do Cliente</h2>
     <p>Acesso de gestor para acompanhar saúde, ritmo e atividade da equipe.</p>
     <input id="loginUrl" type="hidden" value="https://api.workpulse.com.br">
-    <label>Tenant</label>
-    <input id="loginTenant" placeholder="acme-corp">
-    <label>Token de acesso</label>
-    <input id="loginToken" type="password" placeholder="token do painel (fornecido pelo administrador)"
+    <label>E-mail</label>
+    <input id="loginEmail" type="email" autocomplete="username" placeholder="voce@suaempresa.com"
            onkeydown="if(event.key==='Enter') doLogin()">
-    <!-- Mensagem de erro (oculta inicialmente) -->
+    <label>Senha</label>
+    <input id="loginPassword" type="password" autocomplete="current-password" placeholder="sua senha"
+           onkeydown="if(event.key==='Enter') doLogin()">
     <div id="loginError" class="login-error"></div>
     <div style="margin-top: 20px">
       <button class="primary" style="width:100%" onclick="doLogin()">Entrar</button>
+    </div>
+    <div style="margin-top:12px;text-align:center">
+      <a href="javascript:void(0)" onclick="doForgot()" style="font-size:12px;color:var(--text-dim);text-decoration:underline">Esqueci minha senha</a>
+    </div>
+
+    <!-- Acesso técnico (break-glass): Tenant + Token, para suporte -->
+    <div style="margin-top:18px;border-top:1px solid var(--border);padding-top:10px;text-align:center">
+      <a href="javascript:void(0)" onclick="toggleTechAccess()" style="font-size:11px;color:var(--text-muted);text-decoration:underline">Acesso técnico (suporte)</a>
+    </div>
+    <div id="techAccess" style="display:none;margin-top:10px">
+      <label>Tenant</label>
+      <input id="loginTenant" placeholder="acme-corp">
+      <label>Token de acesso</label>
+      <input id="loginToken" type="password" placeholder="token técnico"
+             onkeydown="if(event.key==='Enter') doTechLogin()">
+      <div style="margin-top:12px">
+        <button class="primary" style="width:100%" onclick="doTechLogin()">Entrar (técnico)</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== MODAL: TROCAR SENHA ===== -->
+<div id="changePw" class="login-shade hide">
+  <div class="login-box">
+    <h2>Alterar senha</h2>
+    <p id="cpForcedMsg" style="display:none">Por segurança, defina uma nova senha para continuar.</p>
+    <label>Senha atual</label>
+    <input id="cpCurrent" type="password" autocomplete="current-password">
+    <label>Nova senha</label>
+    <input id="cpNew" type="password" autocomplete="new-password" placeholder="mín. 10 caracteres, 3 de 4 tipos">
+    <label>Confirmar nova senha</label>
+    <input id="cpNew2" type="password" autocomplete="new-password" onkeydown="if(event.key==='Enter') submitChangePassword()">
+    <div id="cpError" class="login-error"></div>
+    <div style="margin-top:18px;display:flex;gap:8px">
+      <button class="primary" style="flex:1" onclick="submitChangePassword()">Salvar</button>
+      <button class="ghost" style="flex:1" onclick="_closeChangePassword()">Cancelar</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== MODAL: DEFINIR SENHA (link de e-mail) ===== -->
+<div id="setPw" class="login-shade hide">
+  <div class="login-box">
+    <h2>Definir senha de acesso</h2>
+    <p>Crie a senha do seu acesso ao Painel WorkPulse.</p>
+    <label>Nova senha</label>
+    <input id="spNew" type="password" autocomplete="new-password" placeholder="mín. 10 caracteres, 3 de 4 tipos">
+    <label>Confirmar senha</label>
+    <input id="spNew2" type="password" autocomplete="new-password" onkeydown="if(event.key==='Enter') submitSetPassword()">
+    <div id="spError" class="login-error"></div>
+    <div style="margin-top:18px">
+      <button class="primary" style="width:100%" onclick="submitSetPassword()">Definir senha</button>
     </div>
   </div>
 </div>
@@ -109,6 +162,12 @@
         </div>
 
         <div class="acct-sep"></div>
+
+        <!-- Usuário logado -->
+        <div class="acct-row">
+          <span class="acct-lbl">Usuário</span>
+          <span class="acct-val" id="acctUserName" style="text-align:right;min-width:0;overflow:hidden;text-overflow:ellipsis">—</span>
+        </div>
 
         <!-- Plano e seats -->
         <div class="acct-row">
@@ -599,6 +658,65 @@
       </div>
     </div>
 
+    <!-- Card: Minha conta -->
+    <div class="card no-bar" style="margin-bottom:18px">
+      <h3>Minha conta</h3>
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:8px">
+        <button class="primary" onclick="_openChangePassword(false)">Alterar minha senha</button>
+        <span style="color:var(--text-dim);font-size:13px">Atualize a senha do seu acesso ao painel.</span>
+      </div>
+    </div>
+
+    <!-- Card: Usuários do Painel (somente Admin Master) -->
+    <div class="card no-bar" style="margin-bottom:18px" data-role="admin_master">
+      <h3>Usuários do Painel</h3>
+      <p style="font-size:12px;color:var(--text-dim);margin:4px 0 14px">
+        Cadastre quem acessa o painel. O usuário recebe um e-mail com link para definir a própria senha.
+        <strong>Admin Master</strong> gerencia tudo; <strong>Supervisor</strong> visualiza e edita regras/relatórios.
+      </p>
+      <div class="config-form" style="margin-bottom:12px">
+        <div><label>Nome</label><input id="duName" placeholder="Nome do usuário" style="min-width:180px"></div>
+        <div><label>E-mail</label><input id="duEmail" type="email" placeholder="usuario@empresa.com" style="min-width:200px"></div>
+        <div><label>Perfil</label>
+          <select id="duRole">
+            <option value="supervisor">Supervisor</option>
+            <option value="admin_master">Admin Master</option>
+          </select>
+        </div>
+        <div><label>&nbsp;</label><button class="primary" onclick="duCreate()">Cadastrar e enviar link</button></div>
+      </div>
+      <div id="duError" class="login-error" style="display:none"></div>
+      <div id="duLinkBox" style="display:none;margin:10px 0 4px;padding:12px;border:1px solid var(--border);border-radius:8px;background:var(--bg-2)">
+        <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px">Link para definir a senha (válido por 48h) — <span id="duLinkFor"></span></div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <input id="duLink" readonly onclick="this.select()" style="flex:1;background:var(--bg-1,#0f1530);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:12px">
+          <button class="primary" onclick="duCopyLink()">Copiar</button>
+        </div>
+      </div>
+      <table id="duTable">
+        <thead><tr><th>Nome</th><th>E-mail</th><th>Perfil</th><th>Status</th><th></th></tr></thead>
+        <tbody><tr><td colspan="5" style="color:var(--text-muted);font-size:13px">Carregando...</td></tr></tbody>
+      </table>
+    </div>
+
+    <!-- Card: Licença (somente Admin Master) -->
+    <div class="card no-bar" style="margin-bottom:18px" data-role="admin_master">
+      <h3>Licença</h3>
+      <div id="licSummary" style="display:flex;gap:24px;flex-wrap:wrap;margin:8px 0 14px;font-size:14px">
+        <span style="color:var(--text-dim)">Carregando...</span>
+      </div>
+      <p style="font-size:12px;color:var(--text-dim);margin:0 0 8px">
+        Marque quais colaboradores ocupam um assento (seat) da licença. Emissão de novas licenças é feita pela WorkPulse.
+      </p>
+      <div id="licSeats"></div>
+      <div style="margin-top:14px;display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+        <div><label style="font-size:12px;color:var(--text-dim)">Plano desejado</label><br><input id="licReqPlan" placeholder="ex: business" style="min-width:140px"></div>
+        <div><label style="font-size:12px;color:var(--text-dim)">Seats desejados</label><br><input id="licReqSeats" type="number" min="1" style="min-width:90px"></div>
+        <div style="flex:1;min-width:180px"><label style="font-size:12px;color:var(--text-dim)">Mensagem</label><br><input id="licReqMsg" placeholder="opcional" style="width:100%;box-sizing:border-box"></div>
+        <div><button class="primary" onclick="licRequest()">Solicitar upgrade</button></div>
+      </div>
+    </div>
+
     <!-- Nova Regra -->
     <div class="card no-bar" style="margin-bottom:18px">
       <h3>Nova Regra de Produtividade</h3>
@@ -793,34 +911,20 @@
 <div id="toast" class="toast hide"></div>
 
 <!-- ===== MÓDULOS JS (defer: executam após parse do DOM, em ordem) ===== -->
-<script src="js/wp-core.js?v=16" defer></script>
-<script src="js/wp-datepicker.js?v=16" defer></script>
-<script src="js/wp-overview.js?v=16" defer></script>
-<script src="js/wp-people.js?v=16" defer></script>
-<script src="js/wp-departments.js?v=16" defer></script>
-<script src="js/wp-analytics.js?v=16" defer></script>
-<script src="js/wp-events.js?v=16" defer></script>
-<script src="js/wp-internet.js?v=16" defer></script>
-<script src="js/wp-jornada.js?v=16" defer></script>
-<script src="js/wp-settings.js?v=16" defer></script>
-<script src="js/wp-reports.js?v=16" defer></script>
-<script src="js/wp-nav.js?v=16" defer></script>
-<script src="js/wp-auth.js?v=16" defer></script>
+<script src="js/wp-core.js?v=17" defer></script>
+<script src="js/wp-datepicker.js?v=17" defer></script>
+<script src="js/wp-overview.js?v=17" defer></script>
+<script src="js/wp-people.js?v=17" defer></script>
+<script src="js/wp-departments.js?v=17" defer></script>
+<script src="js/wp-analytics.js?v=17" defer></script>
+<script src="js/wp-events.js?v=17" defer></script>
+<script src="js/wp-internet.js?v=17" defer></script>
+<script src="js/wp-jornada.js?v=17" defer></script>
+<script src="js/wp-settings.js?v=17" defer></script>
+<script src="js/wp-users.js?v=18" defer></script>
+<script src="js/wp-reports.js?v=17" defer></script>
+<script src="js/wp-nav.js?v=17" defer></script>
+<script src="js/wp-auth.js?v=18" defer></script>
 
-<!-- Mobile: relabela apenas o TEXTO exibido da opção "off" do auto-refresh.
-     Não altera o value ("0") nem a lógica de setAutoRefresh(). -->
-<script>
-document.addEventListener('DOMContentLoaded', function () {
-  var sel = document.getElementById('autoRefreshSel');
-  if (!sel) return;
-  var opt = sel.querySelector('option[value="0"]');
-  if (!opt) return;
-  var mq = window.matchMedia('(max-width: 768px)');
-  function apply() { opt.textContent = mq.matches ? 'Refresh Off' : 'Desativado'; }
-  apply();
-  if (mq.addEventListener) mq.addEventListener('change', apply);
-  else if (mq.addListener) mq.addListener(apply);
-});
-</script>
 </body>
 </html>

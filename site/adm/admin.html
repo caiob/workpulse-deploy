@@ -3,12 +3,13 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<base href="/adm/">
 <title>WorkPulse — Administração da Plataforma</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-<link rel="stylesheet" href="css/admin.css?v=1">
+<link rel="stylesheet" href="css/admin.css?v=2">
 <link rel="icon" type="image/jpeg" href="../assets/logo-workpulse.jpeg">
 </head>
 <body>
@@ -36,10 +37,10 @@
   </div>
   <nav class="tabs">
     <button class="active" data-tab="overview"><span class="num">01</span>Visão</button>
-    <button data-tab="tenants"><span class="num">02</span>Tenants</button>
-    <button data-tab="licenses"><span class="num">03</span>Licenças</button>
-    <button data-tab="system"><span class="num">04</span>Sistema</button>
-    <button data-tab="audit"><span class="num">05</span>Auditoria</button>
+    <button data-tab="tenants"><span class="num">02</span>Tenants &amp; Licenças</button>
+    <button data-tab="system"><span class="num">03</span>Sistema</button>
+    <button data-tab="audit"><span class="num">04</span>Auditoria</button>
+    <button data-tab="logins"><span class="num">05</span>Logins</button>
   </nav>
   <div class="actions">
     <div class="adm-wrap" id="admWrap">
@@ -172,7 +173,7 @@
       <div class="card span-6">
         <div class="h3-row">
           <h3 class="inline">Licenças expirando &lt; 30 dias</h3>
-          <button class="ghost" onclick="document.querySelector('[data-tab=licenses]').click()">ver todas →</button>
+          <button class="ghost" onclick="document.querySelector('[data-tab=tenants]').click()">ver todas →</button>
         </div>
         <table id="expiringTable">
           <thead><tr><th>License ID</th><th>Tenant</th><th class="num">Dias</th><th class="num">Seats</th></tr></thead>
@@ -184,9 +185,9 @@
 
   <!-- TENANTS -->
   <section id="tab-tenants" class="hide">
-    <div class="crumb">platform <span class="sep">/</span> tenants</div>
-    <h1 class="page-title">Tenants</h1>
-    <p class="page-sub">Todas as empresas registradas na instância. Cada linha representa uma empresa cliente isolada.</p>
+    <div class="crumb">platform <span class="sep">/</span> tenants &amp; licenças</div>
+    <h1 class="page-title">Tenants &amp; Licenças</h1>
+    <p class="page-sub">Empresas registradas e as licenças de cada uma. Clique numa empresa para expandir e gerenciar suas licenças (datas, dias restantes, revogar).</p>
 
     <div class="card" style="margin-bottom: 16px">
       <div class="h3-row"><h3 class="inline">Criar empresa (emitir licença)</h3></div>
@@ -234,23 +235,51 @@
       </div>
     </div>
 
+    <div class="grid" style="margin-bottom: 14px">
+      <div class="card span-3 tight">
+        <h3>Licenças emitidas</h3>
+        <div class="stat" id="tlTotal">—</div>
+      </div>
+      <div class="card span-3 tight">
+        <h3>Ativas</h3>
+        <div class="stat" id="tlActive" style="color: var(--accent)">—</div>
+      </div>
+      <div class="card span-3 tight">
+        <h3>Expirando ≤30d</h3>
+        <div class="stat" id="tlExpSoon" style="color: var(--warn)">—</div>
+      </div>
+      <div class="card span-3 tight">
+        <h3>Revogadas / expiradas</h3>
+        <div class="stat" id="tlDead" style="color: var(--danger)">—</div>
+      </div>
+    </div>
+
     <div class="toolbar">
       <label>Buscar</label>
-      <input id="tenantFilter" oninput="renderTenants()" placeholder="id ou nome">
+      <input id="tlSearch" oninput="renderTenantsLicenses()" placeholder="id ou nome da empresa">
       <label style="margin-left: 16px">Plano</label>
-      <select id="tenantPlanFilter" onchange="renderTenants()">
+      <select id="tlPlanFilter" onchange="renderTenantsLicenses()">
         <option value="">todos</option>
         <option>starter</option><option>business</option><option>enterprise</option>
       </select>
+      <label style="margin-left: 16px">Licenças</label>
+      <select id="tlStatusFilter" onchange="renderTenantsLicenses()">
+        <option value="all">todas</option>
+        <option value="active">ativas</option>
+        <option value="expiring">expirando (≤30d)</option>
+        <option value="expired">expiradas</option>
+        <option value="revoked">revogadas</option>
+      </select>
       <div class="spacer"></div>
-      <span class="mono" style="color: var(--text-muted); font-size: 11px" id="tenantCount">—</span>
-      <button class="ghost" onclick="loadTenants()">↻ refresh</button>
+      <span class="mono" style="color: var(--text-muted); font-size: 11px" id="tlCount">—</span>
+      <button class="ghost" onclick="loadTenantsLicenses()">↻ refresh</button>
     </div>
 
     <div class="card tight">
-      <table id="tenantsTable">
+      <table id="tlTable">
         <thead>
           <tr>
+            <th style="width:28px"></th>
             <th>ID</th><th>Nome</th><th>Plano</th><th>Status</th>
             <th class="num">Usuários</th><th class="num">Devices</th>
             <th class="num">Licenças</th><th>Criado em</th><th>Última atividade</th>
@@ -259,61 +288,6 @@
         </thead>
         <tbody></tbody>
       </table>
-    </div>
-  </section>
-
-  <!-- LICENSES -->
-  <section id="tab-licenses" class="hide">
-    <div class="crumb">platform <span class="sep">/</span> licenses</div>
-    <h1 class="page-title">Inventário de licenças</h1>
-    <p class="page-sub">Todas as licenças emitidas na instância. Use os filtros para isolar licenças críticas (expirando, revogadas).</p>
-
-    <div class="toolbar">
-      <label>Tenant</label>
-      <input id="licTenantFilter" oninput="renderLicenses()" placeholder="tenant_id">
-      <label style="margin-left: 16px">Status</label>
-      <select id="licStatusFilter" onchange="renderLicenses()">
-        <option value="all">todas</option>
-        <option value="active">ativas</option>
-        <option value="expiring">expirando (≤30d)</option>
-        <option value="expired">expiradas</option>
-        <option value="revoked">revogadas</option>
-      </select>
-      <div class="spacer"></div>
-      <span class="mono" style="color: var(--text-muted); font-size: 11px" id="licCount">—</span>
-      <button class="ghost" onclick="loadLicenses()">↻ refresh</button>
-    </div>
-
-    <div class="grid">
-      <div class="card span-3 tight">
-        <h3>Total emitidas</h3>
-        <div class="stat" id="licTotal">—</div>
-      </div>
-      <div class="card span-3 tight">
-        <h3>Ativas</h3>
-        <div class="stat" id="licActive" style="color: var(--accent)">—</div>
-      </div>
-      <div class="card span-3 tight">
-        <h3>Expirando ≤30d</h3>
-        <div class="stat" id="licExpSoon" style="color: var(--warn)">—</div>
-      </div>
-      <div class="card span-3 tight">
-        <h3>Revogadas / expiradas</h3>
-        <div class="stat" id="licDead" style="color: var(--danger)">—</div>
-      </div>
-
-      <div class="card span-12 tight">
-        <table id="licensesTable">
-          <thead>
-            <tr>
-              <th>License ID</th><th>Tenant</th><th>Plano</th>
-              <th class="num">Seats</th><th>Emitida</th><th>Expira</th>
-              <th class="num">Dias restantes</th><th>Status</th><th></th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-      </div>
     </div>
   </section>
 
@@ -391,10 +365,53 @@
   </section>
 
   <p class="footnote">workpulse platform admin · super-admin scope · all actions are audited</p>
+  <section id="tab-logins" class="hide">
+    <div class="crumb">platform <span class="sep">/</span> logins dos clientes</div>
+    <h1 class="page-title">Logins dos clientes</h1>
+    <p class="page-sub">Gerencie os acessos ao Painel do Cliente de qualquer tenant. Crie o 1º Admin Master, redefina senhas, bloqueie ou exclua. Todas as ações são auditadas.</p>
+
+    <div class="card" style="margin-bottom:18px">
+      <h3 style="margin-top:0">Novo login</h3>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+        <div><label style="font-size:12px;color:var(--muted,#8c97c4)">Cliente (Tenant)</label><br><select id="clTenant" style="min-width:200px"><option value="">— selecione —</option></select></div>
+        <div><label style="font-size:12px;color:var(--muted,#8c97c4)">Nome</label><br><input id="clName" placeholder="Nome"></div>
+        <div><label style="font-size:12px;color:var(--muted,#8c97c4)">E-mail</label><br><input id="clEmail" type="email" placeholder="usuario@empresa.com"></div>
+        <div><label style="font-size:12px;color:var(--muted,#8c97c4)">Perfil</label><br>
+          <select id="clRole">
+            <option value="admin_master">Admin Master (cliente)</option>
+            <option value="supervisor">Supervisor (cliente)</option>
+          </select>
+        </div>
+        <div><button class="primary" onclick="clCreate()">Criar e enviar link</button></div>
+      </div>
+      <p style="font-size:12px;color:var(--muted,#8c97c4);margin:8px 0 0">O usuário recebe um e-mail com link para definir a própria senha. O link também aparece abaixo, para você copiar e enviar manualmente ou testar.</p>
+      <div id="clError" style="color:var(--danger,#f87171);font-size:13px;margin-top:8px;display:none"></div>
+      <div id="clLinkBox" style="display:none;margin-top:12px;padding:12px;border:1px solid var(--border,#243070);border-radius:8px;background:rgba(108,140,255,.06)">
+        <div style="font-size:12px;color:var(--muted,#8c97c4);margin-bottom:6px">Link de definição de senha (válido por 48h) — <span id="clLinkFor"></span></div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <input id="clLink" readonly onclick="this.select()" style="flex:1;font-family:var(--mono,monospace);font-size:12px">
+          <button class="primary" onclick="clCopyLink()">Copiar</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div style="display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
+        <input id="clFilter" oninput="clRender()" placeholder="filtrar por e-mail, tenant ou perfil..." style="flex:1;min-width:220px">
+        <span id="clCount" style="font-size:12px;color:var(--muted,#8c97c4)"></span>
+        <button class="ghost" onclick="loadLogins()">recarregar</button>
+      </div>
+      <table id="clTable">
+        <thead><tr><th>Tenant</th><th>Nome</th><th>E-mail</th><th>Perfil</th><th>Status</th><th></th></tr></thead>
+        <tbody><tr><td colspan="6" class="empty">Carregando...</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
 </main>
 
 <div id="toast" class="toast hide"></div>
 
-<script src="js/admin.js?v=1"></script>
+<script src="js/admin.js?v=5"></script>
 </body>
 </html>

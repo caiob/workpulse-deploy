@@ -6,8 +6,14 @@
 /* ---------- State global ---------- */
 const state = {
   url:          localStorage.getItem('wp_url')    || 'https://api.workpulse.com.br',
-  tenant:       localStorage.getItem('wp_tenant') || '',
-  token:        localStorage.getItem('wp_token')  || '',
+  tenant:       '',          // derivado do login (e-mail/senha) ou informado no acesso técnico
+  token:        '',          // sentinela de sessão ('__session__') OU token de acesso técnico (break-glass)
+  breakGlass:   false,       // true quando o acesso é por tenant+token (suporte)
+  authed:       false,
+  role:         '',          // 'admin_master' | 'supervisor' | 'wp_admin'
+  email:        '',
+  displayName:  '',
+  mustChangePw: false,
   charts:       {},
   people:       [],
   lastOverview: null,
@@ -163,6 +169,20 @@ function _cancelPending() {
 }
 
 /* ---------- API (GET com token + timeout 90s) ---------- */
+function _authHeaders(extra) {
+  // Sessão por cookie é enviada automaticamente (credentials:'include').
+  // Só mandamos X-Admin-Token no acesso técnico (break-glass).
+  const h = extra ? { ...extra } : {};
+  if (state.breakGlass && state.token && state.token !== '__session__') {
+    h['X-Admin-Token'] = state.token;
+  }
+  return h;
+}
+
+function _onAuthFail() {
+  if (typeof _handleAuthFail === 'function') _handleAuthFail();
+}
+
 async function api(path, signal) {
   const timeout = new AbortController();
   const tid     = setTimeout(() => timeout.abort(), 90000);
@@ -172,10 +192,12 @@ async function api(path, signal) {
   _showLoader();
   try {
     const r = await fetch(state.url + path, {
-      headers: { 'X-Admin-Token': state.token },
-      signal:  combined,
+      headers:     _authHeaders(),
+      credentials: 'include',
+      signal:      combined,
     });
     clearTimeout(tid);
+    if (r.status === 401) { _onAuthFail(); throw new Error('401: sessão expirada'); }
     if (!r.ok) {
       const t = await r.text().catch(() => r.statusText);
       throw new Error(`${r.status}: ${t}`);
@@ -195,9 +217,11 @@ async function apiFetch(method, path, body) {
   try {
     const r = await fetch(state.url + path, {
       method,
-      headers: { 'X-Admin-Token': state.token, 'Content-Type': 'application/json' },
+      headers:     _authHeaders({ 'Content-Type': 'application/json' }),
+      credentials: 'include',
       body: body ? JSON.stringify(body) : undefined,
     });
+    if (r.status === 401) { _onAuthFail(); throw new Error('Sessão expirada'); }
     if (!r.ok) { const t = await r.text(); throw new Error(t); }
     return r.json().catch(() => ({}));
   } finally {
