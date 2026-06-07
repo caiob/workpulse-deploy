@@ -3207,24 +3207,16 @@ def tenant_license_get(tenant: str, ctx: Annotated[dict, Depends(require_role("a
             "SELECT plan, seats, issued, expires, revoked FROM licenses WHERE tenant_id=%s ORDER BY issued DESC LIMIT 1",
             (tid,),
         ).fetchone()
-        alloc = c.execute("SELECT user_id FROM dash_seat_alloc WHERE tenant_id=%s", (tid,)).fetchall()
-        colabs = c.execute(
-            "SELECT user_id, display_name, email, department FROM users WHERE tenant_id=%s ORDER BY display_name",
-            (tid,),
-        ).fetchall()
-    allocated_ids = {a["user_id"] for a in alloc}
+        # Consumo real = colaboradores monitorados (mesma lógica de /v1/license/info)
+        used = c.execute(
+            "SELECT COUNT(DISTINCT user_id) AS n FROM users WHERE tenant_id=%s", (tid,)
+        ).fetchone()["n"]
     seats = int(lic["seats"]) if lic and lic.get("seats") is not None else 0
-    colaboradores = []
-    for r in colabs:
-        d = dict(r)
-        d["allocated"] = d["user_id"] in allocated_ids
-        colaboradores.append(d)
     return {
         "license": (dict(lic) if lic else None),
         "seats": seats,
-        "allocated": len(allocated_ids),
-        "available": max(0, seats - len(allocated_ids)),
-        "colaboradores": colaboradores,
+        "used": used,
+        "available": max(0, seats - used),
     }
 
 @app.post("/v1/tenant-license/assign")

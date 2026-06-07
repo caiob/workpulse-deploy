@@ -327,6 +327,13 @@ function _licBadge(l) {
     : '<span class="badge ok">ativa</span>';
 }
 
+// Cor de realce da validade (vermelho=vencida/revogada, âmbar=<=30d).
+function _licColor(l) {
+  if (l.revoked || l.expired) return 'var(--danger)';
+  if (l.days_remaining !== null && l.days_remaining <= 30) return '#f59e0b';
+  return '';
+}
+
 // Expande / recolhe a linha de licenças de uma empresa.
 function _tlToggle(id) {
   const d = document.querySelector('.tl-detail[data-detail="' + id + '"]');
@@ -392,8 +399,8 @@ function renderTenantsLicenses() {
                   <td>${planBadge(l.plan)}</td>
                   <td class="num">${fmtNum(l.seats)}</td>
                   <td>${fmtDate(l.issued)}</td>
-                  <td>${fmtDate(l.expires)}</td>
-                  <td class="num mono">${l.days_remaining !== null ? l.days_remaining : '—'}</td>
+                  <td style="color:${_licColor(l)}">${fmtDate(l.expires)}</td>
+                  <td class="num mono" style="color:${_licColor(l)}">${l.days_remaining !== null ? l.days_remaining + 'd' : '—'}</td>
                   <td>${_licBadge(l)}</td>
                   <td>${l.revoked ? '' : `<button class="ghost" onclick="revokeLic('${l.lic_id}')">revogar</button>`}</td>
                 </tr>`).join('')}

@@ -113,18 +113,31 @@ async function loadLicense() {
   try {
     const d   = await api('/v1/tenant-license?tenant=' + encodeURIComponent(state.tenant));
     const lic = d.license || {};
+    const used = d.used || 0, seats = d.seats || 0, avail = (d.available != null ? d.available : Math.max(0, seats - used));
+    // Validade com ANO + dias restantes (vermelho se vencida, âmbar se <= 30 dias)
+    let expStr = '—', expColor = 'inherit', expLabel = '';
+    if (lic.expires) {
+      const exp = new Date(lic.expires);
+      expStr = exp.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
+      const daysLeft = Math.ceil((exp - Date.now()) / 86400000);
+      if (daysLeft < 0)        { expColor = 'var(--danger)';  expLabel = ' (vencida)'; }
+      else if (daysLeft <= 30) { expColor = '#f59e0b';        expLabel = ` (${daysLeft} dias)`; }
+      else                     { expLabel = ` (${daysLeft} dias)`; }
+    }
     sum.innerHTML =
       `<span><strong>Plano:</strong> ${escHtml(lic.plan || '—')}</span>` +
-      `<span><strong>Assentos:</strong> ${d.allocated} / ${d.seats}</span>` +
-      `<span><strong>Disponíveis:</strong> ${d.available}</span>` +
-      `<span><strong>Validade:</strong> ${lic.expires ? ptDate(lic.expires) : '—'}</span>`;
-    const cs = d.colaboradores || [];
-    seatsBox.innerHTML = cs.length
-      ? cs.map(c => `<label style="display:inline-flex;align-items:center;gap:6px;margin:4px 14px 4px 0;font-size:13px">
-          <input type="checkbox" ${c.allocated ? 'checked' : ''} onchange="licAssign('${escHtml(c.user_id)}', this.checked)">
-          ${escHtml(c.display_name || c.user_id)}
-        </label>`).join('')
-      : '<span style="color:var(--text-muted);font-size:13px">Nenhum colaborador encontrado.</span>';
+      `<span><strong>Colaboradores:</strong> ${used} / ${seats}</span>` +
+      `<span><strong>Disponíveis:</strong> ${avail}</span>` +
+      `<span style="color:${expColor}"><strong>Validade:</strong> ${expStr}${expLabel}</span>`;
+    if (seatsBox) {
+      const pct = seats ? Math.round((used / seats) * 100) : 0;
+      const barW = Math.min(100, pct);
+      seatsBox.innerHTML =
+        `<div style="font-size:13px;color:var(--text-dim);margin-bottom:6px">${used} de ${seats} assentos em uso (${pct}%) — contagem automática pelos colaboradores monitorados.</div>` +
+        `<div style="height:8px;background:var(--bg-1,#0f1530);border:1px solid var(--border);border-radius:6px;overflow:hidden;max-width:420px">
+           <div style="height:100%;width:${barW}%;background:var(--primary,#3b5bdb)"></div>
+         </div>`;
+    }
   } catch (e) {
     sum.innerHTML = '<span style="color:var(--danger)">Erro ao carregar licença: ' + escHtml(e.message) + '</span>';
   }
