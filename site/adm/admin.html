@@ -29,6 +29,35 @@
   </div>
 </div>
 
+<!-- ===== MODAL: EDITAR LICENÇA ===== -->
+<div id="licEditModal" class="login-shade hide">
+  <div class="login-box">
+    <div class="crumb">licença <span class="sep">·</span> <span id="leLicId" class="mono"></span></div>
+    <h2>Editar licença</h2>
+    <p id="leTenant" style="font-size:12px;color:var(--text-muted)"></p>
+    <label>Plano</label>
+    <select id="lePlan" class="fld">
+      <option value="starter">starter</option>
+      <option value="business">business</option>
+      <option value="enterprise">enterprise</option>
+    </select>
+    <label>Licenças (seats)</label>
+    <input id="leSeats" class="fld" type="number" min="1">
+    <label>Validade (data)</label>
+    <input id="leExpires" class="fld" type="date">
+    <div style="display:flex;gap:8px;margin:8px 0">
+      <button class="ghost" onclick="leAddDays(30)">+30 dias</button>
+      <button class="ghost" onclick="leAddDays(365)">+1 ano</button>
+    </div>
+    <div id="leError" class="login-error"></div>
+    <p style="font-size:11px;color:var(--text-muted);margin:6px 0 0">As alterações valem no banco imediatamente. O token instalado nos agentes não muda — nada precisa ser reinstalado.</p>
+    <div style="display:flex;gap:8px;margin-top:14px">
+      <button class="primary" onclick="leSave()">Salvar</button>
+      <button class="ghost" onclick="leClose()">Fechar</button>
+    </div>
+  </div>
+</div>
+
 <header class="topbar">
   <div class="brand">
     <img src="../assets/logo-workpulse.jpeg" alt="WorkPulse" class="brand-logo">
@@ -412,6 +441,6 @@
 
 <div id="toast" class="toast hide"></div>
 
-<script src="js/admin.js?v=6"></script>
+<script src="js/admin.js?v=8"></script>
 </body>
 </html>

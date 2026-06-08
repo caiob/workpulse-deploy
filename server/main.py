@@ -688,15 +688,23 @@ def validate_agent_token(token: str, tenant_header: str) -> dict:
 
     if claims.get("tenant") != tenant_header:
         raise HTTPException(status_code=401, detail="tenant mismatch")
-    if dt.datetime.fromisoformat(claims["expires"].replace("Z", "+00:00")) < dt.datetime.now(dt.timezone.utc):
-        raise HTTPException(status_code=403, detail="license expired")
 
     with db() as c:
         row = c.execute(
-            "SELECT revoked FROM licenses WHERE lic_id = %s", (claims["lic"],)
+            "SELECT revoked, expires FROM licenses WHERE lic_id = %s", (claims["lic"],)
         ).fetchone()
-        if row and row["revoked"]:
-            raise HTTPException(status_code=403, detail="license revoked")
+    if row and row["revoked"]:
+        raise HTTPException(status_code=403, detail="license revoked")
+    # Expiração autoritativa pelo banco (editável no ADM); cai para o claim se ausente.
+    exp_src = (row["expires"] if (row and row.get("expires")) else claims.get("expires"))
+    try:
+        exp_dt = dt.datetime.fromisoformat(str(exp_src).replace("Z", "+00:00"))
+        if exp_dt.tzinfo is None:
+            exp_dt = exp_dt.replace(tzinfo=dt.timezone.utc)
+    except Exception:
+        exp_dt = dt.datetime.fromisoformat(claims["expires"].replace("Z", "+00:00"))
+    if exp_dt < dt.datetime.now(dt.timezone.utc):
+        raise HTTPException(status_code=403, detail="license expired")
     return claims
 
 
@@ -3268,6 +3276,72 @@ def tenant_license_request(body: LicenseRequestIn, tenant: str, request: Request
     audit(ctx["email"], "license.request", target=tid, detail=f"plan={body.plan};seats={body.seats}", ip=_client_ip(request))
     return {"ok": True}
 
+
+
+# ===========================================================================
+# Edição de licença (ADM): seats, validade e plano
+# ===========================================================================
+class LicenseEditRequest(BaseModel):
+    plan: str | None = None
+    seats: int | None = None
+    expires: str | None = None   # 'YYYY-MM-DD' ou ISO completo
+    add_days: int | None = None  # alternativa: estender N dias a partir da validade atual
+
+
+@app.patch("/v1/admin/licenses/{lic_id}", dependencies=[Depends(require_admin)])
+def admin_edit_license(lic_id: str, req: LicenseEditRequest, request: Request):
+    with db() as c:
+        row = c.execute("SELECT * FROM licenses WHERE lic_id=%s", (lic_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "licença não encontrada")
+    lic = dict(row)
+    if lic.get("revoked"):
+        raise HTTPException(400, "licença revogada não pode ser editada")
+
+    new_plan  = (req.plan or lic["plan"] or "business").strip()
+    new_seats = int(req.seats) if req.seats is not None else int(lic["seats"])
+    if new_seats < 1:
+        raise HTTPException(400, "a quantidade de seats deve ser >= 1")
+
+    try:
+        cur_exp = dt.datetime.fromisoformat(str(lic["expires"]).replace("Z", "+00:00"))
+        if cur_exp.tzinfo is None:
+            cur_exp = cur_exp.replace(tzinfo=dt.timezone.utc)
+    except Exception:
+        cur_exp = dt.datetime.now(dt.timezone.utc)
+
+    if req.expires:
+        try:
+            ne = req.expires.strip()
+            if len(ne) == 10:  # 'YYYY-MM-DD' → fim do dia em UTC
+                ne = ne + "T23:59:59+00:00"
+            new_exp = dt.datetime.fromisoformat(ne.replace("Z", "+00:00"))
+            if new_exp.tzinfo is None:
+                new_exp = new_exp.replace(tzinfo=dt.timezone.utc)
+        except Exception:
+            raise HTTPException(400, "data de validade inválida (use AAAA-MM-DD)")
+    elif req.add_days:
+        new_exp = cur_exp + dt.timedelta(days=int(req.add_days))
+    else:
+        new_exp = cur_exp
+
+    exp_iso = new_exp.isoformat().replace("+00:00", "Z")
+    # IMPORTANTE: o token assinado instalado nos agentes NÃO é alterado aqui.
+    # Plano e seats são metadados no banco; a validade é autoritativa pelo banco
+    # (heartbeat e ingestão já leem daqui). Por isso editar a licença NÃO exige
+    # reinstalar nem redistribuir token nos agentes da ponta.
+    with db() as c:
+        c.execute(
+            "UPDATE licenses SET plan=%s, seats=%s, expires=%s WHERE lic_id=%s",
+            (new_plan, new_seats, exp_iso, lic_id),
+        )
+        c.execute("UPDATE tenants SET plan=%s WHERE id=%s", (new_plan, lic["tenant_id"]))
+    audit("admin", "license.edit", target=lic_id,
+          detail=f"plan={new_plan};seats={new_seats};expires={exp_iso}", ip=_client_ip(request))
+    return {
+        "ok": True, "lic_id": lic_id, "tenant_id": lic["tenant_id"],
+        "plan": new_plan, "seats": new_seats, "expires": exp_iso,
+    }
 
 
 # ---------------------------------------------------------------------------

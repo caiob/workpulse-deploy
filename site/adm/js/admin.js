@@ -402,7 +402,7 @@ function renderTenantsLicenses() {
                   <td style="color:${_licColor(l)}">${fmtDate(l.expires)}</td>
                   <td class="num mono" style="color:${_licColor(l)}">${l.days_remaining !== null ? l.days_remaining + 'd' : '—'}</td>
                   <td>${_licBadge(l)}</td>
-                  <td>${l.revoked ? '' : `<button class="ghost" onclick="revokeLic('${l.lic_id}')">revogar</button>`}</td>
+                  <td style="white-space:nowrap">${l.revoked ? '' : `<button class="ghost" onclick="event.stopPropagation();licEdit('${l.lic_id}')">editar</button> <button class="ghost" onclick="event.stopPropagation();revokeLic('${l.lic_id}')">revogar</button>`}</td>
                 </tr>`).join('')}
             </tbody>
           </table>` : `<div class="empty" style="padding:14px">Esta empresa não tem licenças${status !== 'all' ? ' nesse filtro' : ''}.</div>`}
@@ -768,3 +768,46 @@ async function clDelete(id, email) {
   _admStartIdleWatch();
   loadAll();
 })();
+
+
+// ===========================================================================
+// Edição de licença (modal)
+// ===========================================================================
+let _leLicId = null;
+function licEdit(licId) {
+  const l = (state.licenses || []).find(x => x.lic_id === licId);
+  if (!l) { toast('Licença não encontrada'); return; }
+  _leLicId = licId;
+  document.getElementById('leLicId').textContent = licId;
+  const t = (state.tenants || []).find(x => x.id === l.tenant_id);
+  document.getElementById('leTenant').textContent = 'Empresa: ' + (t ? (t.name + ' (' + t.id + ')') : l.tenant_id);
+  document.getElementById('lePlan').value  = l.plan || 'business';
+  document.getElementById('leSeats').value = l.seats || 1;
+  const exp = String(l.expires || '');
+  document.getElementById('leExpires').value = /^\d{4}-\d{2}-\d{2}/.test(exp) ? exp.slice(0, 10) : '';
+  document.getElementById('leError').style.display = 'none';
+  document.getElementById('licEditModal').classList.remove('hide');
+}
+function leAddDays(n) {
+  const inp = document.getElementById('leExpires');
+  const base = inp.value ? new Date(inp.value + 'T12:00:00') : new Date();
+  base.setDate(base.getDate() + n);
+  inp.value = base.toISOString().slice(0, 10);
+}
+function leClose() { document.getElementById('licEditModal').classList.add('hide'); }
+async function leSave() {
+  const err = document.getElementById('leError');
+  const show = (m) => { err.textContent = m; err.style.display = 'block'; };
+  const plan = document.getElementById('lePlan').value;
+  const seats = parseInt(document.getElementById('leSeats').value, 10);
+  const expires = document.getElementById('leExpires').value;
+  if (!seats || seats < 1) { show('Quantidade de seats inválida.'); return; }
+  try {
+    const res = await api(`/v1/admin/licenses/${encodeURIComponent(_leLicId)}`, {
+      method: 'PATCH', body: JSON.stringify({ plan, seats, expires: expires || null }),
+    });
+    toast('Licença atualizada.');
+    loadTenantsLicenses();
+    leClose();
+  } catch (e) { show('Falha: ' + e.message); }
+}
