@@ -2,6 +2,20 @@
 // wp-people.js — Aba "Pessoas" (ranking + drill-down individual)
 // =====================================================================
 
+/** True se o agente reportou dentro da janela de "online". */
+function _isOnline(lastSeen) {
+  if (!lastSeen) return false;
+  const ms = Date.now() - new Date(lastSeen).getTime();
+  return ms >= 0 && ms < (WP_ONLINE_MINUTES * 60000);
+}
+
+/** Vem do clique no card "Online agora": abre Pessoas já filtrado por online. */
+function goOnlinePeople() {
+  const sel = document.getElementById('peopleActivity');
+  if (sel) sel.value = 'online';
+  switchTab('people');   // dispara loadPeople() -> renderPeopleTable() com o filtro aplicado
+}
+
 async function loadPeople() {
   try {
     const { since, until } = wpDP.getRange('peopleRange');
@@ -12,17 +26,23 @@ async function loadPeople() {
 }
 
 function renderPeopleTable() {
-  const q    = (document.getElementById('peopleFilter').value || '').toLowerCase();
+  const q   = (document.getElementById('peopleFilter').value || '').toLowerCase();
+  const act = (document.getElementById('peopleActivity') || {}).value || 'all';
   const rows = state.people.filter(u => {
     const dn = displayName(u).toLowerCase();
-    return !q || dn.includes(q)
+    const matchText = !q || dn.includes(q)
        || (u.user_id    || '').toLowerCase().includes(q)
        || (u.email      || '').toLowerCase().includes(q)
        || (u.department || '').toLowerCase().includes(q);
+    if (!matchText) return false;
+    if (act === 'online'  && !_isOnline(u.last_seen)) return false;
+    if (act === 'offline' &&  _isOnline(u.last_seen)) return false;
+    return true;
   });
   const tb = document.querySelector('#peopleTable tbody');
   if (!rows.length) {
-    tb.innerHTML = `<tr><td colspan="8" class="empty-state">Nenhum colaborador no período.</td></tr>`;
+    const msg = act === 'online' ? 'Ninguém online agora.' : 'Nenhum colaborador no período.';
+    tb.innerHTML = `<tr><td colspan="9" class="empty-state">${msg}</td></tr>`;
     return;
   }
   tb.innerHTML = rows.map(u => {
@@ -38,6 +58,9 @@ function renderPeopleTable() {
       <td>${fmtH(u.afk)}<small style="color:var(--text-dim)"> h</small></td>
       <td><span class="bar"><span style="width:${adh}%"></span></span>
           <small style="color:var(--text-dim);margin-left:6px">${adh}%</small></td>
+      <td>${_isOnline(u.last_seen)
+        ? '<span style="display:inline-flex;align-items:center;gap:5px;color:#4ade80"><span style="width:8px;height:8px;border-radius:50%;background:#4ade80;display:inline-block"></span>Online</span>'
+        : '<span style="display:inline-flex;align-items:center;gap:5px;color:var(--text-muted)"><span style="width:8px;height:8px;border-radius:50%;background:var(--text-muted);display:inline-block"></span>Offline</span>'}</td>
       <td>${relTime(u.last_seen)}</td>
       <td><code style="font-size:11px;color:var(--text-dim)">${u.agent_version || '—'}</code></td>
       <td style="display:flex;gap:6px">

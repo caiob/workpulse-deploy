@@ -75,6 +75,7 @@ function _jorBuildJornada(d) {
     end:       end,
     pausesSec: d.pauses_sec || 0,
     focusSec:  d.focus_sec  || 0,
+    idleAfterSec: d.idle_after_sec || 0,
     isToday:   !!d.is_today,
   };
 }
@@ -142,7 +143,7 @@ function _jorComputeFromEvents(windowEvents, afkEvents) {
     const dur   = e.duration_sec || 0;
     const end   = new Date(start.getTime() + dur * 1000);
     const key   = _jorLocalDayKey(start);
-    if (!byDay[key]) byDay[key] = { day: key, start, end, pausesSec: 0, focusSec: 0 };
+    if (!byDay[key]) byDay[key] = { day: key, start, end, pausesSec: 0, focusSec: 0, idleAfterSec: 0 };
     if (start < byDay[key].start) byDay[key].start = start;
     if (end   > byDay[key].end)   byDay[key].end   = end;
     byDay[key].focusSec += dur;
@@ -188,7 +189,7 @@ async function loadJornada() {
 
   if (!user) {
     // Sem usuário selecionado, mostra estado vazio
-    tb.innerHTML = `<tr><td colspan="6" class="empty-state">
+    tb.innerHTML = `<tr><td colspan="7" class="empty-state">
       <h4>Selecione um colaborador</h4>
       Escolha alguém no seletor acima para ver a jornada de trabalho dia a dia.
     </td></tr>`;
@@ -382,7 +383,7 @@ function _jorDrawTimesChart(jornadas) {
 function _jorRenderTable(jornadas) {
   const tb = document.querySelector('#jornadaTable tbody');
   if (!jornadas.length) {
-    tb.innerHTML = '<tr><td colspan="6" class="empty-state">Nenhuma jornada encontrada no período. Verifique se o agente está enviando eventos.</td></tr>';
+    tb.innerHTML = '<tr><td colspan="7" class="empty-state">Nenhuma jornada encontrada no período. Verifique se o agente está enviando eventos.</td></tr>';
     return;
   }
   // Mais recente primeiro
@@ -415,6 +416,7 @@ function _jorRenderTable(jornadas) {
       <td><span style="font-family:var(--serif);font-size:15px;font-weight:600">${ini}</span></td>
       <td><span style="font-family:var(--serif);font-size:15px;font-weight:600">${fim}</span></td>
       <td>${_jorDur(j.pausesSec)}</td>
+      <td>${j.idleAfterSec > 0 ? _jorDur(j.idleAfterSec) : '<span style="color:var(--text-dim)">—</span>'}</td>
       <td style="color:var(--text-dim)">${j.isToday ? '—' : _jorDur(grossSec)}</td>
       <td>${liq}</td>
     </tr>`;

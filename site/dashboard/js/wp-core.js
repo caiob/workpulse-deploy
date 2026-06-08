@@ -20,6 +20,9 @@ const state = {
   collabs:      [],
 };
 
+/* ---------- Limite p/ considerar 'online' (espelha o backend) ---------- */
+const WP_ONLINE_MINUTES = 30;
+
 /* ---------- Constantes de categoria ---------- */
 const CAT_PILLS = {
   productive:    '<span class="pill productive">Produtivo</span>',

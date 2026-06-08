@@ -369,6 +369,52 @@
           <div class="health-tile"><div class="label">Eventos totais</div><div class="value mono" id="cntEvents">—</div></div>
         </div>
       </div>
+
+      <div class="card span-12">
+        <h3>Custos AWS</h3>
+        <div id="awsCostSummary" style="display:flex;gap:24px;flex-wrap:wrap;margin:8px 0 4px;font-size:14px">
+          <span style="color:var(--text-muted)">Carregando...</span>
+        </div>
+        <p style="font-size:11px;color:var(--text-muted);margin:0 0 10px">Custo de USO por serviço (Cost Explorer, ~24h de atraso). <strong>Custo de uso</strong> = valor real dos recursos; <strong>Faturado hoje</strong> desconta o nível gratuito (que é temporário). O custo por usuário usa o custo de uso.</p>
+        <div style="height:240px"><canvas id="chartAws"></canvas></div>
+      </div>
+
+      <div class="card span-12">
+        <h3>Custo estimado por cliente</h3>
+        <div style="display:flex;gap:10px;align-items:center;margin:6px 0 8px;flex-wrap:wrap">
+          <span id="tcSummary" style="font-size:13px;color:var(--text-muted)">Carregando...</span>
+          <span style="flex:1"></span>
+          <label style="font-size:12px;color:var(--text-muted)">Ratear por
+            <select id="tcDriver" onchange="loadTenantCosts()">
+              <option value="users">usuários</option>
+              <option value="devices">agentes</option>
+              <option value="events">eventos (uso real)</option>
+            </select>
+          </label>
+        </div>
+        <p style="font-size:11px;color:var(--text-muted);margin:0 0 8px">Rateio do custo de USO da AWS (sem nível gratuito — "custo é custo") entre os clientes, proporcional ao driver escolhido. Mostra quanto cada cliente representa mesmo que hoje seja subsidiado.</p>
+        <table id="tcTable">
+          <thead><tr><th>Cliente</th><th>Plano</th><th class="num">Usuários</th><th class="num">Agentes</th><th class="num">Eventos (mês)</th><th class="num">Custo/mês</th><th class="num">Custo/usuário</th><th class="num">Custo/agente</th></tr></thead>
+          <tbody><tr><td colspan="8" class="empty">Carregando...</td></tr></tbody>
+        </table>
+      </div>
+
+      <div class="card span-12">
+        <h3>Simulador de custo</h3>
+        <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin:6px 0 8px">
+          <div>
+            <label class="fld-label">Número de usuários</label><br>
+            <input id="simUsers" class="fld" type="number" min="1" style="width:140px" onkeydown="if(event.key==='Enter')runSim()">
+          </div>
+          <button class="primary" onclick="runSim()">Simular</button>
+          <span id="simSummary" style="font-size:13px;color:var(--text-muted);margin-left:6px"></span>
+        </div>
+        <p style="font-size:11px;color:var(--text-muted);margin:0 0 8px">Digite quantos usuários e veja o custo mensal estimado. Usa seus custos reais da AWS: itens <strong>fixos</strong> (compute, NAT, ALB, banco) não mudam; os <strong>variáveis</strong> escalam com os usuários.</p>
+        <table id="simTable">
+          <thead><tr><th>Serviço</th><th>Tipo</th><th class="num">Custo/mês</th></tr></thead>
+          <tbody><tr><td colspan="3" class="empty">Informe o nº de usuários e clique em Simular.</td></tr></tbody>
+        </table>
+      </div>
     </div>
   </section>
 
@@ -441,6 +487,6 @@
 
 <div id="toast" class="toast hide"></div>
 
-<script src="js/admin.js?v=8"></script>
+<script src="js/admin.js?v=13"></script>
 </body>
 </html>

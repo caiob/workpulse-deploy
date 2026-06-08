@@ -118,6 +118,8 @@ SES_REGION   = os.getenv("WORKPULSE_SES_REGION", "us-east-1")
 # Timezone usada para "fechar" a jornada de trabalho por dia local (início/fim/pausas).
 # Os eventos sao gravados em UTC; aqui convertemos para o fuso do cliente.
 REPORT_TZ    = os.getenv("WORKPULSE_TZ", "America/Sao_Paulo")
+# Janela para considerar uma pessoa "online" (agente reportou neste intervalo).
+ONLINE_THRESHOLD_MINUTES = int(os.getenv("WORKPULSE_ONLINE_MINUTES", "30"))
 
 if not ADMIN_TOKEN or len(ADMIN_TOKEN) < 32:
     raise RuntimeError(
@@ -1243,15 +1245,24 @@ def jornada(
                    SUM(duration_sec) AS focus_sec
             FROM w GROUP BY lts::date
         ),
-        afk AS (
-            SELECT (ts::timestamptz AT TIME ZONE %(tz)s)::date AS day,
-                   SUM(duration_sec)                           AS pauses_sec
+        afk_ev AS (
+            SELECT (ts::timestamptz AT TIME ZONE %(tz)s)        AS lts,
+                   (ts::timestamptz AT TIME ZONE %(tz)s)::date  AS day,
+                   duration_sec
             FROM events
             WHERE tenant_id = %(tenant)s AND user_id = %(uid)s AND bucket = 'afk'
               AND data_json->>'status' = 'afk'
               AND ts::timestamptz >= %(since)s::timestamptz
               AND ts::timestamptz <  %(until)s::timestamptz
-            GROUP BY 1
+        ),
+        afk AS (
+            SELECT a.day,
+                   COALESCE(SUM(a.duration_sec) FILTER (
+                       WHERE a.lts >= win.start_ts AND a.lts <= win.end_ts), 0) AS afk_in,
+                   COALESCE(SUM(a.duration_sec) FILTER (
+                       WHERE a.lts > win.end_ts), 0)                            AS afk_after
+            FROM afk_ev a JOIN win ON win.day = a.day
+            GROUP BY a.day
         )
         SELECT to_char(win.day, 'YYYY-MM-DD')        AS day,
                to_char(win.start_ts, 'HH24:MI:SS')   AS start_hm,
@@ -1259,7 +1270,8 @@ def jornada(
                EXTRACT(EPOCH FROM (win.start_ts - win.day::timestamp)) AS start_sec,
                EXTRACT(EPOCH FROM (win.end_ts   - win.day::timestamp)) AS end_sec,
                win.focus_sec                         AS focus_sec,
-               COALESCE(afk.pauses_sec, 0)           AS pauses_sec
+               COALESCE(afk.afk_in, 0)               AS pauses_sec,
+               COALESCE(afk.afk_after, 0)            AS afk_after_sec
         FROM win LEFT JOIN afk ON afk.day = win.day
         ORDER BY win.day
     """
@@ -1274,21 +1286,24 @@ def jornada(
 
     days_out = []
     for r in rows:
-        focus  = float(r["focus_sec"]  or 0.0)
-        pauses = float(r["pauses_sec"] or 0.0)
+        focus     = float(r["focus_sec"]     or 0.0)   # soma das janelas (tempo ativo)
+        afk_in    = float(r["pauses_sec"]    or 0.0)   # AFK dentro da jornada (início→fim)
+        afk_after = float(r["afk_after_sec"] or 0.0)   # AFK após a última coleta de tela
         start_sec = float(r["start_sec"] or 0.0)
         end_sec   = float(r["end_sec"]   or 0.0)
         gross  = max(0.0, end_sec - start_sec)
+        net    = max(0.0, gross - afk_in)              # Líquida = Bruta − AFK na Jornada
         days_out.append({
             "day":        r["day"],
-            "start":      r["start_hm"][:5],          # HH:MM
-            "end":        r["end_hm"][:5],            # HH:MM
+            "start":      r["start_hm"][:5],
+            "end":        r["end_hm"][:5],
             "start_float": round(start_sec / 3600.0, 4),
             "end_float":   round(end_sec   / 3600.0, 4),
-            "focus_sec":  round(focus, 1),
-            "pauses_sec": round(pauses, 1),
+            "focus_sec":  round(min(focus, gross), 1),
+            "pauses_sec": round(afk_in, 1),            # AFK na Jornada
             "gross_sec":  round(gross, 1),
-            "net_sec":    round(max(0.0, gross - pauses), 1),
+            "net_sec":    round(net, 1),
+            "idle_after_sec": round(afk_after, 1),     # AFK Pós Jornada
             "is_today":   (r["day"] == today_local),
         })
 
@@ -1438,7 +1453,7 @@ def workforce_overview(tenant: str, days: int = 7,
         return cached
 
     today_start      = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-    online_threshold = (now - dt.timedelta(minutes=10)).isoformat()
+    online_threshold = (now - dt.timedelta(minutes=ONLINE_THRESHOLD_MINUTES)).isoformat()
 
     with db() as c:
         totals = c.execute(
@@ -3341,6 +3356,232 @@ def admin_edit_license(lic_id: str, req: LicenseEditRequest, request: Request):
     return {
         "ok": True, "lic_id": lic_id, "tenant_id": lic["tenant_id"],
         "plan": new_plan, "seats": new_seats, "expires": exp_iso,
+    }
+
+
+# ===========================================================================
+# Custos AWS (Cost Explorer) — painel ADM
+# ===========================================================================
+_AWS_COST_CACHE = {"ts": 0.0, "data": None}
+_AWS_COST_TTL = 6 * 3600  # 6h (a API custa ~US$0,01/consulta e atualiza ~1x/dia)
+
+
+@app.get("/v1/admin/aws-costs", dependencies=[Depends(require_admin)])
+def admin_aws_costs():
+    if _AWS_COST_CACHE["data"] and (time.time() - _AWS_COST_CACHE["ts"]) < _AWS_COST_TTL:
+        return _AWS_COST_CACHE["data"]
+    try:
+        import boto3 as _boto3
+        ce = _boto3.client("ce", region_name="us-east-1")  # Cost Explorer só em us-east-1
+        today = dt.date.today()
+        start = (today.replace(day=1) - dt.timedelta(days=31 * 5)).replace(day=1)
+        end   = (today.replace(day=1) + dt.timedelta(days=32)).replace(day=1)
+        tp = {"Start": start.isoformat(), "End": end.isoformat()}
+
+        # 1) Custo de USO por serviço (sem o desconto do nível gratuito) — gráfico + nº real.
+        resp_svc = ce.get_cost_and_usage(
+            TimePeriod=tp, Granularity="MONTHLY", Metrics=["UnblendedCost"],
+            Filter={"Dimensions": {"Key": "RECORD_TYPE", "Values": ["Usage"]}},
+            GroupBy=[{"Type": "DIMENSION", "Key": "SERVICE"}],
+        )
+        # 2) Por tipo de registro — separa uso, faturado (net) e economia do nível gratuito.
+        resp_rt = ce.get_cost_and_usage(
+            TimePeriod=tp, Granularity="MONTHLY", Metrics=["UnblendedCost"],
+            GroupBy=[{"Type": "DIMENSION", "Key": "RECORD_TYPE"}],
+        )
+
+        svc_by_month = {}
+        for r in resp_svc.get("ResultsByTime", []):
+            m = r["TimePeriod"]["Start"][:7]
+            services = {}
+            for g in r.get("Groups", []):
+                amt = float(g["Metrics"]["UnblendedCost"]["Amount"])
+                if amt > 0:
+                    services[g["Keys"][0]] = round(amt, 2)
+            svc_by_month[m] = services
+
+        rt_by_month = {}
+        for r in resp_rt.get("ResultsByTime", []):
+            m = r["TimePeriod"]["Start"][:7]
+            usage, net = 0.0, 0.0
+            for g in r.get("Groups", []):
+                amt = float(g["Metrics"]["UnblendedCost"]["Amount"])
+                net += amt
+                if g["Keys"][0] == "Usage":
+                    usage += amt
+            rt_by_month[m] = {"usage": round(usage, 2), "net": round(net, 2),
+                              "savings": round(usage - net, 2)}
+
+        months = []
+        for m in sorted(set(list(svc_by_month) + list(rt_by_month))):
+            services = svc_by_month.get(m, {})
+            rt = rt_by_month.get(m, {"usage": round(sum(services.values()), 2), "net": 0.0, "savings": 0.0})
+            months.append({
+                "month": m, "services": services, "total": rt["usage"],  # 'total' = uso (gráfico)
+                "usage": rt["usage"], "net": rt["net"], "savings": rt["savings"],
+            })
+        cur = months[-1] if months else {"month": None, "usage": 0.0, "net": 0.0, "savings": 0.0}
+
+        # Projeção de fim de mês: uso até agora + previsão do restante (somente USO).
+        forecast_usage = None
+        try:
+            fc = ce.get_cost_forecast(
+                TimePeriod={"Start": today.isoformat(), "End": end.isoformat()},
+                Metric="UNBLENDED_COST", Granularity="MONTHLY",
+                Filter={"Dimensions": {"Key": "RECORD_TYPE", "Values": ["Usage"]}},
+            )
+            rest = float(fc["Total"]["Amount"])
+            forecast_usage = round((cur.get("usage") or 0.0) + rest, 2)
+        except Exception:
+            forecast_usage = None
+
+        with db() as c:
+            users = c.execute(
+                "SELECT COUNT(DISTINCT (tenant_id || '/' || user_id)) AS n FROM users"
+            ).fetchone()["n"]
+
+        data = {
+            "available": True, "currency": "USD", "months": months,
+            "current_month": {"month": cur["month"], "usage": cur["usage"],
+                              "net": cur["net"], "savings": cur["savings"]},
+            "active_users": users,
+            "cost_per_user": (round(cur["usage"] / users, 2) if users else None),
+            "free_tier": bool(cur.get("savings", 0) and cur["savings"] > 0.01),
+            "forecast_usage": forecast_usage,
+        }
+        _AWS_COST_CACHE["data"] = data
+        _AWS_COST_CACHE["ts"] = time.time()
+        return data
+    except Exception as exc:
+        return {"available": False, "error": str(exc)[:300]}
+
+
+# ===========================================================================
+# Custo estimado por cliente (rateio do custo de USO da AWS)
+# ===========================================================================
+@app.get("/v1/admin/tenant-costs", dependencies=[Depends(require_admin)])
+def admin_tenant_costs(driver: str = "users"):
+    costs = admin_aws_costs()  # reaproveita o cache do Cost Explorer
+    usage_total = 0.0
+    if costs.get("available"):
+        usage_total = float(costs.get("current_month", {}).get("usage") or 0.0)
+
+    month_start = dt.date.today().replace(day=1).isoformat()
+    with db() as c:
+        rows = c.execute(
+            """SELECT t.id, t.name, t.plan,
+                      COUNT(DISTINCT u.user_id)   AS users,
+                      COUNT(DISTINCT d.device_id) AS devices
+               FROM tenants t
+               LEFT JOIN users   u ON u.tenant_id = t.id
+               LEFT JOIN devices d ON d.tenant_id = t.id
+               GROUP BY t.id, t.name, t.plan
+               ORDER BY users DESC"""
+        ).fetchall()
+        erows = c.execute(
+            "SELECT tenant_id, COUNT(*) AS n FROM events WHERE ts >= %s GROUP BY tenant_id",
+            (month_start,),
+        ).fetchall()
+    events_by_tenant = {r["tenant_id"]: r["n"] for r in erows}
+    tenants = [dict(r) for r in rows]
+    for t in tenants:
+        t["events"] = int(events_by_tenant.get(t["id"], 0))
+
+    if driver == "devices":
+        key, total = "devices", sum((t["devices"] or 0) for t in tenants)
+    elif driver == "events":
+        key, total = "events", sum((t["events"] or 0) for t in tenants)
+    else:
+        driver, key = "users", "users"
+        total = sum((t["users"] or 0) for t in tenants)
+    total = total or 1
+
+    out = []
+    for t in tenants:
+        share = (t[key] or 0) / total
+        cost  = round(usage_total * share, 2)
+        users, devices = (t["users"] or 0), (t["devices"] or 0)
+        out.append({
+            "tenant_id": t["id"], "name": t["name"], "plan": t["plan"],
+            "users": users, "devices": devices, "events": int(t["events"] or 0), "cost": cost,
+            "cost_per_user":  (round(cost / users, 2)   if users   else None),
+            "cost_per_agent": (round(cost / devices, 2) if devices else None),
+        })
+    return {
+        "available": costs.get("available", False),
+        "currency": "USD",
+        "month": costs.get("current_month", {}).get("month"),
+        "usage_total": round(usage_total, 2),
+        "driver": driver,
+        "tenants": out,
+    }
+
+
+# ===========================================================================
+# Simulador de custo por nº de usuários (autocalibra com dados reais da AWS)
+# ===========================================================================
+# Serviços tratados como FIXOS (não mudam com nº de usuários). Os demais são
+# tratados como variáveis (escalam proporcional aos usuários).
+_SIM_FIXED_SERVICES = {
+    "Amazon Elastic Container Service",   # Fargate roda 24/7
+    "Amazon Elastic Load Balancing",      # ALB sempre ligado
+    "Amazon Virtual Private Cloud",       # horas do NAT Gateway
+    "Amazon Relational Database Service", # instância do banco (storage cresce devagar)
+}
+# Observação: "EC2 - Other" (transferência/NAT data/EBS) e "AmazonCloudWatch" NÃO
+# são fixos — escalam com usuários/eventos, então entram como variáveis.
+
+
+@app.get("/v1/admin/cost-simulate", dependencies=[Depends(require_admin)])
+def admin_cost_simulate(users: int = 0):
+    import calendar
+    costs = admin_aws_costs()  # usa cache do Cost Explorer
+    if not costs.get("available"):
+        return {"available": False, "error": costs.get("error", "custos indisponíveis")}
+
+    months = costs.get("months", [])
+    base = None
+    for mm in reversed(months):
+        if mm.get("services"):
+            base = mm
+            break
+    if not base:
+        return {"available": False, "error": "sem dados de custo por serviço"}
+
+    today = dt.date.today()
+    cur_label = today.strftime("%Y-%m")
+    if base.get("month") == cur_label:
+        days_elapsed = today.day or 1
+        days_in_month = calendar.monthrange(today.year, today.month)[1]
+        factor_month = days_in_month / days_elapsed
+    else:
+        factor_month = 1.0  # mês já fechado
+
+    with db() as c:
+        ref_users = c.execute(
+            "SELECT COUNT(DISTINCT (tenant_id || '/' || user_id)) AS n FROM users"
+        ).fetchone()["n"] or 1
+
+    n = int(users) if users and int(users) > 0 else ref_users
+    scale = n / ref_users if ref_users else 1.0
+
+    items, total = [], 0.0
+    for svc, mtd in sorted(base.get("services", {}).items(), key=lambda x: -x[1]):
+        month_val = mtd * factor_month            # custo do mês cheio (usuários atuais)
+        is_fixed  = svc in _SIM_FIXED_SERVICES
+        proj      = round(month_val if is_fixed else month_val * scale, 2)
+        items.append({
+            "service": svc, "fixed": is_fixed,
+            "base_month": round(month_val, 2), "projected": proj,
+        })
+        total += proj
+    total = round(total, 2)
+
+    return {
+        "available": True, "currency": "USD",
+        "base_month": base.get("month"), "ref_users": ref_users, "users": n,
+        "items": items, "total": total,
+        "cost_per_user": (round(total / n, 2) if n else None),
     }
 
 

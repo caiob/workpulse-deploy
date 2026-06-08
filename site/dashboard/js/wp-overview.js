@@ -120,8 +120,11 @@ function drawUsersChart(users) {
 }
 
 function drawAppsChart(apps) {
-  const top = (apps || []).slice(0, 7);
-  const ct  = chartTheme();
+  const list = apps || [];
+  const top  = list.slice(0, 7);
+  const ct   = chartTheme();
+  // Total de TODOS os apps no período (denominador do %).
+  const totalSec = list.reduce((s, a) => s + (a.seconds || 0), 0) || 1;
   if (state.charts.apps) state.charts.apps.destroy();
   state.charts.apps = new Chart(document.getElementById('chartApps').getContext('2d'), {
     type: 'doughnut',
@@ -135,7 +138,19 @@ function drawAppsChart(apps) {
     },
     options: {
       responsive: true, maintainAspectRatio: false,
-      plugins: { legend: { position: 'right', labels: { color: ct.legend, boxWidth: 12 } } }
+      plugins: {
+        legend: { position: 'right', labels: { color: ct.legend, boxWidth: 12 } },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => {
+              const sec = top[ctx.dataIndex] ? (top[ctx.dataIndex].seconds || 0) : 0;
+              const h   = (sec / 3600).toFixed(1).replace('.', ',');
+              const pct = (sec / totalSec * 100).toFixed(1).replace('.', ',');
+              return ` ${ctx.label}: ${h} h (${pct}% do período)`;
+            }
+          }
+        }
+      }
     }
   });
 }

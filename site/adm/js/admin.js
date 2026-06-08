@@ -558,7 +558,68 @@ async function loadSystem() {
     document.getElementById('cntLicActive').textContent  = fmtNum(stats.counts.active_licenses);
     document.getElementById('cntLicRevoked').textContent = fmtNum(stats.counts.revoked_licenses);
     document.getElementById('cntEvents').textContent     = fmtNum(stats.counts.total_events);
+    loadAwsCosts();
+    loadTenantCosts();
+    runSim();
   } catch (e) { toast('Erro: '+e.message); }
+}
+
+async function loadAwsCosts() {
+  const box = document.getElementById('awsCostSummary');
+  if (!box) return;
+  try {
+    const d = await api('/v1/admin/aws-costs');
+    if (!d.available) {
+      box.innerHTML = `<span style="color:var(--text-muted);font-size:13px">Custos indisponíveis: ${escHtml(d.error || 'sem permissão')}. Confira a permissão ce:GetCostAndUsage (terraform apply).</span>`;
+      return;
+    }
+    const cur = d.current_month || {};
+    const usage = cur.usage || 0, net = cur.net || 0, savings = cur.savings || 0;
+    const _fc = d.forecast_usage;
+    let _html =
+      `<span><strong>Custo de uso (mês):</strong> US$ ${usage.toFixed(2)}</span>` +
+      (_fc != null ? `<span><strong>Projeção do mês:</strong> US$ ${_fc.toFixed(2)}</span>` : '') +
+      `<span><strong>Faturado hoje:</strong> US$ ${net.toFixed(2)}</span>` +
+      `<span><strong>Custo/usuário:</strong> ${d.cost_per_user != null ? ('US$ ' + d.cost_per_user.toFixed(2)) : '—'}</span>` +
+      `<span><strong>Usuários:</strong> ${fmtNum(d.active_users || 0)}</span>`;
+    if (d.free_tier && savings > 0.01) {
+      _html += `<span style="color:#4ade80"><strong>Nível gratuito:</strong> −US$ ${savings.toFixed(2)}</span>`;
+    }
+    box.innerHTML = _html;
+    const months = d.months || [];
+    const totals = {};
+    months.forEach(m => Object.entries(m.services || {}).forEach(([s, v]) => { totals[s] = (totals[s] || 0) + v; }));
+    const top = Object.entries(totals).sort((a, b) => b[1] - a[1]).slice(0, 6).map(x => x[0]);
+    const palette = ['#6c8cff', '#f472b6', '#34d399', '#a78bfa', '#f59e0b', '#22d3ee', '#94a3b8'];
+    const labels = months.map(m => m.month);
+    const datasets = top.map((s, i) => ({
+      label: s, backgroundColor: palette[i % palette.length],
+      data: months.map(m => m.services[s] || 0),
+    }));
+    datasets.push({
+      label: 'Outros', backgroundColor: palette[6],
+      data: months.map(m => {
+        let o = 0; Object.entries(m.services || {}).forEach(([s, v]) => { if (!top.includes(s)) o += v; });
+        return +o.toFixed(2);
+      }),
+    });
+    if (state.charts.aws) state.charts.aws.destroy();
+    state.charts.aws = new Chart(document.getElementById('chartAws').getContext('2d'), {
+      type: 'bar',
+      data: { labels, datasets },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { position: 'bottom', labels: { color: '#8c97c4', boxWidth: 12, font: { size: 10 } } },
+          tooltip: { callbacks: { label: (c) => ` ${c.dataset.label}: US$ ${(c.parsed.y || 0).toFixed(2)}` } },
+        },
+        scales: {
+          x: { stacked: true, ticks: { color: '#8c97c4' }, grid: { display: false } },
+          y: { stacked: true, beginAtZero: true, ticks: { color: '#8c97c4', callback: (v) => 'US$ ' + v }, grid: { color: 'rgba(140,151,196,.15)' } },
+        },
+      },
+    });
+  } catch (e) { box.innerHTML = `<span style="color:var(--danger)">Erro: ${escHtml(e.message)}</span>`; }
 }
 
 // ---------- Audit ----------
@@ -810,4 +871,63 @@ async function leSave() {
     loadTenantsLicenses();
     leClose();
   } catch (e) { show('Falha: ' + e.message); }
+}
+
+
+async function loadTenantCosts() {
+  const tb = document.querySelector('#tcTable tbody');
+  if (!tb) return;
+  const driver = (document.getElementById('tcDriver') || {}).value || 'users';
+  try {
+    const d = await api('/v1/admin/tenant-costs?driver=' + encodeURIComponent(driver));
+    const sumEl = document.getElementById('tcSummary');
+    if (!d.available) {
+      if (sumEl) sumEl.textContent = 'Custos AWS indisponíveis — o rateio precisa do custo de uso.';
+      tb.innerHTML = '<tr><td colspan="8" class="empty">Sem base de custo.</td></tr>';
+      return;
+    }
+    if (sumEl) sumEl.innerHTML = `Base: <strong>US$ ${(d.usage_total || 0).toFixed(2)}</strong> de uso no mês (${d.month || '—'}), rateado por ${d.driver === 'devices' ? 'agentes' : 'usuários'}.`;
+    const rows = d.tenants || [];
+    if (!rows.length) { tb.innerHTML = '<tr><td colspan="8" class="empty">Nenhum cliente.</td></tr>'; return; }
+    tb.innerHTML = rows.map(t => `<tr>
+      <td><strong>${escHtml(t.name || t.tenant_id)}</strong><div class="mono" style="font-size:11px;color:var(--text-muted)">${escHtml(t.tenant_id)}</div></td>
+      <td>${planBadge(t.plan)}</td>
+      <td class="num">${fmtNum(t.users)}</td>
+      <td class="num">${fmtNum(t.devices)}</td>
+      <td class="num">${fmtNum(t.events || 0)}</td>
+      <td class="num"><strong>US$ ${(t.cost || 0).toFixed(2)}</strong></td>
+      <td class="num">${t.cost_per_user  != null ? ('US$ ' + t.cost_per_user.toFixed(2))  : '—'}</td>
+      <td class="num">${t.cost_per_agent != null ? ('US$ ' + t.cost_per_agent.toFixed(2)) : '—'}</td>
+    </tr>`).join('');
+  } catch (e) {
+    tb.innerHTML = `<tr><td colspan="8" class="empty">Erro: ${escHtml(e.message)}</td></tr>`;
+  }
+}
+
+
+async function runSim() {
+  const tb = document.querySelector('#simTable tbody');
+  if (!tb) return;
+  const n = parseInt((document.getElementById('simUsers') || {}).value, 10);
+  try {
+    const d = await api('/v1/admin/cost-simulate' + (n > 0 ? ('?users=' + n) : ''));
+    const sumEl = document.getElementById('simSummary');
+    if (!d.available) {
+      if (sumEl) sumEl.textContent = 'Custos AWS indisponíveis.';
+      tb.innerHTML = '<tr><td colspan="3" class="empty">Sem base de custo.</td></tr>';
+      return;
+    }
+    if (sumEl) sumEl.innerHTML = `<strong>${fmtNum(d.users)}</strong> usuários → total <strong>US$ ${(d.total || 0).toFixed(2)}/mês</strong> · custo/usuário <strong>US$ ${d.cost_per_user != null ? d.cost_per_user.toFixed(2) : '—'}</strong>`;
+    const rows = d.items || [];
+    tb.innerHTML = rows.map(it => `<tr>
+      <td>${escHtml(it.service)}</td>
+      <td>${it.fixed ? '<span class="badge muted">fixo</span>' : '<span class="badge ok">variável</span>'}</td>
+      <td class="num">US$ ${(it.projected || 0).toFixed(2)}</td>
+    </tr>`).join('') +
+      `<tr style="font-weight:600;border-top:2px solid var(--border)"><td>Total</td><td></td><td class="num">US$ ${(d.total || 0).toFixed(2)}</td></tr>`;
+    const inp = document.getElementById('simUsers');
+    if (inp && !inp.value) inp.value = d.users;
+  } catch (e) {
+    tb.innerHTML = `<tr><td colspan="3" class="empty">Erro: ${escHtml(e.message)}</td></tr>`;
+  }
 }

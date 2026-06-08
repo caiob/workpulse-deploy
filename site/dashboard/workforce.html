@@ -250,7 +250,8 @@
     </div>
 
     <div class="grid">
-      <div class="card span-3"><h3>Online agora</h3>
+      <div class="card span-3" onclick="goOnlinePeople()" style="cursor:pointer" title="Ver pessoas online e offline">
+        <h3>Online agora</h3>
         <div class="stat" id="kpiOnline">—<small>pessoas</small></div>
         <div class="stat-trend" id="kpiOnlineSub">—</div>
       </div>
@@ -313,6 +314,13 @@
       <div><label>Período</label>
         <div id="peopleRange"></div>
       </div>
+      <div><label>Última atividade</label>
+        <select id="peopleActivity" onchange="renderPeopleTable()">
+          <option value="all">Todos</option>
+          <option value="online">Online agora</option>
+          <option value="offline">Offline</option>
+        </select>
+      </div>
       <div style="flex:1"><label>Buscar</label>
         <input id="peopleFilter" oninput="renderPeopleTable()" placeholder="nome, e-mail ou departamento" style="width:100%;max-width:360px">
       </div>
@@ -324,7 +332,7 @@
         <thead>
           <tr>
             <th>Colaborador</th><th>Departamento</th><th>Ativo</th>
-            <th>AFK</th><th>Aderência</th><th>Última atividade</th><th>Versão Agente</th><th></th>
+            <th>AFK</th><th>Aderência</th><th>Status</th><th>Última atividade</th><th>Versão Agente</th><th></th>
           </tr>
         </thead>
         <tbody></tbody>
@@ -629,7 +637,8 @@
             <th>Dia</th>
             <th>Início da Jornada</th>
             <th>Final da Jornada</th>
-            <th>Total de Pausas (AFK)</th>
+            <th>AFK na Jornada</th>
+            <th>AFK Pós Jornada</th>
             <th>Bruta</th>
             <th>Líquida</th>
           </tr>
@@ -911,15 +920,15 @@
 <div id="toast" class="toast hide"></div>
 
 <!-- ===== MÓDULOS JS (defer: executam após parse do DOM, em ordem) ===== -->
-<script src="js/wp-core.js?v=17" defer></script>
+<script src="js/wp-core.js?v=18" defer></script>
 <script src="js/wp-datepicker.js?v=17" defer></script>
-<script src="js/wp-overview.js?v=17" defer></script>
-<script src="js/wp-people.js?v=17" defer></script>
+<script src="js/wp-overview.js?v=18" defer></script>
+<script src="js/wp-people.js?v=18" defer></script>
 <script src="js/wp-departments.js?v=17" defer></script>
 <script src="js/wp-analytics.js?v=17" defer></script>
 <script src="js/wp-events.js?v=17" defer></script>
 <script src="js/wp-internet.js?v=17" defer></script>
-<script src="js/wp-jornada.js?v=17" defer></script>
+<script src="js/wp-jornada.js?v=19" defer></script>
 <script src="js/wp-settings.js?v=17" defer></script>
 <script src="js/wp-users.js?v=20" defer></script>
 <script src="js/wp-reports.js?v=17" defer></script>

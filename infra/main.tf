@@ -545,6 +545,21 @@ resource "aws_iam_role_policy" "ecs_task_secrets" {
   })
 }
 
+# Leitura de custos da AWS (Cost Explorer) para o painel ADM.
+# Cost Explorer não suporta restrição por recurso — Resource deve ser "*".
+resource "aws_iam_role_policy" "ecs_task_costs" {
+  name = "cost-explorer-read"
+  role = aws_iam_role.ecs_task.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["ce:GetCostAndUsage", "ce:GetCostForecast"]
+      Resource = "*"
+    }]
+  })
+}
+
 resource "aws_ecs_task_definition" "server" {
   family                   = "${local.name_prefix}-server"
   network_mode             = "awsvpc"
