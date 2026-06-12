@@ -8,7 +8,7 @@ function _duShowErr(msg) {
   if (e) { e.textContent = msg; e.style.display = msg ? 'block' : 'none'; }
 }
 
-const _DU_ROLE_LBL = { admin_master: 'Admin Master', supervisor: 'Supervisor', wp_admin: 'WorkPulse' };
+const _DU_ROLE_LBL = { admin_master: 'Admin Master', supervisor: 'Supervisor', lider: 'Líder', wp_admin: 'WorkPulse' };
 
 async function loadUsers() {
   const tb = document.querySelector('#duTable tbody');
@@ -35,6 +35,7 @@ async function loadUsers() {
         <td>${_DU_ROLE_LBL[u.role] || u.role}</td>
         <td>${statusHtml}</td>
         <td style="white-space:nowrap">
+          <button class="ghost" onclick="duEdit(${u.id})">Editar</button>
           <button class="ghost" onclick="duReset(${u.id})">Reenviar senha</button>
           ${toggleBtn}
           <button class="ghost" onclick="duDelete(${u.id}, '${escHtml(u.email)}')">Excluir</button>
@@ -81,6 +82,89 @@ function duCopyLink() {
   if (navigator.clipboard) {
     navigator.clipboard.writeText(inp.value).then(() => toast('Link copiado.'), () => { document.execCommand('copy'); toast('Link copiado.'); });
   } else { document.execCommand('copy'); toast('Link copiado.'); }
+}
+
+
+// ── Editar usuário (perfil + visão do Líder) ──────────────────────────
+let _duEditId = null, _duDeptList = [], _duCollabList = [], _duSelDepts = new Set(), _duSelUsers = new Set();
+
+async function duEdit(id) {
+  const u = (state.dashUsers || []).find(x => x.id === id);
+  if (!u) return;
+  _duEditId = id;
+  document.getElementById('duEditName').textContent = u.email;
+  document.getElementById('duEditDisplay').value = u.display_name || '';
+  document.getElementById('duEditRole').value = (u.role === 'wp_admin') ? 'admin_master' : u.role;
+  document.getElementById('duEditError').style.display = 'none';
+  _duSelDepts = new Set(); _duSelUsers = new Set();
+  try {
+    const [deps, cols] = await Promise.all([
+      api('/v1/departments?tenant=' + encodeURIComponent(state.tenant)),
+      api('/v1/users?tenant=' + encodeURIComponent(state.tenant)),
+    ]);
+    _duDeptList   = (deps.departments || []).map(d => d.name);
+    _duCollabList = (cols.users || []);
+    if (u.role === 'lider') {
+      const sc = await api(`/v1/tenant-users/${id}/scope?tenant=` + encodeURIComponent(state.tenant));
+      _duSelDepts = new Set(sc.departments || []);
+      _duSelUsers = new Set(sc.users || []);
+    }
+  } catch (_) {}
+  duEditRoleChanged();
+  document.getElementById('duEditModal').classList.remove('hide');
+}
+
+function duEditRoleChanged() {
+  const isLider = document.getElementById('duEditRole').value === 'lider';
+  document.getElementById('duScopeBox').style.display = isLider ? 'block' : 'none';
+  if (isLider) { duScopeRenderDepts(); duScopeRenderUsers(); }
+}
+
+function duScopeRenderDepts() {
+  const box = document.getElementById('duScopeDepts');
+  if (!_duDeptList.length) { box.innerHTML = '<span style="color:var(--text-muted);font-size:12px">Nenhum departamento cadastrado.</span>'; return; }
+  box.innerHTML = _duDeptList.map(d => {
+    const ck = _duSelDepts.has(d) ? 'checked' : '';
+    const esc = d.replace(/'/g, "\\'");
+    return `<label style="display:inline-flex;align-items:center;gap:6px;font-size:13px;background:var(--bg-2);border:1px solid var(--border);border-radius:8px;padding:4px 10px;cursor:pointer">
+      <input type="checkbox" ${ck} onchange="_duToggleDept('${esc}', this.checked)"> ${escHtml(d)}</label>`;
+  }).join('');
+}
+function _duToggleDept(d, on) { on ? _duSelDepts.add(d) : _duSelDepts.delete(d); }
+
+function duScopeRenderUsers() {
+  const box = document.getElementById('duScopeUsers');
+  const q = (document.getElementById('duScopeFilter').value || '').toLowerCase();
+  const list = _duCollabList.filter(u => !q
+    || (u.display_name || '').toLowerCase().includes(q)
+    || (u.department || '').toLowerCase().includes(q));
+  if (!list.length) { box.innerHTML = '<span style="color:var(--text-muted);font-size:12px">Nenhum colaborador.</span>'; return; }
+  box.innerHTML = list.map(u => {
+    const ck = _duSelUsers.has(u.user_id) ? 'checked' : '';
+    const esc = (u.user_id || '').replace(/'/g, "\\'");
+    return `<label style="display:flex;align-items:center;gap:8px;font-size:13px;padding:4px 2px;cursor:pointer">
+      <input type="checkbox" ${ck} onchange="_duToggleUser('${esc}', this.checked)">
+      <span style="flex:1;min-width:0">${escHtml(u.display_name || u.user_id)}</span>
+      <small style="color:var(--text-muted);white-space:nowrap">${escHtml(u.department || '')}</small></label>`;
+  }).join('');
+}
+function _duToggleUser(uid, on) { on ? _duSelUsers.add(uid) : _duSelUsers.delete(uid); }
+
+async function duEditSave() {
+  const err = document.getElementById('duEditError');
+  const display = document.getElementById('duEditDisplay').value.trim();
+  const role = document.getElementById('duEditRole').value;
+  try {
+    await apiFetch('PUT', `/v1/tenant-users/${_duEditId}?tenant=` + encodeURIComponent(state.tenant),
+      { display_name: display, role });
+    if (role === 'lider') {
+      await apiFetch('PUT', `/v1/tenant-users/${_duEditId}/scope?tenant=` + encodeURIComponent(state.tenant),
+        { departments: [..._duSelDepts], users: [..._duSelUsers] });
+    }
+    document.getElementById('duEditModal').classList.add('hide');
+    toast('Usuário atualizado.');
+    loadUsers();
+  } catch (e) { err.textContent = 'Falha: ' + (e.message || ''); err.style.display = 'block'; }
 }
 
 async function duBlock(id) {
@@ -164,14 +248,48 @@ async function licRequest() {
   } catch (e) { toast('Falha: ' + (e.message || '')); }
 }
 
-// ── Estende loadConfig() para carregar Usuários + Licença (só Admin Master) ──
-(function () {
-  const orig = window.loadConfig;
-  window.loadConfig = function () {
-    if (typeof orig === 'function') orig();
-    if (state.role === 'admin_master' || state.role === 'wp_admin') {
-      loadUsers();
-      loadLicense();
+
+// ── Financeiro (Admin Master) ─────────────────────────────────────────
+function _finBRL(cents) {
+  return 'R$ ' + ((cents || 0) / 100).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+async function loadFinance() {
+  const sum = document.getElementById('finSummary');
+  const tb  = document.querySelector('#finPaymentsTable tbody');
+  if (!sum) return;
+  try {
+    const d = await api('/v1/tenant-finance?tenant=' + encodeURIComponent(state.tenant));
+    const seats = d.seats || 0, used = d.used || 0;
+    let expStr = '—';
+    if (d.expires) {
+      expStr = new Date(d.expires).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
     }
-  };
-})();
+    sum.innerHTML =
+      `<span><strong>Plano:</strong> ${escHtml(d.plan || '—')}</span>` +
+      `<span><strong>Assentos contratados:</strong> ${seats}</span>` +
+      `<span><strong>Em uso:</strong> ${used}</span>` +
+      `<span><strong>Preço por assento:</strong> ${_finBRL(d.seat_price_cents)}${d.discount_pct ? ` (${d.discount_pct}% desc.)` : ''}</span>` +
+      `<span><strong>Validade:</strong> ${expStr}</span>`;
+
+    const mEl = document.getElementById('finMonthly');
+    const cEl = document.getElementById('finMonthlyCalc');
+    if (mEl) mEl.textContent = _finBRL(d.monthly_cents);
+    if (cEl) cEl.textContent = `${_finBRL(d.seat_price_cents)} × ${seats} assentos`;
+
+    const pays = d.payments || [];
+    if (tb) {
+      tb.innerHTML = pays.length ? pays.map(p => `<tr>
+        <td>${escHtml(p.competencia)}</td>
+        <td class="num">${_finBRL(p.amount_cents)}</td>
+        <td>${p.paid_at ? escHtml(p.paid_at) : '—'}</td>
+        <td>${escHtml(p.method || '—')}</td>
+        <td>${escHtml(p.note || '—')}</td>
+      </tr>`).join('') : '<tr><td colspan="5" class="empty-state">Nenhum pagamento registrado ainda.</td></tr>';
+    }
+  } catch (e) {
+    sum.innerHTML = '<span style="color:var(--danger)">Erro ao carregar financeiro: ' + escHtml(e.message) + '</span>';
+    if (tb) tb.innerHTML = '<tr><td colspan="5" class="empty-state">—</td></tr>';
+  }
+}
+

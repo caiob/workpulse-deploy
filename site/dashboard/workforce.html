@@ -11,7 +11,7 @@
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
-<link rel="stylesheet" href="css/workforce.css?v=19">
+<link rel="stylesheet" href="css/workforce.css?v=21">
 <link rel="icon" type="image/jpeg" href="../assets/logo-workpulse.jpeg">
 </head>
 <body>
@@ -96,6 +96,38 @@
   </div>
 </div>
 
+<!-- ===== MODAL: EDITAR USUÁRIO (perfil + visão do Líder) ===== -->
+<div id="duEditModal" class="login-shade hide">
+  <div class="login-box" style="max-width:580px;width:94%">
+    <h2>Editar usuário</h2>
+    <p id="duEditName" style="font-size:12px;color:var(--text-muted)"></p>
+    <label>Nome</label>
+    <input id="duEditDisplay" type="text">
+    <label>Perfil</label>
+    <select id="duEditRole" onchange="duEditRoleChanged()">
+      <option value="supervisor">Supervisor</option>
+      <option value="lider">Líder</option>
+      <option value="admin_master">Admin Master</option>
+    </select>
+
+    <div id="duScopeBox" style="display:none;margin-top:14px;border-top:1px solid var(--border);padding-top:12px">
+      <div style="font-size:13px;font-weight:600;margin-bottom:4px">O que este Líder vê</div>
+      <p style="font-size:11px;color:var(--text-muted);margin:0 0 10px">Marque departamentos (todos do depto) e/ou colaboradores avulsos. Pode combinar.</p>
+      <div style="font-size:12px;color:var(--text-dim);margin-bottom:4px">Departamentos</div>
+      <div id="duScopeDepts" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px"></div>
+      <div style="font-size:12px;color:var(--text-dim);margin-bottom:4px">Colaboradores avulsos</div>
+      <input id="duScopeFilter" oninput="duScopeRenderUsers()" placeholder="buscar colaborador..." style="width:100%;box-sizing:border-box;margin-bottom:6px">
+      <div id="duScopeUsers" style="max-height:210px;overflow:auto;border:1px solid var(--border);border-radius:8px;padding:8px"></div>
+    </div>
+
+    <div id="duEditError" class="login-error" style="display:none"></div>
+    <div style="margin-top:16px;display:flex;gap:8px">
+      <button class="primary" style="flex:1" onclick="duEditSave()">Salvar</button>
+      <button class="ghost" style="flex:1" onclick="document.getElementById('duEditModal').classList.add('hide')">Cancelar</button>
+    </div>
+  </div>
+</div>
+
 <!-- ===== TOPBAR ===== -->
 <header class="topbar">
 
@@ -137,6 +169,21 @@
       </div>
     </div>
 
+    <!-- Dropdown: Administrativo (somente Admin Master) -->
+    <div class="nav-dropdown" data-group="administrativo" data-role="admin_master">
+      <button class="nav-dd-trigger">
+        Administrativo <span class="dd-arrow">▾</span>
+      </button>
+      <div class="nav-dropdown-menu">
+        <button data-tab="financeiro">💲 Financeiro</button>
+        <button data-tab="admusuarios">👤 Usuários</button>
+        <button data-tab="categorizacao">🏷️ Categorização</button>
+        <button data-tab="colaboradores">👥 Colaboradores</button>
+        <button data-tab="relatorios">📧 Relatórios</button>
+        <button data-tab="admlicenca">📄 Licenciamento</button>
+      </div>
+    </div>
+
   </nav>
 
   <!-- Menu de conta (top-right) -->
@@ -170,6 +217,12 @@
         <div class="acct-row">
           <span class="acct-lbl">Usuário</span>
           <span class="acct-val" id="acctUserName" style="text-align:right;min-width:0;overflow:hidden;text-overflow:ellipsis">—</span>
+        </div>
+
+        <!-- Perfil do usuário logado -->
+        <div class="acct-row">
+          <span class="acct-lbl">Perfil</span>
+          <span class="acct-val" id="acctRole">—</span>
         </div>
 
         <!-- Plano e seats -->
@@ -699,79 +752,10 @@
     </div>
   </section>
 
-  <!-- ── CONFIGURAÇÕES ── -->
-  <section id="tab-config" class="hide">
-    <h1 class="page-title"><span class="em">Configurações</span>.</h1>
-    <p class="page-sub">Produtividade, departamentos, colaboradores e preferências de aparência.</p>
-
-    <!-- Card: Aparência / Tema -->
-    <div class="card no-bar" style="margin-bottom:18px">
-      <h3>Aparência</h3>
-      <div class="theme-toggle-card">
-        <button id="themeToggleBtn" class="theme-toggle-btn" onclick="toggleTheme()">☀️ Tema Claro</button>
-        <span style="color:var(--text-dim);font-size:13px">Alterna entre modo escuro e claro. Preferência salva automaticamente.</span>
-      </div>
-    </div>
-
-    <!-- Card: Minha conta -->
-    <div class="card no-bar" style="margin-bottom:18px">
-      <h3>Minha conta</h3>
-      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:8px">
-        <button class="primary" onclick="_openChangePassword(false)">Alterar minha senha</button>
-        <span style="color:var(--text-dim);font-size:13px">Atualize a senha do seu acesso ao painel.</span>
-      </div>
-    </div>
-
-    <!-- Card: Usuários do Painel (somente Admin Master) -->
-    <div class="card no-bar" style="margin-bottom:18px" data-role="admin_master">
-      <h3>Usuários do Painel</h3>
-      <p style="font-size:12px;color:var(--text-dim);margin:4px 0 14px">
-        Cadastre quem acessa o painel. O usuário recebe um e-mail com link para definir a própria senha.
-        <strong>Admin Master</strong> gerencia tudo; <strong>Supervisor</strong> visualiza e edita regras/relatórios.
-      </p>
-      <div class="config-form" style="margin-bottom:12px">
-        <div><label>Nome</label><input id="duName" placeholder="Nome do usuário" style="min-width:180px"></div>
-        <div><label>E-mail</label><input id="duEmail" type="email" placeholder="usuario@empresa.com" style="min-width:200px"></div>
-        <div><label>Perfil</label>
-          <select id="duRole">
-            <option value="supervisor">Supervisor</option>
-            <option value="admin_master">Admin Master</option>
-          </select>
-        </div>
-        <div><label>&nbsp;</label><button class="primary" onclick="duCreate()">Cadastrar e enviar link</button></div>
-      </div>
-      <div id="duError" class="login-error" style="display:none"></div>
-      <div id="duLinkBox" style="display:none;margin:10px 0 4px;padding:12px;border:1px solid var(--border);border-radius:8px;background:var(--bg-2)">
-        <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px">Link para definir a senha (válido por 48h) — <span id="duLinkFor"></span></div>
-        <div style="display:flex;gap:8px;align-items:center">
-          <input id="duLink" readonly onclick="this.select()" style="flex:1;background:var(--bg-1,#0f1530);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:12px">
-          <button class="primary" onclick="duCopyLink()">Copiar</button>
-        </div>
-      </div>
-      <table id="duTable">
-        <thead><tr><th>Nome</th><th>E-mail</th><th>Perfil</th><th>Status</th><th></th></tr></thead>
-        <tbody><tr><td colspan="5" style="color:var(--text-muted);font-size:13px">Carregando...</td></tr></tbody>
-      </table>
-    </div>
-
-    <!-- Card: Licença (somente Admin Master) -->
-    <div class="card no-bar" style="margin-bottom:18px" data-role="admin_master">
-      <h3>Licença</h3>
-      <div id="licSummary" style="display:flex;gap:24px;flex-wrap:wrap;margin:8px 0 14px;font-size:14px">
-        <span style="color:var(--text-dim)">Carregando...</span>
-      </div>
-      <p style="font-size:12px;color:var(--text-dim);margin:0 0 8px">
-        O número de assentos em uso é contado automaticamente pelos colaboradores monitorados pelos agentes. Emissão de novas licenças é feita pela WorkPulse.
-      </p>
-      <div id="licSeats"></div>
-      <div style="margin-top:14px;display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
-        <div><label style="font-size:12px;color:var(--text-dim)">Plano desejado</label><br><input id="licReqPlan" placeholder="ex: business" style="min-width:140px"></div>
-        <div><label style="font-size:12px;color:var(--text-dim)">Seats desejados</label><br><input id="licReqSeats" type="number" min="1" style="min-width:90px"></div>
-        <div style="flex:1;min-width:180px"><label style="font-size:12px;color:var(--text-dim)">Mensagem</label><br><input id="licReqMsg" placeholder="opcional" style="width:100%;box-sizing:border-box"></div>
-        <div><button class="primary" onclick="licRequest()">Solicitar upgrade</button></div>
-      </div>
-    </div>
-
+  <!-- ── ADMINISTRATIVO: Categorização ── -->
+  <section id="tab-categorizacao" class="hide">
+    <h1 class="page-title"><span class="em">Categorização</span>.</h1>
+    <p class="page-sub">Regras de produtividade e os aplicativos/sites detectados para classificar.</p>
     <!-- Nova Regra -->
     <div class="card no-bar" style="margin-bottom:18px">
       <h3>Nova Regra de Produtividade</h3>
@@ -871,8 +855,12 @@
         <div id="sitesList"><p style="color:var(--text-muted);font-size:13px">Carregando...</p></div>
       </div>
     </div>
+  </section>
 
-
+  <!-- ── ADMINISTRATIVO: Colaboradores ── -->
+  <section id="tab-colaboradores" class="hide">
+    <h1 class="page-title"><span class="em">Colaboradores</span>.</h1>
+    <p class="page-sub">Cadastro e dados dos colaboradores monitorados.</p>
     <!-- Colaboradores -->
     <div class="card no-bar" id="collabsSection" style="margin-bottom:18px">
       <div style="display:flex;align-items:baseline;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:4px">
@@ -923,6 +911,12 @@
         <tbody></tbody>
       </table>
     </div>
+  </section>
+
+  <!-- ── ADMINISTRATIVO: Relatórios ── -->
+  <section id="tab-relatorios" class="hide">
+    <h1 class="page-title"><span class="em">Relatórios</span>.</h1>
+    <p class="page-sub">Relatórios automáticos enviados por e-mail.</p>
     <!-- ── RELATÓRIOS AUTOMÁTICOS ── -->
     <div class="card no-bar" style="margin-bottom:18px">
       <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:16px">
@@ -960,6 +954,126 @@
     </div>
   </section>
 
+  <!-- ── ADMINISTRATIVO: Financeiro ── -->
+  <section id="tab-financeiro" class="hide">
+    <h1 class="page-title"><span class="em">Financeiro</span>.</h1>
+    <p class="page-sub">Plano, valor mensal e histórico de pagamentos.</p>
+
+    <!-- Card: Resumo financeiro (somente Admin Master) -->
+    <div class="card no-bar" style="margin-bottom:18px" data-role="admin_master">
+      <h3>Resumo financeiro</h3>
+      <div id="finSummary" style="display:flex;gap:24px;flex-wrap:wrap;margin:8px 0 14px;font-size:14px">
+        <span style="color:var(--text-dim)">Carregando...</span>
+      </div>
+      <div id="finMonthlyBox" style="display:flex;align-items:baseline;gap:10px;padding:14px 16px;background:var(--bg-2);border:1px solid var(--border);border-radius:10px;margin-bottom:8px">
+        <span style="font-size:12px;color:var(--text-dim)">Valor mensal estimado</span>
+        <strong id="finMonthly" style="font-size:24px;color:var(--primary)">—</strong>
+        <span id="finMonthlyCalc" style="font-size:12px;color:var(--text-muted)"></span>
+      </div>
+      <p style="font-size:12px;color:var(--text-dim);margin:0">
+        O valor é calculado sobre os assentos contratados na licença. Condições comerciais (plano, preço por assento e descontos) são definidas pela WorkPulse.
+      </p>
+    </div>
+
+    <!-- Card: Histórico de pagamentos -->
+    <div class="card no-bar" data-role="admin_master">
+      <h3>Histórico de pagamentos</h3>
+      <p style="font-size:12px;color:var(--text-dim);margin:4px 0 12px">Baixas registradas pela WorkPulse, mês a mês.</p>
+      <table id="finPaymentsTable">
+        <thead><tr><th>Competência</th><th class="num">Valor</th><th>Pago em</th><th>Método</th><th>Obs.</th></tr></thead>
+        <tbody><tr><td colspan="5" class="empty-state">Carregando...</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ── ADMINISTRATIVO: Usuários ── -->
+  <section id="tab-admusuarios" class="hide">
+    <h1 class="page-title"><span class="em">Usuários</span> do painel.</h1>
+    <p class="page-sub">Cadastre e gerencie quem acessa o painel da sua empresa.</p>
+    <!-- Card: Usuários do Painel (somente Admin Master) -->
+    <div class="card no-bar" style="margin-bottom:18px" data-role="admin_master">
+      <h3>Usuários do Painel</h3>
+      <p style="font-size:12px;color:var(--text-dim);margin:4px 0 14px">
+        Cadastre quem acessa o painel. O usuário recebe um e-mail com link para definir a própria senha.
+        <strong>Admin Master</strong> gerencia tudo; <strong>Supervisor</strong>, <strong>Líder</strong> e demais perfis têm acesso de acompanhamento (permissões evoluem depois).
+      </p>
+      <div class="config-form" style="margin-bottom:12px">
+        <div><label>Nome</label><input id="duName" placeholder="Nome do usuário" style="min-width:180px"></div>
+        <div><label>E-mail</label><input id="duEmail" type="email" placeholder="usuario@empresa.com" style="min-width:200px"></div>
+        <div><label>Perfil</label>
+          <select id="duRole">
+            <option value="supervisor">Supervisor</option>
+            <option value="lider">Líder</option>
+            <option value="admin_master">Admin Master</option>
+          </select>
+        </div>
+        <div><label>&nbsp;</label><button class="primary" onclick="duCreate()">Cadastrar e enviar link</button></div>
+      </div>
+      <div id="duError" class="login-error" style="display:none"></div>
+      <div id="duLinkBox" style="display:none;margin:10px 0 4px;padding:12px;border:1px solid var(--border);border-radius:8px;background:var(--bg-2)">
+        <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px">Link para definir a senha (válido por 48h) — <span id="duLinkFor"></span></div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <input id="duLink" readonly onclick="this.select()" style="flex:1;background:var(--bg-1,#0f1530);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:12px">
+          <button class="primary" onclick="duCopyLink()">Copiar</button>
+        </div>
+      </div>
+      <table id="duTable">
+        <thead><tr><th>Nome</th><th>E-mail</th><th>Perfil</th><th>Status</th><th></th></tr></thead>
+        <tbody><tr><td colspan="5" style="color:var(--text-muted);font-size:13px">Carregando...</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ── ADMINISTRATIVO: Licenciamento ── -->
+  <section id="tab-admlicenca" class="hide">
+    <h1 class="page-title"><span class="em">Licenciamento</span>.</h1>
+    <p class="page-sub">Plano, assentos em uso e solicitação de upgrade.</p>
+    <!-- Card: Licença (somente Admin Master) -->
+    <div class="card no-bar" style="margin-bottom:18px" data-role="admin_master">
+      <h3>Licença</h3>
+      <div id="licSummary" style="display:flex;gap:24px;flex-wrap:wrap;margin:8px 0 14px;font-size:14px">
+        <span style="color:var(--text-dim)">Carregando...</span>
+      </div>
+      <p style="font-size:12px;color:var(--text-dim);margin:0 0 8px">
+        O número de assentos em uso é contado automaticamente pelos colaboradores monitorados pelos agentes. Emissão de novas licenças é feita pela WorkPulse.
+      </p>
+      <div id="licSeats"></div>
+      <div style="margin-top:14px;display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+        <div><label style="font-size:12px;color:var(--text-dim)">Plano desejado</label><br><input id="licReqPlan" placeholder="ex: business" style="min-width:140px"></div>
+        <div><label style="font-size:12px;color:var(--text-dim)">Seats desejados</label><br><input id="licReqSeats" type="number" min="1" style="min-width:90px"></div>
+        <div style="flex:1;min-width:180px"><label style="font-size:12px;color:var(--text-dim)">Mensagem</label><br><input id="licReqMsg" placeholder="opcional" style="width:100%;box-sizing:border-box"></div>
+        <div><button class="primary" onclick="licRequest()">Solicitar upgrade</button></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── CONFIGURAÇÕES ── -->
+  <section id="tab-config" class="hide">
+    <h1 class="page-title"><span class="em">Configurações</span>.</h1>
+    <p class="page-sub">Produtividade, departamentos, colaboradores e preferências de aparência.</p>
+
+    <!-- Card: Aparência / Tema -->
+    <div class="card no-bar" style="margin-bottom:18px">
+      <h3>Aparência</h3>
+      <div class="theme-toggle-card">
+        <button id="themeToggleBtn" class="theme-toggle-btn" onclick="toggleTheme()">☀️ Tema Claro</button>
+        <span style="color:var(--text-dim);font-size:13px">Alterna entre modo escuro e claro. Preferência salva automaticamente.</span>
+      </div>
+    </div>
+
+    <!-- Card: Minha conta -->
+    <div class="card no-bar" style="margin-bottom:18px">
+      <h3>Minha conta</h3>
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:8px">
+        <button class="primary" onclick="_openChangePassword(false)">Alterar minha senha</button>
+        <span style="color:var(--text-dim);font-size:13px">Atualize a senha do seu acesso ao painel.</span>
+      </div>
+    </div>
+
+
+
+  </section>
+
   <p class="footnote">WorkPulse · Painel do Cliente · Métricas baseadas em metadados de uso (sem captura de tela, sem keylogging).</p>
 </main>
 
@@ -976,11 +1090,11 @@
 <script src="js/wp-internet.js?v=17" defer></script>
 <script src="js/wp-jornada.js?v=19" defer></script>
 <script src="js/wp-locations.js?v=3" defer></script>
-<script src="js/wp-settings.js?v=17" defer></script>
-<script src="js/wp-users.js?v=20" defer></script>
+<script src="js/wp-settings.js?v=18" defer></script>
+<script src="js/wp-users.js?v=24" defer></script>
 <script src="js/wp-reports.js?v=17" defer></script>
-<script src="js/wp-nav.js?v=18" defer></script>
-<script src="js/wp-auth.js?v=18" defer></script>
+<script src="js/wp-nav.js?v=21" defer></script>
+<script src="js/wp-auth.js?v=19" defer></script>
 
 </body>
 </html>

@@ -425,7 +425,7 @@ function renderTenantsLicenses() {
           <span style="color:var(--text-dim);font-size:12px">${t.retention_days != null ? t.retention_days + 'd' : '90d ⚙'}</span>
           <button class="ghost" style="margin-left:4px;font-size:11px;padding:2px 6px" onclick="setRetention('${t.id}', ${t.retention_days || 90})">✎</button>
         </td>
-        <td onclick="event.stopPropagation()"><button class="ghost" onclick="genTenantAccess('${t.id}')">gerar acesso</button></td>
+        <td onclick="event.stopPropagation()" style="white-space:nowrap"><button class="ghost" onclick="genTenantAccess('${t.id}')">gerar acesso</button> <button class="ghost" onclick="finOpen('${t.id}')">financeiro</button></td>
       </tr>
       ${detail}`;
   }).join('') : `<tr><td colspan="12" class="empty">Nenhuma empresa encontrada.</td></tr>`;
@@ -561,8 +561,129 @@ async function loadSystem() {
     loadAwsCosts();
     loadTenantCosts();
     runSim();
+    loadPlanPrices();
   } catch (e) { toast('Erro: '+e.message); }
 }
+
+// ===========================================================================
+// Financeiro — preços por plano + billing/pagamentos por tenant
+// ===========================================================================
+function brl(cents) {
+  return 'R$ ' + ((cents || 0) / 100).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+async function loadPlanPrices() {
+  try {
+    const d = await api('/v1/admin/plan-prices');
+    const p = d.prices || {};
+    const set = (id, c) => { const el = document.getElementById(id); if (el) el.value = ((c || 0) / 100).toFixed(2); };
+    set('ppStarter', p.starter); set('ppBusiness', p.business); set('ppEnterprise', p.enterprise);
+  } catch (e) { /* silencioso */ }
+}
+
+async function savePlanPrices() {
+  const msg = document.getElementById('ppMsg');
+  const cents = (id) => Math.round(parseFloat(document.getElementById(id).value || '0') * 100);
+  try {
+    await api('/v1/admin/plan-prices', {
+      method: 'PUT',
+      body: JSON.stringify({ prices: { starter: cents('ppStarter'), business: cents('ppBusiness'), enterprise: cents('ppEnterprise') } }),
+    });
+    if (msg) { msg.textContent = 'Preços salvos.'; setTimeout(() => msg.textContent = '', 2500); }
+    toast('Preços dos planos atualizados.');
+  } catch (e) { if (msg) msg.textContent = 'Falha: ' + e.message; }
+}
+
+let _finTenant = null, _finSeats = 0, _finPlan = '', _finPlanCents = 0;
+
+async function finOpen(tenantId) {
+  _finTenant = tenantId;
+  const t = (state.tenants || []).find(x => x.id === tenantId);
+  document.getElementById('finTenantLbl').textContent = tenantId;
+  document.getElementById('finSub').textContent = t ? (t.name + ' (' + tenantId + ')') : tenantId;
+  document.getElementById('finError').style.display = 'none';
+  document.getElementById('finModal').classList.remove('hide');
+  try {
+    const d = await api('/v1/admin/tenant-billing?tenant=' + encodeURIComponent(tenantId));
+    _finSeats = d.seats || 0; _finPlan = d.plan || ''; _finPlanCents = d.plan_price_cents || 0;
+    document.getElementById('finOverride').value = (d.seat_price_cents != null) ? (d.seat_price_cents / 100).toFixed(2) : '';
+    document.getElementById('finDiscount').value = d.discount_pct || 0;
+    finRenderCalc(d.effective_seat_cents, d.monthly_cents);
+    finRenderPayments(d.payments || []);
+  } catch (e) {
+    document.getElementById('finError').textContent = 'Falha ao carregar: ' + e.message;
+    document.getElementById('finError').style.display = 'block';
+  }
+}
+
+function finRenderCalc(effCents, monthlyCents) {
+  const el = document.getElementById('finCalc');
+  if (!el) return;
+  el.innerHTML = `Plano <strong>${escHtml(_finPlan || '—')}</strong> · preço base do plano ${brl(_finPlanCents)}/seat`
+    + ` · preço efetivo <strong>${brl(effCents)}</strong>/seat`
+    + ` · ${fmtNum(_finSeats)} assentos contratados`
+    + ` → <strong style="color:var(--accent)">${brl(monthlyCents)}/mês</strong>`;
+}
+
+async function finSaveBilling() {
+  const err = document.getElementById('finError');
+  const ovRaw = document.getElementById('finOverride').value.trim();
+  const seat_price_cents = ovRaw === '' ? null : Math.round(parseFloat(ovRaw) * 100);
+  const discount_pct = parseFloat(document.getElementById('finDiscount').value || '0');
+  try {
+    await api('/v1/admin/tenant-billing?tenant=' + encodeURIComponent(_finTenant), {
+      method: 'PUT', body: JSON.stringify({ seat_price_cents, discount_pct }),
+    });
+    toast('Faturamento atualizado.');
+    finOpen(_finTenant);   // recarrega cálculo
+  } catch (e) { err.textContent = 'Falha: ' + e.message; err.style.display = 'block'; }
+}
+
+function finRenderPayments(list) {
+  const tb = document.getElementById('finPayBody');
+  if (!tb) return;
+  if (!list.length) { tb.innerHTML = '<tr><td colspan="5" class="empty">Nenhum pagamento registrado.</td></tr>'; return; }
+  tb.innerHTML = list.map(p => `<tr>
+    <td class="mono">${escHtml(p.competencia)}</td>
+    <td class="num">${brl(p.amount_cents)}</td>
+    <td>${p.paid_at ? escHtml(p.paid_at) : '—'}</td>
+    <td>${escHtml(p.method || '—')}${p.note ? `<div style="font-size:11px;color:var(--text-muted)">${escHtml(p.note)}</div>` : ''}</td>
+    <td><button class="ghost" onclick="finDelPayment(${p.id})">excluir</button></td>
+  </tr>`).join('');
+}
+
+async function finAddPayment() {
+  const err = document.getElementById('finError');
+  const comp = document.getElementById('finPayComp').value;   // 'AAAA-MM'
+  const amt = Math.round(parseFloat(document.getElementById('finPayAmt').value || '0') * 100);
+  if (!comp) { err.textContent = 'Informe a competência.'; err.style.display = 'block'; return; }
+  if (!(amt >= 0)) { err.textContent = 'Valor inválido.'; err.style.display = 'block'; return; }
+  try {
+    await api('/v1/admin/payments?tenant=' + encodeURIComponent(_finTenant), {
+      method: 'POST',
+      body: JSON.stringify({
+        competencia: comp, amount_cents: amt,
+        paid_at: document.getElementById('finPayDate').value || null,
+        method: document.getElementById('finPayMethod').value.trim() || null,
+        note: document.getElementById('finPayNote').value.trim() || null,
+      }),
+    });
+    ['finPayAmt', 'finPayMethod', 'finPayNote'].forEach(id => document.getElementById(id).value = '');
+    toast('Pagamento registrado.');
+    finOpen(_finTenant);
+  } catch (e) { err.textContent = 'Falha: ' + e.message; err.style.display = 'block'; }
+}
+
+async function finDelPayment(id) {
+  if (!confirm('Excluir este pagamento?')) return;
+  try {
+    await api('/v1/admin/payments/' + id + '?tenant=' + encodeURIComponent(_finTenant), { method: 'DELETE' });
+    toast('Pagamento excluído.');
+    finOpen(_finTenant);
+  } catch (e) { toast('Falha: ' + e.message); }
+}
+
+function finClose() { document.getElementById('finModal').classList.add('hide'); }
 
 async function loadAwsCosts() {
   const box = document.getElementById('awsCostSummary');
@@ -663,7 +784,7 @@ function escHtml(s) {
 // ===========================================================================
 // Logins dos clientes (gestão cross-tenant de dash_users)
 // ===========================================================================
-const _CL_ROLE = { admin_master: 'Admin Master', supervisor: 'Supervisor', wp_admin: 'WorkPulse' };
+const _CL_ROLE = { admin_master: 'Admin Master', supervisor: 'Supervisor', lider: 'Líder', wp_admin: 'WorkPulse' };
 
 function _clErr(msg) {
   const e = document.getElementById('clError');

@@ -58,6 +58,45 @@
   </div>
 </div>
 
+<!-- MODAL: Financeiro do cliente -->
+<div id="finModal" class="login-shade hide">
+  <div class="login-box" style="max-width:600px">
+    <div class="crumb">financeiro <span class="sep">·</span> <span id="finTenantLbl" class="mono"></span></div>
+    <h2>Financeiro do cliente</h2>
+    <p id="finSub" style="font-size:12px;color:var(--text-muted)"></p>
+
+    <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end">
+      <div><label>Preço/seat negociado (R$)</label>
+        <input id="finOverride" class="fld" type="number" min="0" step="0.01" placeholder="vazio = usa preço do plano" style="width:200px"></div>
+      <div><label>Desconto (%)</label>
+        <input id="finDiscount" class="fld" type="number" min="0" max="100" step="0.1" value="0" style="width:120px"></div>
+      <button class="primary" onclick="finSaveBilling()">Salvar</button>
+    </div>
+    <p id="finCalc" style="font-size:12.5px;color:var(--text);margin:10px 0 0"></p>
+    <div id="finError" class="login-error"></div>
+
+    <div class="adm-sep" style="margin:16px 0 14px"></div>
+    <h3 style="margin:0 0 8px;font-size:14px">Registrar pagamento (baixa manual)</h3>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+      <div><label>Competência</label><input id="finPayComp" class="fld" type="month" style="width:160px"></div>
+      <div><label>Valor (R$)</label><input id="finPayAmt" class="fld" type="number" min="0" step="0.01" style="width:140px"></div>
+      <div><label>Pago em</label><input id="finPayDate" class="fld" type="date" style="width:160px"></div>
+      <div><label>Método</label><input id="finPayMethod" class="fld" placeholder="PIX, boleto..." style="width:140px"></div>
+      <button class="primary" onclick="finAddPayment()">Registrar</button>
+    </div>
+    <input id="finPayNote" class="fld" placeholder="observação (opcional)" style="margin-top:8px;width:100%">
+
+    <table style="margin-top:14px">
+      <thead><tr><th>Competência</th><th class="num">Valor</th><th>Pago em</th><th>Método</th><th></th></tr></thead>
+      <tbody id="finPayBody"><tr><td colspan="5" class="empty">—</td></tr></tbody>
+    </table>
+
+    <div style="display:flex;gap:8px;margin-top:14px">
+      <button class="ghost" onclick="finClose()">Fechar</button>
+    </div>
+  </div>
+</div>
+
 <header class="topbar">
   <div class="brand">
     <img src="../assets/logo-workpulse.jpeg" alt="WorkPulse" class="brand-logo">
@@ -371,6 +410,18 @@
       </div>
 
       <div class="card span-12">
+        <h3>Preços dos planos</h3>
+        <p style="font-size:11px;color:var(--text-muted);margin:0 0 10px">Valor por assento/mês (R$) de cada plano. É a base do faturamento dos clientes; cada cliente pode ter um valor negociado ou desconto na aba <strong>Tenants &amp; Licenças → financeiro</strong>.</p>
+        <div style="display:flex;gap:16px;align-items:flex-end;flex-wrap:wrap">
+          <div><label class="fld-label">Starter — R$/seat</label><br><input id="ppStarter" class="fld" type="number" min="0" step="0.01" style="width:150px"></div>
+          <div><label class="fld-label">Business — R$/seat</label><br><input id="ppBusiness" class="fld" type="number" min="0" step="0.01" style="width:150px"></div>
+          <div><label class="fld-label">Enterprise — R$/seat</label><br><input id="ppEnterprise" class="fld" type="number" min="0" step="0.01" style="width:150px"></div>
+          <button class="primary" onclick="savePlanPrices()">Salvar preços</button>
+          <span id="ppMsg" style="font-size:12px;color:var(--text-muted)"></span>
+        </div>
+      </div>
+
+      <div class="card span-12">
         <h3>Custos AWS</h3>
         <div id="awsCostSummary" style="display:flex;gap:24px;flex-wrap:wrap;margin:8px 0 4px;font-size:14px">
           <span style="color:var(--text-muted)">Carregando...</span>
@@ -455,6 +506,7 @@
           <select id="clRole">
             <option value="admin_master">Admin Master (cliente)</option>
             <option value="supervisor">Supervisor (cliente)</option>
+            <option value="lider">Líder (cliente)</option>
           </select>
         </div>
         <div><button class="primary" onclick="clCreate()">Criar e enviar link</button></div>
@@ -487,6 +539,6 @@
 
 <div id="toast" class="toast hide"></div>
 
-<script src="js/admin.js?v=13"></script>
+<script src="js/admin.js?v=15"></script>
 </body>
 </html>

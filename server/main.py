@@ -1005,7 +1005,8 @@ def license_revoke(lic_id: str, request: Request):
 # ===========================================================================
 
 @app.get("/v1/users", dependencies=[Depends(require_tenant_scope)])
-def list_users(tenant: str):
+def list_users(tenant: str, request: Request):
+    allowed = _lider_allowed_ids(request, tenant)
     with db() as c:
         rows = c.execute(
             """SELECT user_id, display_name, email, department, role,
@@ -1013,11 +1014,15 @@ def list_users(tenant: str):
                FROM users WHERE tenant_id = %s ORDER BY last_seen DESC""",
             (tenant,),
         ).fetchall()
-    return {"users": [dict(r) for r in rows]}
+    out = [dict(r) for r in rows]
+    if allowed is not None:
+        aset = set(allowed)
+        out = [r for r in out if r["user_id"] in aset]
+    return {"users": out}
 
 
 @app.get("/v1/users/{user_id}/summary", dependencies=[Depends(require_tenant_scope)])
-def user_summary(user_id: str, tenant: str, days: int = 7,
+def user_summary(user_id: str, tenant: str, request: Request, days: int = 7,
                  since: str | None = None, until: str | None = None):
     if since is None:
         since = _since_for_days(days)
@@ -1030,6 +1035,9 @@ def user_summary(user_id: str, tenant: str, days: int = 7,
         ).fetchone()
         if not info:
             raise HTTPException(status_code=404, detail="user not found")
+        _allowed = _lider_allowed_ids(request, tenant)
+        if _allowed is not None and user_id not in set(_allowed):
+            raise HTTPException(status_code=403, detail="colaborador fora do seu escopo")
 
         totals = c.execute(
             """SELECT
@@ -1103,13 +1111,16 @@ def update_user(user_id: str, body: UserUpdate, tenant: str, request: Request):
 # ===========================================================================
 
 @app.get("/v1/team/summary", dependencies=[Depends(require_tenant_scope)])
-def team_summary(tenant: str, days: int = 7,
+def team_summary(tenant: str, request: Request, days: int = 7,
                  since: str | None = None, until: str | None = None):
     if since is None:
         since = _since_for_days(days)
     if until is None:
         until = dt.datetime.now(dt.timezone.utc).isoformat()
-    cache_key = f"{tenant}:team_summary:{since}:{until}"
+    allowed, _stag = _scope_for(request, tenant)
+    SC = " AND user_id = ANY(%s)" if allowed is not None else ""
+    A  = [allowed] if allowed is not None else []
+    cache_key = f"{tenant}:team_summary:{since}:{until}{_stag}"
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
@@ -1131,12 +1142,15 @@ def team_summary(tenant: str, days: int = 7,
                ORDER BY active DESC""",
             (since, until, tenant),
         ).fetchall()
+        if allowed is not None:
+            _aset = set(allowed)
+            per_user = [r for r in per_user if r["user_id"] in _aset]
         global_top = c.execute(
-            """SELECT MIN(data_json->>'app') AS app, SUM(duration_sec) AS seconds
+            f"""SELECT MIN(data_json->>'app') AS app, SUM(duration_sec) AS seconds
                FROM events
-               WHERE tenant_id=%s AND ts>=%s AND ts<=%s AND bucket='window'
+               WHERE tenant_id=%s{SC} AND ts>=%s AND ts<=%s AND bucket='window'
                GROUP BY LOWER(data_json->>'app') ORDER BY seconds DESC LIMIT 15""",
-            (tenant, since, until),
+            tuple([tenant, *A, since, until]),
         ).fetchall()
 
     result = {
@@ -1156,6 +1170,7 @@ def team_summary(tenant: str, days: int = 7,
 @app.get("/v1/events", dependencies=[Depends(require_tenant_scope)])
 def search_events(
     tenant:     str,
+    request:    Request,
     user_id:    str | None = None,
     bucket:     str | None = None,
     since:      str | None = None,
@@ -1178,6 +1193,10 @@ def search_events(
         where.append("ts >= %s"); args.append(since)
     if until:
         where.append("ts <= %s"); args.append(until)
+
+    _allowed = _lider_allowed_ids(request, tenant)
+    if _allowed is not None:
+        where.append("user_id = ANY(%s)"); args.append(_allowed)
 
     where_clause = " AND ".join(where)
     nb_sql, nb_args = _no_browser_where() if no_browser else ("", [])
@@ -1213,6 +1232,7 @@ def search_events(
 def jornada(
     tenant:  str,
     user_id: str,
+    request: Request,
     since:   str | None = None,
     until:   str | None = None,
     days:    int | None = None,
@@ -1235,6 +1255,9 @@ def jornada(
         since = _since_for_days(7)
     if until is None:
         until = dt.datetime.now(dt.timezone.utc).isoformat()
+    _allowed = _lider_allowed_ids(request, tenant)
+    if _allowed is not None and user_id not in set(_allowed):
+        raise HTTPException(status_code=403, detail="colaborador fora do seu escopo")
 
     cache_key = f"{tenant}:jornada:{user_id}:{since}:{until}"
     cached    = _cache_get(cache_key)
@@ -1332,6 +1355,7 @@ def jornada(
 @app.get("/v1/productivity/events_summary", dependencies=[Depends(require_tenant_scope)])
 def productivity_events_summary(
     tenant:  str,
+    request: Request,
     days:    int = Query(7, le=90),
     user_id: str | None = None,
     bucket:  str | None = None,
@@ -1343,7 +1367,8 @@ def productivity_events_summary(
     if until is None:
         until = dt.datetime.now(dt.timezone.utc).isoformat()
     _bucket   = bucket or "window"
-    cache_key = f"{tenant}:events_summary:{since}:{until}:{user_id or ''}:{_bucket}"
+    allowed, _stag = _scope_for(request, tenant)
+    cache_key = f"{tenant}:events_summary:{since}:{until}:{user_id or ''}:{_bucket}{_stag}"
     cached    = _cache_get(cache_key)
     if cached is not None:
         return cached
@@ -1362,6 +1387,8 @@ def productivity_events_summary(
         agg_args: list = [tenant, _bucket, since, until]
         if user_id:
             agg_sql += " AND user_id=%s"; agg_args.append(user_id)
+        if allowed is not None:
+            agg_sql += " AND user_id = ANY(%s)"; agg_args.append(allowed)
         agg_sql += nb_sql; agg_args += nb_args
         agg_sql += " GROUP BY app, title"
         agg_rows = c.execute(agg_sql, agg_args).fetchall()
@@ -1372,6 +1399,8 @@ def productivity_events_summary(
         day_args: list = [tenant, _bucket, since, until]
         if user_id:
             day_sql += " AND user_id=%s"; day_args.append(user_id)
+        if allowed is not None:
+            day_sql += " AND user_id = ANY(%s)"; day_args.append(allowed)
         day_sql += nb_sql; day_args += nb_args
         day_sql += " GROUP BY h, app, title ORDER BY h"
         day_raw = c.execute(day_sql, day_args).fetchall()
@@ -1456,14 +1485,18 @@ def _utc_hour_to_local_day(h: str) -> str:
 
 
 @app.get("/v1/workforce/overview", dependencies=[Depends(require_tenant_scope)])
-def workforce_overview(tenant: str, days: int = 7,
+def workforce_overview(tenant: str, request: Request, days: int = 7,
                        since: str | None = None, until: str | None = None):
     now = dt.datetime.now(dt.timezone.utc)
     if since is None:
         since = _since_for_days(days)
     if until is None:
         until = now.isoformat()
-    cache_key        = f"{tenant}:overview:{since}:{until}"
+    allowed, _stag   = _scope_for(request, tenant)
+    SC  = " AND user_id = ANY(%s)"   if allowed is not None else ""
+    SCU = " AND u.user_id = ANY(%s)" if allowed is not None else ""
+    A   = [allowed] if allowed is not None else []
+    cache_key        = f"{tenant}:overview:{since}:{until}{_stag}"
     cached           = _cache_get(cache_key)
     if cached is not None:
         return cached
@@ -1473,61 +1506,61 @@ def workforce_overview(tenant: str, days: int = 7,
 
     with db() as c:
         totals = c.execute(
-            """SELECT
+            f"""SELECT
                    COUNT(DISTINCT user_id) AS total_users,
                    SUM(CASE WHEN bucket='window' THEN duration_sec END) AS active,
                    SUM(CASE WHEN bucket='afk' AND data_json->>'status'='afk'
                             THEN duration_sec END) AS afk,
                    SUM(CASE WHEN bucket='window' AND ts>=%s THEN duration_sec END) AS today_active
-               FROM events WHERE tenant_id=%s AND ts>=%s AND ts<=%s""",
-            (today_start, tenant, since, until),
+               FROM events WHERE tenant_id=%s{SC} AND ts>=%s AND ts<=%s""",
+            tuple([today_start, tenant, *A, since, until]),
         ).fetchone()
         today_active = totals["today_active"] or 0
 
         online = c.execute(
-            "SELECT COUNT(*) AS n FROM users WHERE tenant_id=%s AND last_seen>=%s",
-            (tenant, online_threshold),
+            f"SELECT COUNT(*) AS n FROM users WHERE tenant_id=%s{SC} AND last_seen>=%s",
+            tuple([tenant, *A, online_threshold]),
         ).fetchone()["n"]
 
         hourly = c.execute(
-            """SELECT CAST(substr(ts,12,2) AS INTEGER) AS hour, SUM(duration_sec) AS seconds
-               FROM events WHERE tenant_id=%s AND ts>=%s AND ts<=%s AND bucket='window'
+            f"""SELECT CAST(substr(ts,12,2) AS INTEGER) AS hour, SUM(duration_sec) AS seconds
+               FROM events WHERE tenant_id=%s{SC} AND ts>=%s AND ts<=%s AND bucket='window'
                GROUP BY hour ORDER BY hour""",
-            (tenant, since, until),
+            tuple([tenant, *A, since, until]),
         ).fetchall()
 
         # Agrupa por HORA UTC; o re-bucket para data LOCAL (BRT) é feito em Python
         # (ver DASH_TZ_OFFSET_HOURS) para que cada dia local seja uma única barra.
         # substr é portável (PostgreSQL + harness sqlite).
         _hour_dur = c.execute(
-            """SELECT substr(ts,1,13) AS h,
+            f"""SELECT substr(ts,1,13) AS h,
                       SUM(CASE WHEN bucket='window' THEN duration_sec ELSE 0 END) AS active,
                       SUM(CASE WHEN bucket='afk' AND data_json->>'status'='afk'
                                THEN duration_sec ELSE 0 END) AS afk
-               FROM events WHERE tenant_id=%s AND ts>=%s AND ts<=%s
+               FROM events WHERE tenant_id=%s{SC} AND ts>=%s AND ts<=%s
                GROUP BY h""",
-            (tenant, since, until),
+            tuple([tenant, *A, since, until]),
         ).fetchall()
         _hour_usr = c.execute(
-            """SELECT DISTINCT substr(ts,1,13) AS h, user_id
-               FROM events WHERE tenant_id=%s AND ts>=%s AND ts<=%s""",
-            (tenant, since, until),
+            f"""SELECT DISTINCT substr(ts,1,13) AS h, user_id
+               FROM events WHERE tenant_id=%s{SC} AND ts>=%s AND ts<=%s""",
+            tuple([tenant, *A, since, until]),
         ).fetchall()
 
         by_dept = c.execute(
-            """SELECT COALESCE(u.department, 'Sem departamento') AS dept,
+            f"""SELECT COALESCE(u.department, 'Sem departamento') AS dept,
                       COUNT(DISTINCT u.user_id) AS users,
                       COALESCE(SUM(CASE WHEN e.bucket='window' THEN e.duration_sec END), 0) AS active
                FROM users u
                LEFT JOIN events e ON e.tenant_id=u.tenant_id AND e.user_id=u.user_id
                     AND e.ts>=%s AND e.ts<=%s
-               WHERE u.tenant_id=%s
+               WHERE u.tenant_id=%s{SCU}
                GROUP BY dept ORDER BY active DESC""",
-            (since, until, tenant),
+            tuple([since, until, tenant, *A]),
         ).fetchall()
 
         risk = c.execute(
-            """SELECT u.user_id, u.display_name,
+            f"""SELECT u.user_id, u.display_name,
                       COALESCE(e.total_sec, 0) AS total_active
                FROM users u
                LEFT JOIN (
@@ -1535,8 +1568,8 @@ def workforce_overview(tenant: str, days: int = 7,
                    FROM events WHERE tenant_id=%s AND ts>=%s AND ts<=%s AND bucket='window'
                    GROUP BY user_id
                ) e ON e.user_id = u.user_id
-               WHERE u.tenant_id=%s""",
-            (tenant, since, until, tenant),
+               WHERE u.tenant_id=%s{SCU}""",
+            tuple([tenant, since, until, tenant, *A]),
         ).fetchall()
 
     overwork, underwork = [], []
@@ -1588,18 +1621,21 @@ def workforce_overview(tenant: str, days: int = 7,
 
 
 @app.get("/v1/workforce/timeseries", dependencies=[Depends(require_tenant_scope)])
-def workforce_timeseries(tenant: str, days: int = 30, bucket: str = "window",
+def workforce_timeseries(tenant: str, request: Request, days: int = 30, bucket: str = "window",
                          since: str | None = None, until: str | None = None):
     if since is None:
         since = _since_for_days(days)
     if until is None:
         until = dt.datetime.now(dt.timezone.utc).isoformat()
+    allowed = _lider_allowed_ids(request, tenant)
+    SC = " AND user_id = ANY(%s)" if allowed is not None else ""
+    A  = [allowed] if allowed is not None else []
     with db() as c:
         rows = c.execute(
-            """SELECT substr(ts,1,10) AS day, SUM(duration_sec) AS seconds
-               FROM events WHERE tenant_id=%s AND ts>=%s AND ts<=%s AND bucket=%s
+            f"""SELECT substr(ts,1,10) AS day, SUM(duration_sec) AS seconds
+               FROM events WHERE tenant_id=%s{SC} AND ts>=%s AND ts<=%s AND bucket=%s
                GROUP BY day ORDER BY day""",
-            (tenant, since, until, bucket),
+            tuple([tenant, *A, since, until, bucket]),
         ).fetchall()
     return {"tenant": tenant, "bucket": bucket, "series": [dict(r) for r in rows]}
 
@@ -1666,6 +1702,7 @@ def delete_productivity_rule(rule_id: int, tenant: str):
 @app.get("/v1/productivity/internet", dependencies=[Depends(require_tenant_scope)])
 def productivity_internet(
     tenant:  str,
+    request: Request,
     days:    int = Query(7, le=90),
     user_id: str | None = None,
     since:   str | None = None,
@@ -1689,6 +1726,9 @@ def productivity_internet(
         args: list = [tenant, since, until]
         if user_id:
             sql += " AND user_id=%s"; args.append(user_id)
+        _allowed = _lider_allowed_ids(request, tenant)
+        if _allowed is not None:
+            sql += " AND user_id = ANY(%s)"; args.append(_allowed)
         sql += " GROUP BY user_id, app, title ORDER BY total_sec DESC"
         raw_rows = c.execute(sql, args).fetchall()
 
@@ -1698,6 +1738,8 @@ def productivity_internet(
         dargs: list = [tenant, since, until]
         if user_id:
             dsql += " AND user_id=%s"; dargs.append(user_id)
+        if _allowed is not None:
+            dsql += " AND user_id = ANY(%s)"; dargs.append(_allowed)
         dsql += " GROUP BY h, app, title ORDER BY h"
         daily_raw = c.execute(dsql, dargs).fetchall()
 
@@ -1772,20 +1814,23 @@ def productivity_internet(
 
 
 @app.get("/v1/productivity/apps", dependencies=[Depends(require_tenant_scope)])
-def productivity_apps(tenant: str, days: int = Query(30, le=90)):
+def productivity_apps(tenant: str, request: Request, days: int = Query(30, le=90)):
     since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).isoformat()
+    allowed = _lider_allowed_ids(request, tenant)
+    SC = " AND user_id = ANY(%s)" if allowed is not None else ""
+    A  = [allowed] if allowed is not None else []
     with db() as c:
         rules = [dict(r) for r in c.execute(
             "SELECT * FROM productivity_rules WHERE tenant_id=%s ORDER BY created_at",
             (tenant,),
         ).fetchall()]
         rows = c.execute(
-            """SELECT data_json->>'app' AS app,
+            f"""SELECT data_json->>'app' AS app,
                       SUM(duration_sec) AS total_sec,
                       COUNT(DISTINCT user_id) AS user_count
-               FROM events WHERE tenant_id=%s AND bucket='window' AND ts>=%s
+               FROM events WHERE tenant_id=%s{SC} AND bucket='window' AND ts>=%s
                GROUP BY app ORDER BY total_sec DESC LIMIT 150""",
-            (tenant, since),
+            tuple([tenant, *A, since]),
         ).fetchall()
 
     apps = []
@@ -1807,7 +1852,10 @@ def productivity_apps(tenant: str, days: int = Query(30, le=90)):
 # ===========================================================================
 
 @app.get("/v1/departments", dependencies=[Depends(require_tenant_scope)])
-def list_departments(tenant: str):
+def list_departments(tenant: str, request: Request):
+    allowed = _lider_allowed_ids(request, tenant)
+    SC = " AND user_id = ANY(%s)" if allowed is not None else ""
+    A  = [allowed] if allowed is not None else []
     with db() as c:
         depts  = c.execute(
             "SELECT id, name, created_at FROM tenant_departments WHERE tenant_id=%s ORDER BY name",
@@ -1816,13 +1864,13 @@ def list_departments(tenant: str):
         result = []
         for d in depts:
             count = c.execute(
-                "SELECT COUNT(*) AS n FROM users WHERE tenant_id=%s AND department=%s",
-                (tenant, d["name"]),
+                f"SELECT COUNT(*) AS n FROM users WHERE tenant_id=%s{SC} AND department=%s",
+                tuple([tenant, *A, d["name"]]),
             ).fetchone()["n"]
             users = c.execute(
-                """SELECT user_id, display_name, login_user, last_seen
-                   FROM users WHERE tenant_id=%s AND department=%s ORDER BY last_seen DESC""",
-                (tenant, d["name"]),
+                f"""SELECT user_id, display_name, login_user, last_seen
+                   FROM users WHERE tenant_id=%s{SC} AND department=%s ORDER BY last_seen DESC""",
+                tuple([tenant, *A, d["name"]]),
             ).fetchall()
             result.append({
                 "id":         d["id"],
@@ -1831,6 +1879,8 @@ def list_departments(tenant: str):
                 "user_count": count,
                 "users":      [dict(u) for u in users],
             })
+    if allowed is not None:
+        result = [d for d in result if d["user_count"] > 0]
     return {"departments": result}
 
 
@@ -2558,8 +2608,8 @@ PANEL_BASE_URL     = os.getenv("WORKPULSE_PANEL_URL", "https://workpulse.com.br/
 PLATFORM_NOTIFY    = os.getenv("WORKPULSE_NOTIFY_EMAIL", FROM_EMAIL)
 TOKEN_TTL_HOURS    = int(os.getenv("WORKPULSE_PWTOKEN_TTL_HOURS", "48"))
 
-CLIENT_ROLES   = ("admin_master", "supervisor")
-ALL_ROLES      = ("admin_master", "supervisor", "wp_admin")
+CLIENT_ROLES   = ("admin_master", "supervisor", "lider")
+ALL_ROLES      = ("admin_master", "supervisor", "lider", "wp_admin")
 
 # --- Tabelas novas (aditivas; init_db() as cria se não existirem) ----------
 _SCHEMA_STMTS.extend([
@@ -2570,8 +2620,7 @@ _SCHEMA_STMTS.extend([
         email          TEXT NOT NULL,
         password_hash  TEXT NOT NULL,
         display_name   TEXT,
-        role           TEXT NOT NULL DEFAULT 'supervisor'
-                       CHECK (role IN ('admin_master','supervisor','wp_admin')),
+        role           TEXT NOT NULL DEFAULT 'supervisor',
         status         TEXT NOT NULL DEFAULT 'active'
                        CHECK (status IN ('active','disabled')),
         must_change_pw BOOLEAN NOT NULL DEFAULT TRUE,
@@ -2586,6 +2635,7 @@ _SCHEMA_STMTS.extend([
     )
     """,
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_dash_users_email ON dash_users (lower(email))",
+    "ALTER TABLE dash_users DROP CONSTRAINT IF EXISTS dash_users_role_check",
     "CREATE INDEX IF NOT EXISTS idx_dash_users_tenant ON dash_users(tenant_id)",
     """
     CREATE TABLE IF NOT EXISTS dash_sessions (
@@ -3731,8 +3781,11 @@ def _geo_label(g: dict | None) -> str:
 
 
 @app.get("/v1/locations", dependencies=[Depends(require_tenant_scope)])
-def locations(tenant: str, user_id: str | None = None,
+def locations(tenant: str, request: Request, user_id: str | None = None,
               since: str | None = None, until: str | None = None, days: int | None = None):
+    _allowed = _lider_allowed_ids(request, tenant)
+    if user_id and _allowed is not None and user_id not in set(_allowed):
+        raise HTTPException(status_code=403, detail="colaborador fora do seu escopo")
     if days:
         since = _since_for_days(int(days))
     if since is None:
@@ -3803,6 +3856,9 @@ def locations(tenant: str, user_id: str | None = None,
             "last_city": (g or {}).get("city"), "last_country": (g or {}).get("country"),
             "last_lat": (g or {}).get("lat"), "last_lon": (g or {}).get("lon"),
         })
+    if _allowed is not None:
+        _aset = set(_allowed)
+        users_out = [u for u in users_out if u["user_id"] in _aset]
     users_out.sort(key=lambda x: (-x["distinct_ips"], x["display_name"].lower()))
     return {"tenant": tenant, "since": d_since, "until": d_until, "users": users_out}
 
@@ -3830,6 +3886,329 @@ def admin_geo_test(ip: str = "8.8.8.8"):
         out["error"] = f"{type(exc).__name__}: {exc}"
     out["parsed"] = _fetch_geo(ip)
     return out
+
+
+# ===========================================================================
+# Escopo do Líder — quais colaboradores cada Líder pode ver
+# ===========================================================================
+_SCHEMA_STMTS.extend([
+    """
+    CREATE TABLE IF NOT EXISTS lider_scope (
+        tenant_id   TEXT NOT NULL,
+        lider_id    BIGINT NOT NULL,
+        scope_type  TEXT NOT NULL,   -- 'department' | 'user'
+        scope_value TEXT NOT NULL,   -- nome do departamento OU user_id do colaborador
+        PRIMARY KEY (tenant_id, lider_id, scope_type, scope_value)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_lider_scope ON lider_scope(tenant_id, lider_id)",
+])
+
+
+class LiderScopeIn(BaseModel):
+    departments: list[str] = []
+    users: list[str] = []
+
+
+def _lider_allowed_ids(request: Request, tenant: str):
+    """Para uma sessão de LÍDER, devolve a lista de user_ids (colaboradores) que
+    ele pode ver. Devolve None quando NÃO há restrição (admin_master, supervisor,
+    wp_admin ou acesso por token). Lista vazia = Líder sem nada atribuído (vê nada)."""
+    sid = request.cookies.get(SESSION_COOKIE)
+    if not sid:
+        return None  # acesso por token/break-glass → sem restrição
+    u = _load_session_user(sid)
+    if not u or u.get("role") != "lider" or u.get("tenant_id") != tenant:
+        return None
+    with db() as c:
+        rows = c.execute(
+            "SELECT scope_type, scope_value FROM lider_scope WHERE tenant_id=%s AND lider_id=%s",
+            (tenant, u["id"]),
+        ).fetchall()
+    depts = [r["scope_value"] for r in rows if r["scope_type"] == "department"]
+    users = set(r["scope_value"] for r in rows if r["scope_type"] == "user")
+    if depts:
+        with db() as c:
+            urows = c.execute(
+                "SELECT user_id FROM users WHERE tenant_id=%s AND department = ANY(%s)",
+                (tenant, depts),
+            ).fetchall()
+        users.update(r["user_id"] for r in urows)
+    return list(users)
+
+
+def _scope_for(request: Request, tenant: str):
+    """Devolve (allowed_or_None, cache_tag). allowed=None => sem restrição.
+    cache_tag entra na chave de cache para o Líder não pegar o cache do time todo."""
+    allowed = _lider_allowed_ids(request, tenant)
+    tag = "" if allowed is None else (":scope:" + ",".join(sorted(allowed)) or ":scope:none")
+    return allowed, tag
+
+
+@app.get("/v1/tenant-users/{uid}/scope")
+def tenant_user_scope_get(uid: int, tenant: str,
+                          ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
+    with db() as c:
+        rows = c.execute(
+            "SELECT scope_type, scope_value FROM lider_scope WHERE tenant_id=%s AND lider_id=%s",
+            (tid, uid),
+        ).fetchall()
+    return {
+        "departments": [r["scope_value"] for r in rows if r["scope_type"] == "department"],
+        "users":       [r["scope_value"] for r in rows if r["scope_type"] == "user"],
+    }
+
+
+@app.put("/v1/tenant-users/{uid}/scope")
+def tenant_user_scope_set(uid: int, body: LiderScopeIn, tenant: str, request: Request,
+                          ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
+    user = _fetch_tenant_user(uid, tid, ctx["role"])
+    with db() as c:
+        c.execute("DELETE FROM lider_scope WHERE tenant_id=%s AND lider_id=%s", (tid, uid))
+        for d in set(x for x in body.departments if x):
+            c.execute(
+                """INSERT INTO lider_scope (tenant_id, lider_id, scope_type, scope_value)
+                   VALUES (%s,%s,'department',%s)
+                   ON CONFLICT (tenant_id, lider_id, scope_type, scope_value) DO NOTHING""",
+                (tid, uid, d),
+            )
+        for usr in set(x for x in body.users if x):
+            c.execute(
+                """INSERT INTO lider_scope (tenant_id, lider_id, scope_type, scope_value)
+                   VALUES (%s,%s,'user',%s)
+                   ON CONFLICT (tenant_id, lider_id, scope_type, scope_value) DO NOTHING""",
+                (tid, uid, usr),
+            )
+    audit(ctx["email"], "lider_scope.set", target=user["email"],
+          detail=f"depts={len(set(body.departments))};users={len(set(body.users))}",
+          ip=_client_ip(request))
+    return {"ok": True}
+
+
+# ===========================================================================
+# Financeiro — preços por plano, billing por tenant (override/desconto),
+# histórico de pagamentos (baixa manual). Valores em CENTAVOS (BRL).
+# ===========================================================================
+_SCHEMA_STMTS.extend([
+    """
+    CREATE TABLE IF NOT EXISTS plan_prices (
+        plan        TEXT PRIMARY KEY,
+        price_cents INTEGER NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS tenant_billing (
+        tenant_id        TEXT PRIMARY KEY,
+        seat_price_cents INTEGER,              -- override absoluto do preço/seat (NULL = usa plano)
+        discount_pct     REAL NOT NULL DEFAULT 0,
+        updated_at       TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS payments (
+        id           BIGSERIAL PRIMARY KEY,
+        tenant_id    TEXT NOT NULL,
+        competencia  TEXT NOT NULL,            -- 'AAAA-MM'
+        amount_cents INTEGER NOT NULL,
+        paid_at      TEXT,                     -- 'AAAA-MM-DD'
+        method       TEXT,
+        note         TEXT,
+        created_by   TEXT,
+        created_at   TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_payments_tenant ON payments(tenant_id)",
+    # Preços padrão (placeholder editável). starter/business/enterprise.
+    "INSERT INTO plan_prices (plan, price_cents) VALUES ('starter', 1500)    ON CONFLICT (plan) DO NOTHING",
+    "INSERT INTO plan_prices (plan, price_cents) VALUES ('business', 2500)   ON CONFLICT (plan) DO NOTHING",
+    "INSERT INTO plan_prices (plan, price_cents) VALUES ('enterprise', 4000) ON CONFLICT (plan) DO NOTHING",
+])
+
+_PLAN_ORDER = ["starter", "business", "enterprise"]
+
+
+def _plan_prices_map() -> dict:
+    with db() as c:
+        rows = c.execute("SELECT plan, price_cents FROM plan_prices").fetchall()
+    return {r["plan"]: int(r["price_cents"]) for r in rows}
+
+
+def _effective_seat_cents(tenant: str, plan: str):
+    """Devolve (base_cents, discount_pct, eff_cents). base = override do tenant
+    se houver, senão preço do plano. eff = base com desconto aplicado."""
+    prices = _plan_prices_map()
+    plan_cents = prices.get((plan or "").strip(), 0)
+    with db() as c:
+        tb = c.execute(
+            "SELECT seat_price_cents, discount_pct FROM tenant_billing WHERE tenant_id=%s",
+            (tenant,),
+        ).fetchone()
+    override = tb["seat_price_cents"] if tb and tb["seat_price_cents"] is not None else None
+    disc = float(tb["discount_pct"]) if tb and tb["discount_pct"] is not None else 0.0
+    base = override if override is not None else plan_cents
+    eff = int(round(base * (1.0 - disc / 100.0)))
+    return base, disc, eff
+
+
+def _payments_list(tenant: str) -> list:
+    with db() as c:
+        rows = c.execute(
+            """SELECT id, competencia, amount_cents, paid_at, method, note, created_at
+               FROM payments WHERE tenant_id=%s
+               ORDER BY competencia DESC, id DESC""",
+            (tenant,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# --- Modelos ---
+class PlanPricesIn(BaseModel):
+    prices: dict[str, int]   # plan -> centavos
+
+
+class TenantBillingIn(BaseModel):
+    seat_price_cents: int | None = None   # None/0 → usa preço do plano
+    discount_pct: float = 0
+
+
+class PaymentIn(BaseModel):
+    competencia: str          # 'AAAA-MM'
+    amount_cents: int
+    paid_at: str | None = None
+    method: str | None = None
+    note: str | None = None
+
+
+# --- Endpoints PLATAFORMA (WorkPulse admin) ---
+@app.get("/v1/admin/plan-prices", dependencies=[Depends(require_admin)])
+def admin_plan_prices_get():
+    prices = _plan_prices_map()
+    return {"prices": {p: prices.get(p, 0) for p in _PLAN_ORDER}}
+
+
+@app.put("/v1/admin/plan-prices", dependencies=[Depends(require_admin)])
+def admin_plan_prices_set(body: PlanPricesIn):
+    with db() as c:
+        for plan, cents in body.prices.items():
+            if plan not in _PLAN_ORDER:
+                continue
+            cents = max(0, int(cents))
+            c.execute(
+                "INSERT INTO plan_prices (plan, price_cents) VALUES (%s,%s) "
+                "ON CONFLICT (plan) DO UPDATE SET price_cents=EXCLUDED.price_cents",
+                (plan, cents),
+            )
+    return {"ok": True, "prices": _plan_prices_map()}
+
+
+@app.get("/v1/admin/tenant-billing", dependencies=[Depends(require_admin)])
+def admin_tenant_billing_get(tenant: str):
+    with db() as c:
+        lic = c.execute(
+            "SELECT plan, seats FROM licenses WHERE tenant_id=%s ORDER BY issued DESC LIMIT 1",
+            (tenant,),
+        ).fetchone()
+    plan = (lic["plan"] if lic else "") or ""
+    seats = int(lic["seats"]) if lic and lic.get("seats") is not None else 0
+    base, disc, eff = _effective_seat_cents(tenant, plan)
+    prices = _plan_prices_map()
+    with db() as c:
+        tb = c.execute(
+            "SELECT seat_price_cents, discount_pct FROM tenant_billing WHERE tenant_id=%s",
+            (tenant,),
+        ).fetchone()
+    return {
+        "tenant": tenant,
+        "plan": plan,
+        "seats": seats,
+        "plan_price_cents": prices.get(plan, 0),
+        "seat_price_cents": (tb["seat_price_cents"] if tb else None),
+        "discount_pct": disc,
+        "effective_seat_cents": eff,
+        "monthly_cents": eff * seats,
+        "payments": _payments_list(tenant),
+    }
+
+
+@app.put("/v1/admin/tenant-billing", dependencies=[Depends(require_admin)])
+def admin_tenant_billing_set(body: TenantBillingIn, tenant: str):
+    sp = body.seat_price_cents
+    if sp is not None:
+        sp = int(sp)
+        if sp <= 0:
+            sp = None
+    disc = max(0.0, min(100.0, float(body.discount_pct or 0)))
+    with db() as c:
+        c.execute(
+            """INSERT INTO tenant_billing (tenant_id, seat_price_cents, discount_pct, updated_at)
+               VALUES (%s,%s,%s,%s)
+               ON CONFLICT (tenant_id) DO UPDATE
+                 SET seat_price_cents=EXCLUDED.seat_price_cents,
+                     discount_pct=EXCLUDED.discount_pct,
+                     updated_at=EXCLUDED.updated_at""",
+            (tenant, sp, disc, _now_utc().isoformat()),
+        )
+    return {"ok": True}
+
+
+@app.get("/v1/admin/payments", dependencies=[Depends(require_admin)])
+def admin_payments_get(tenant: str):
+    return {"payments": _payments_list(tenant)}
+
+
+@app.post("/v1/admin/payments", dependencies=[Depends(require_admin)])
+def admin_payments_add(body: PaymentIn, tenant: str, request: Request):
+    comp = (body.competencia or "").strip()
+    if len(comp) != 7 or comp[4] != "-":
+        raise HTTPException(400, "competência inválida (use AAAA-MM)")
+    amt = int(body.amount_cents)
+    if amt < 0:
+        raise HTTPException(400, "valor inválido")
+    with db() as c:
+        c.execute(
+            """INSERT INTO payments (tenant_id, competencia, amount_cents, paid_at, method, note, created_by, created_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (tenant, comp, amt, (body.paid_at or None), (body.method or None),
+             (body.note or None), "platform", _now_utc().isoformat()),
+        )
+    return {"ok": True}
+
+
+@app.delete("/v1/admin/payments/{pid}", dependencies=[Depends(require_admin)])
+def admin_payments_del(pid: int, tenant: str):
+    with db() as c:
+        c.execute("DELETE FROM payments WHERE id=%s AND tenant_id=%s", (pid, tenant))
+    return {"ok": True}
+
+
+# --- Endpoint CLIENTE (Admin Master) — página Financeiro ---
+@app.get("/v1/tenant-finance")
+def tenant_finance_get(tenant: str, ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
+    with db() as c:
+        lic = c.execute(
+            "SELECT plan, seats, expires FROM licenses WHERE tenant_id=%s ORDER BY issued DESC LIMIT 1",
+            (tid,),
+        ).fetchone()
+        used = c.execute(
+            "SELECT COUNT(DISTINCT user_id) AS n FROM users WHERE tenant_id=%s", (tid,)
+        ).fetchone()["n"]
+    plan = (lic["plan"] if lic else "") or ""
+    seats = int(lic["seats"]) if lic and lic.get("seats") is not None else 0
+    base, disc, eff = _effective_seat_cents(tid, plan)
+    return {
+        "currency": "BRL",
+        "plan": plan,
+        "seats": seats,
+        "used": used,
+        "expires": (lic["expires"] if lic else None),
+        "seat_price_cents": eff,
+        "discount_pct": disc,
+        "monthly_cents": eff * seats,
+        "payments": _payments_list(tid),
+    }
 
 
 # ---------------------------------------------------------------------------

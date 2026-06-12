@@ -341,9 +341,15 @@ function _enterApp() {
 /* Preenche o nome do usuário logado no menu de conta. */
 function _acctSetUser() {
   const el = document.getElementById('acctUserName');
-  if (!el) return;
-  el.textContent = state.displayName || state.email || '—';
-  el.title = state.email || '';
+  if (el) {
+    el.textContent = state.displayName || state.email || '—';
+    el.title = state.email || '';
+  }
+  const rl = document.getElementById('acctRole');
+  if (rl) {
+    const map = { admin_master: 'Admin Master', supervisor: 'Supervisor', lider: 'Líder', wp_admin: 'WorkPulse' };
+    rl.textContent = map[state.role] || state.role || '—';
+  }
 }
 
 /* Mostra/oculta elementos conforme o perfil (data-role="admin_master"). */

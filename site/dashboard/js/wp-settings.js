@@ -178,7 +178,7 @@ async function deleteRule(id) {
 }
 
 function quickRule(pattern, field) {
-  switchTab('config');
+  switchTab('categorizacao');
   document.getElementById('ruleLabel').value   = pattern;
   document.getElementById('rulePattern').value = pattern;
   if (field) document.getElementById('ruleField').value = field;
@@ -475,7 +475,7 @@ function editUser(uid) {
   if (typeof switchTab === 'function') {
     const current = document.querySelector('nav.tabs > button.active, .nav-dd-trigger.active');
     const tab = current?.dataset?.tab;
-    if (tab !== 'config') switchTab('config');
+    if (tab !== 'colaboradores') switchTab('colaboradores');
   }
   const user = state.collabs.find(u => u.user_id === uid)
     || state.people.find(u => u.user_id === uid)
