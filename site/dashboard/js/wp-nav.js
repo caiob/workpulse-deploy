@@ -10,7 +10,7 @@
 //   status • tenant • [⚙ ▾ → Configurações / Sair]
 // =====================================================================
 
-const TABS = ['overview', 'people', 'departments', 'alerts', 'trends', 'events', 'internet', 'jornada', 'config'];
+const TABS = ['overview', 'people', 'departments', 'alerts', 'trends', 'events', 'internet', 'jornada', 'localizacao', 'config'];
 
 // Mapeamento tab → grupo de dropdown (null = standalone)
 const TAB_GROUP = {
@@ -19,6 +19,7 @@ const TAB_GROUP = {
   events:      'coletas',
   internet:    'coletas',
   jornada:     'coletas',
+  localizacao: 'coletas',
   alerts:      'analises',
   trends:      'analises',
 };
@@ -65,6 +66,7 @@ function switchTab(name) {
     events:      loadEvents,
     internet:    loadInternet,
     jornada:     loadJornada,
+    localizacao: loadLocations,
     config:      loadConfig,
   };
   if (loaders[name]) loaders[name]();

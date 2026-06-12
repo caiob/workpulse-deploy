@@ -9,6 +9,8 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <link rel="stylesheet" href="css/workforce.css?v=19">
 <link rel="icon" type="image/jpeg" href="../assets/logo-workpulse.jpeg">
 </head>
@@ -120,6 +122,7 @@
         <button data-tab="events">⚡ Aplicativos</button>
         <button data-tab="internet">🌐 Internet</button>
         <button data-tab="jornada">⏱ Jornada de Trabalho</button>
+        <button data-tab="localizacao">📍 Localização</button>
       </div>
     </div>
 
@@ -653,6 +656,49 @@
     </div>
   </section>
 
+  <!-- ── LOCALIZAÇÃO ── -->
+  <section id="tab-localizacao" class="hide">
+    <h1 class="page-title">De onde sua equipe <span class="em">se conecta</span>.</h1>
+    <p class="page-sub">IPs públicos de conexão por pessoa, quantas vezes trocou de IP no período e a localização aproximada. Conexões por VPN/proxy mostram o local do servidor, não da pessoa.</p>
+
+    <div class="toolbar">
+      <div><label>Período</label>
+        <div id="locRange"></div>
+      </div>
+      <div style="flex:1"><label>Buscar</label>
+        <input id="locFilter" oninput="locRenderTable()" placeholder="nome, cidade ou IP" style="width:100%;max-width:360px">
+      </div>
+      <div style="display:inline-flex;gap:6px">
+        <button id="locBtnList" class="primary" onclick="locShowList()">Lista</button>
+        <button id="locBtnMap" class="ghost" onclick="locShowMap()">Mapa</button>
+      </div>
+      <button class="ghost" onclick="loadLocations()">↻ Atualizar</button>
+    </div>
+
+    <div id="locListView">
+      <div class="card no-bar">
+        <table id="locTable">
+          <thead>
+            <tr>
+              <th>Colaborador</th><th class="num">IPs distintos</th><th>Último IP</th>
+              <th>Localização (último)</th><th>Última conexão</th><th></th>
+            </tr>
+          </thead>
+          <tbody><tr><td colspan="6" class="empty-state">Carregando...</td></tr></tbody>
+        </table>
+      </div>
+      <div id="locDrill" class="drill hide"></div>
+    </div>
+
+    <div id="locMapView" class="hide">
+      <div class="card no-bar" style="position:relative">
+        <div id="locMap" style="height:540px;border-radius:12px;overflow:hidden;background:var(--bg-2)"></div>
+        <div id="locMapEmpty" style="position:absolute;top:50%;left:0;right:0;transform:translateY(-50%);text-align:center;color:var(--text-muted);font-size:14px;padding:20px;pointer-events:none;display:none"></div>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:8px">Cada ponto é uma cidade · tamanho = nº de pessoas · <span style="color:#4ade80">verde</span> = online há pouco. Clique num ponto para ver quem está ali.</div>
+      </div>
+    </div>
+  </section>
+
   <!-- ── CONFIGURAÇÕES ── -->
   <section id="tab-config" class="hide">
     <h1 class="page-title"><span class="em">Configurações</span>.</h1>
@@ -929,10 +975,11 @@
 <script src="js/wp-events.js?v=17" defer></script>
 <script src="js/wp-internet.js?v=17" defer></script>
 <script src="js/wp-jornada.js?v=19" defer></script>
+<script src="js/wp-locations.js?v=3" defer></script>
 <script src="js/wp-settings.js?v=17" defer></script>
 <script src="js/wp-users.js?v=20" defer></script>
 <script src="js/wp-reports.js?v=17" defer></script>
-<script src="js/wp-nav.js?v=17" defer></script>
+<script src="js/wp-nav.js?v=18" defer></script>
 <script src="js/wp-auth.js?v=18" defer></script>
 
 </body>

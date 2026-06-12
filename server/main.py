@@ -823,7 +823,8 @@ def public_key():
 
 @app.post("/v1/ingest")
 def ingest(
-    payload: IngestPayload,
+    request:       Request,
+    payload:       IngestPayload,
     authorization: Annotated[str | None, Header()] = None,
     x_tenant:      Annotated[str | None, Header()] = None,
     x_device:      Annotated[str | None, Header()] = None,
@@ -875,6 +876,21 @@ def ingest(
             (device_id, user_id, claims["tenant"], payload.device,
              payload.os or x_os, payload.os_version, payload.agent_version, now_iso),
         )
+        # Registra o IP público de conexão (X-Forwarded-For do ALB), agregado por dia local.
+        _client_addr = _client_ip(request)
+        if _client_addr:
+            try:
+                _day_local = (dt.datetime.now(ZoneInfo(REPORT_TZ)).date().isoformat()
+                              if ZoneInfo else dt.date.today().isoformat())
+            except Exception:
+                _day_local = dt.date.today().isoformat()
+            c.execute(
+                """INSERT INTO client_ips (tenant_id, user_id, ip, day, first_seen, last_seen, hits)
+                   VALUES (%s,%s,%s,%s,%s,%s,1)
+                   ON CONFLICT (tenant_id, user_id, ip, day)
+                   DO UPDATE SET last_seen = EXCLUDED.last_seen, hits = client_ips.hits + 1""",
+                (claims["tenant"], user_id, _client_addr, _day_local, now_iso, now_iso),
+            )
         rows = [
             (
                 claims["tenant"], user_id, device_id,
@@ -3583,6 +3599,237 @@ def admin_cost_simulate(users: int = 0):
         "items": items, "total": total,
         "cost_per_user": (round(total / n, 2) if n else None),
     }
+
+
+# ===========================================================================
+# Localização — IPs públicos de conexão + geolocalização (cache)
+# ===========================================================================
+_SCHEMA_STMTS.extend([
+    """
+    CREATE TABLE IF NOT EXISTS client_ips (
+        tenant_id  TEXT NOT NULL,
+        user_id    TEXT NOT NULL,
+        ip         TEXT NOT NULL,
+        day        TEXT NOT NULL,
+        first_seen TEXT NOT NULL,
+        last_seen  TEXT NOT NULL,
+        hits       INTEGER NOT NULL DEFAULT 1,
+        PRIMARY KEY (tenant_id, user_id, ip, day)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_client_ips_tenant_day ON client_ips(tenant_id, day)",
+    """
+    CREATE TABLE IF NOT EXISTS ip_geo (
+        ip          TEXT PRIMARY KEY,
+        country     TEXT,
+        region      TEXT,
+        city        TEXT,
+        org         TEXT,
+        lat         DOUBLE PRECISION,
+        lon         DOUBLE PRECISION,
+        resolved_at TEXT
+    )
+    """,
+])
+
+
+def _is_public_ip(ip: str) -> bool:
+    try:
+        import ipaddress
+        a = ipaddress.ip_address(ip)
+        return not (a.is_private or a.is_loopback or a.is_reserved
+                    or a.is_link_local or a.is_multicast or a.is_unspecified)
+    except Exception:
+        return False
+
+
+def _http_get_json(url: str, timeout: int = 6) -> dict:
+    """GET com User-Agent explícito (muitas APIs grátis bloqueiam o UA padrão)."""
+    import urllib.request
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "WorkPulse/1.0 (+https://workpulse.com.br)",
+        "Accept": "application/json",
+    })
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def _fetch_geo(ip: str) -> dict | None:
+    """Resolve IP -> cidade/UF/pais/operadora. FreeIPAPI (sem token, comercial ok)
+    por padrao; usa IPinfo se WORKPULSE_IPINFO_TOKEN estiver setado."""
+    token = os.getenv("WORKPULSE_IPINFO_TOKEN", "")
+    try:
+        if token:
+            d = _http_get_json(f"https://ipinfo.io/{ip}/json?token={token}")
+            loc = (d.get("loc") or ",").split(",")
+            return {
+                "country": d.get("country"), "region": d.get("region"),
+                "city": d.get("city"), "org": d.get("org"),
+                "lat": (float(loc[0]) if loc and loc[0] else None),
+                "lon": (float(loc[1]) if len(loc) > 1 and loc[1] else None),
+            }
+        d = _http_get_json(f"https://freeipapi.com/api/json/{ip}")
+        return {
+            "country": d.get("countryName"), "region": d.get("regionName"),
+            "city": d.get("cityName"),
+            "org": d.get("asnOrganization") or (("AS" + str(d["asn"])) if d.get("asn") else None),
+            "lat": d.get("latitude"), "lon": d.get("longitude"),
+        }
+    except Exception as exc:
+        print(f"[geo] falha ao resolver {ip}: {type(exc).__name__}: {exc}", flush=True)
+        return None
+
+
+def _resolve_ip_geo(ip: str) -> dict | None:
+    if not _is_public_ip(ip):
+        return None
+    with db() as c:
+        row = c.execute(
+            "SELECT ip, country, region, city, org, lat, lon FROM ip_geo WHERE ip=%s", (ip,)
+        ).fetchone()
+    if row:
+        return dict(row)
+    geo = _fetch_geo(ip)
+    if geo is not None:
+        with db() as c:
+            c.execute(
+                """INSERT INTO ip_geo (ip, country, region, city, org, lat, lon, resolved_at)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                   ON CONFLICT (ip) DO UPDATE SET country=EXCLUDED.country, region=EXCLUDED.region,
+                       city=EXCLUDED.city, org=EXCLUDED.org, lat=EXCLUDED.lat, lon=EXCLUDED.lon,
+                       resolved_at=EXCLUDED.resolved_at""",
+                (ip, geo.get("country"), geo.get("region"), geo.get("city"),
+                 geo.get("org"), geo.get("lat"), geo.get("lon"), _now_utc().isoformat()),
+            )
+        geo["ip"] = ip
+        return geo
+    return None
+
+
+def _geo_for_ips(ips, max_new: int = 25) -> dict:
+    out, new = {}, 0
+    for ip in ips:
+        with db() as c:
+            row = c.execute(
+                "SELECT ip, country, region, city, org, lat, lon FROM ip_geo WHERE ip=%s", (ip,)
+            ).fetchone()
+        if row:
+            out[ip] = dict(row); continue
+        if new < max_new and _is_public_ip(ip):
+            g = _resolve_ip_geo(ip)
+            if g:
+                out[ip] = g
+            new += 1
+    return out
+
+
+def _geo_label(g: dict | None) -> str:
+    if not g:
+        return ""
+    parts = [p for p in (g.get("city"), g.get("region"), g.get("country")) if p]
+    return ", ".join(parts)
+
+
+@app.get("/v1/locations", dependencies=[Depends(require_tenant_scope)])
+def locations(tenant: str, user_id: str | None = None,
+              since: str | None = None, until: str | None = None, days: int | None = None):
+    if days:
+        since = _since_for_days(int(days))
+    if since is None:
+        since = _since_for_days(7)
+    d_since = since[:10]
+    d_until = (until or _now_utc().isoformat())[:10]
+
+    with db() as c:
+        if user_id:
+            rows = c.execute(
+                """SELECT user_id, ip, day, first_seen, last_seen, hits
+                   FROM client_ips
+                   WHERE tenant_id=%s AND user_id=%s AND day>=%s AND day<=%s
+                   ORDER BY day DESC, first_seen DESC""",
+                (tenant, user_id, d_since, d_until),
+            ).fetchall()
+        else:
+            rows = c.execute(
+                """SELECT user_id, ip, day, first_seen, last_seen, hits
+                   FROM client_ips
+                   WHERE tenant_id=%s AND day>=%s AND day<=%s
+                   ORDER BY last_seen DESC""",
+                (tenant, d_since, d_until),
+            ).fetchall()
+        unames = {r["user_id"]: (r["display_name"] or r["login_user"] or r["user_id"])
+                  for r in c.execute(
+                      "SELECT user_id, display_name, login_user FROM users WHERE tenant_id=%s",
+                      (tenant,)).fetchall()}
+
+    rows = [dict(r) for r in rows]
+    geo = _geo_for_ips({r["ip"] for r in rows})
+
+    if user_id:
+        items = []
+        for r in rows:
+            g = geo.get(r["ip"])
+            items.append({**r, "geo": _geo_label(g),
+                          "city": (g or {}).get("city"), "country": (g or {}).get("country"),
+                          "org": (g or {}).get("org"),
+                          "lat": (g or {}).get("lat"), "lon": (g or {}).get("lon")})
+        # nº de IPs distintos por dia
+        from collections import defaultdict
+        per_day = defaultdict(set)
+        for r in rows:
+            per_day[r["day"]].add(r["ip"])
+        by_day = [{"day": d, "ips": len(s)} for d, s in sorted(per_day.items(), reverse=True)]
+        return {"tenant": tenant, "user_id": user_id,
+                "display_name": unames.get(user_id, user_id),
+                "items": items, "by_day": by_day,
+                "distinct_ips": len({r["ip"] for r in rows})}
+
+    # Resumo por pessoa
+    from collections import defaultdict
+    agg = defaultdict(lambda: {"ips": set(), "days": set(), "last_seen": "", "last_ip": ""})
+    for r in rows:
+        a = agg[r["user_id"]]
+        a["ips"].add(r["ip"]); a["days"].add(r["day"])
+        if r["last_seen"] > a["last_seen"]:
+            a["last_seen"] = r["last_seen"]; a["last_ip"] = r["ip"]
+    users_out = []
+    for uid, a in agg.items():
+        g = geo.get(a["last_ip"])
+        users_out.append({
+            "user_id": uid, "display_name": unames.get(uid, uid),
+            "distinct_ips": len(a["ips"]), "days": len(a["days"]),
+            "last_ip": a["last_ip"], "last_seen": a["last_seen"],
+            "last_geo": _geo_label(g),
+            "last_city": (g or {}).get("city"), "last_country": (g or {}).get("country"),
+            "last_lat": (g or {}).get("lat"), "last_lon": (g or {}).get("lon"),
+        })
+    users_out.sort(key=lambda x: (-x["distinct_ips"], x["display_name"].lower()))
+    return {"tenant": tenant, "since": d_since, "until": d_until, "users": users_out}
+
+
+@app.get("/v1/admin/geo-test", dependencies=[Depends(require_admin)])
+def admin_geo_test(ip: str = "8.8.8.8"):
+    """Diagnóstico: testa a resolução geo do IP a partir do servidor."""
+    import urllib.request
+    out = {"ip": ip, "is_public": _is_public_ip(ip)}
+    with db() as c:
+        row = c.execute("SELECT * FROM ip_geo WHERE ip=%s", (ip,)).fetchone()
+    out["cached"] = (dict(row) if row else None)
+    token = os.getenv("WORKPULSE_IPINFO_TOKEN", "")
+    out["provider"] = "ipinfo" if token else "freeipapi"
+    url = (f"https://ipinfo.io/{ip}/json?token=***" if token else f"https://freeipapi.com/api/json/{ip}")
+    out["url"] = url
+    try:
+        real = (f"https://ipinfo.io/{ip}/json?token={token}" if token else f"https://freeipapi.com/api/json/{ip}")
+        req = urllib.request.Request(real, headers={
+            "User-Agent": "WorkPulse/1.0 (+https://workpulse.com.br)", "Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=6) as r:
+            out["http_status"] = getattr(r, "status", None) or r.getcode()
+            out["raw"] = r.read().decode("utf-8")[:1000]
+    except Exception as exc:
+        out["error"] = f"{type(exc).__name__}: {exc}"
+    out["parsed"] = _fetch_geo(ip)
+    return out
 
 
 # ---------------------------------------------------------------------------
