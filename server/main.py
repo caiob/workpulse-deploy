@@ -1153,10 +1153,57 @@ def team_summary(tenant: str, request: Request, days: int = 7,
             tuple([tenant, *A, since, until]),
         ).fetchall()
 
+        # AFK *dentro da jornada* por colaborador (mesma lógica de /v1/jornada):
+        # só conta AFK cujo horário local cai entre o início e o fim da jornada do
+        # dia (1ª coleta → última coleta). Exclui o "AFK pós jornada".
+        afk_in_rows = c.execute(
+            """
+            WITH w AS (
+                SELECT user_id,
+                       (ts::timestamptz AT TIME ZONE %(tz)s)                 AS lts,
+                       (ts::timestamptz AT TIME ZONE %(tz)s)
+                           + (duration_sec || ' seconds')::interval          AS lend
+                FROM events
+                WHERE tenant_id = %(tenant)s AND bucket = 'window'
+                  AND ts::timestamptz >= %(since)s::timestamptz
+                  AND ts::timestamptz <  %(until)s::timestamptz
+            ),
+            win AS (
+                SELECT user_id, lts::date AS day, MIN(lts) AS start_ts, MAX(lend) AS end_ts
+                FROM w GROUP BY user_id, lts::date
+            ),
+            afk_ev AS (
+                SELECT user_id,
+                       (ts::timestamptz AT TIME ZONE %(tz)s)        AS lts,
+                       (ts::timestamptz AT TIME ZONE %(tz)s)::date  AS day,
+                       duration_sec
+                FROM events
+                WHERE tenant_id = %(tenant)s AND bucket = 'afk'
+                  AND data_json->>'status' = 'afk'
+                  AND ts::timestamptz >= %(since)s::timestamptz
+                  AND ts::timestamptz <  %(until)s::timestamptz
+            )
+            SELECT a.user_id,
+                   COALESCE(SUM(a.duration_sec) FILTER (
+                       WHERE a.lts >= win.start_ts AND a.lts <= win.end_ts), 0) AS afk_in
+            FROM afk_ev a JOIN win ON win.user_id = a.user_id AND win.day = a.day
+            GROUP BY a.user_id
+            """,
+            {"tz": REPORT_TZ, "tenant": tenant, "since": since, "until": until},
+        ).fetchall()
+
+    afk_in_map = {r["user_id"]: float(r["afk_in"] or 0.0) for r in afk_in_rows}
+
+    users_out = []
+    for r in per_user:
+        d = dict(r)
+        d["afk_in"] = afk_in_map.get(r["user_id"], 0.0)   # AFK na Jornada (exclui pós-jornada)
+        users_out.append(d)
+
     result = {
         "tenant":   tenant,
         "since":    since,
-        "users":    [dict(r) for r in per_user],
+        "users":    users_out,
         "top_apps": [dict(r) for r in global_top],
     }
     _cache_set(cache_key, result)

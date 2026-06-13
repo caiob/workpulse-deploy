@@ -11,7 +11,7 @@
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
-<link rel="stylesheet" href="css/workforce.css?v=21">
+<link rel="stylesheet" href="css/workforce.css?v=22">
 <link rel="icon" type="image/jpeg" href="../assets/logo-workpulse.jpeg">
 </head>
 <body>
@@ -334,8 +334,19 @@
       </div>
 
       <div class="card span-8 no-bar">
-        <h3>Tempo ativo por colaborador</h3>
-        <div style="height:260px"><canvas id="chartUsers"></canvas></div>
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap">
+          <div>
+            <h3 style="margin:0">Tempo ativo por colaborador</h3>
+            <p id="usersChartSub" style="font-size:11px;color:var(--text-muted);margin:4px 0 0">Top 12 colaboradores com mais tempo ativo no período. Cada barra soma tempo ativo + AFK dentro da jornada.</p>
+          </div>
+          <label style="font-size:12px;color:var(--text-muted);white-space:nowrap">Ordenar por
+            <select id="usersChartSort" onchange="drawUsersChart()" class="card-sel" style="margin-left:6px">
+              <option value="active">Tempo ativo</option>
+              <option value="afk">AFK na jornada</option>
+            </select>
+          </label>
+        </div>
+        <div style="height:260px;margin-top:8px"><canvas id="chartUsers"></canvas></div>
       </div>
       <div class="card span-4 no-bar">
         <h3>Top aplicações</h3>
@@ -1082,7 +1093,7 @@
 <!-- ===== MÓDULOS JS (defer: executam após parse do DOM, em ordem) ===== -->
 <script src="js/wp-core.js?v=18" defer></script>
 <script src="js/wp-datepicker.js?v=17" defer></script>
-<script src="js/wp-overview.js?v=18" defer></script>
+<script src="js/wp-overview.js?v=20" defer></script>
 <script src="js/wp-people.js?v=18" defer></script>
 <script src="js/wp-departments.js?v=17" defer></script>
 <script src="js/wp-analytics.js?v=17" defer></script>
@@ -1093,7 +1104,7 @@
 <script src="js/wp-settings.js?v=18" defer></script>
 <script src="js/wp-users.js?v=24" defer></script>
 <script src="js/wp-reports.js?v=17" defer></script>
-<script src="js/wp-nav.js?v=21" defer></script>
+<script src="js/wp-nav.js?v=23" defer></script>
 <script src="js/wp-auth.js?v=19" defer></script>
 
 </body>

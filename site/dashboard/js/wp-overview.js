@@ -32,7 +32,8 @@ async function loadOverview() {
 
     drawDailyChart(data.daily || []);
     drawDepartments(data.by_department || []);
-    drawUsersChart(team.users || []);
+    state.teamUsers = team.users || [];
+    drawUsersChart();
     drawAppsChart(team.top_apps || []);
     drawHeatmap(data.hourly || [], data.daily || []);
 
@@ -93,8 +94,21 @@ function drawDepartments(depts) {
   document.getElementById('deptList').innerHTML = html;
 }
 
-function drawUsersChart(users) {
-  const top = users.slice(0, 12);
+function drawUsersChart() {
+  const afkOf = u => (u.afk_in != null ? u.afk_in : u.afk) || 0;
+  const mode  = (document.getElementById('usersChartSort') || {}).value || 'active';
+  const sorted = (state.teamUsers || []).slice().sort(
+    mode === 'afk'
+      ? (a, b) => afkOf(b) - afkOf(a)
+      : (a, b) => (b.active || 0) - (a.active || 0)
+  );
+  const top = sorted.slice(0, 12);
+
+  const sub = document.getElementById('usersChartSub');
+  if (sub) sub.textContent = mode === 'afk'
+    ? 'Top 12 colaboradores com mais AFK na jornada no período. Cada barra soma tempo ativo + AFK dentro da jornada.'
+    : 'Top 12 colaboradores com mais tempo ativo no período. Cada barra soma tempo ativo + AFK dentro da jornada.';
+
   const ct  = chartTheme();
   if (state.charts.users) state.charts.users.destroy();
   state.charts.users = new Chart(document.getElementById('chartUsers').getContext('2d'), {
@@ -104,7 +118,8 @@ function drawUsersChart(users) {
       datasets: [
         { label: 'Ativo (h)', data: top.map(u => +(u.active / 3600).toFixed(2)),
           backgroundColor: 'rgba(108,140,255,.85)', borderRadius: 4, stack: 'a' },
-        { label: 'AFK (h)',   data: top.map(u => +(u.afk / 3600).toFixed(2)),
+        // AFK na Jornada (exclui AFK pós-jornada), igual à tela Jornada de Trabalho.
+        { label: 'AFK na jornada (h)', data: top.map(u => +(((u.afk_in != null ? u.afk_in : u.afk) || 0) / 3600).toFixed(2)),
           backgroundColor: 'rgba(245,158,11,.6)', borderRadius: 4, stack: 'a' },
       ]
     },
