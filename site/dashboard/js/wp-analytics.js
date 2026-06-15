@@ -7,23 +7,53 @@ const ALERT_RENDER = {
   afk_today:    p => `Ocioso <strong>${p.afk_minutes} min</strong> hoje no horário comercial.`,
   absent_today: p => `Ainda não iniciou a jornada${p.last_seen ? ` · visto ${relTime(p.last_seen)}` : ''}.`,
   risky_site:   p => `Acessou <strong>${escHtml(p.site)}</strong> (${p.minutes} min)${p.sample ? ` · <span style="color:var(--text-muted)">${escHtml(p.sample)}</span>` : ''}.`,
-  overwork:     p => `Média de <strong>${p.avg_day_hours}h</strong> por dia útil.`,
-  underwork:    p => `Média de <strong>${p.avg_day_hours}h</strong> por dia útil.`,
+  overwork:     p => `Média de <strong>${p.avg_day_hours}h</strong> por dia trabalhado${p.days ? ` · ${p.days} dia${p.days === 1 ? '' : 's'} com coleta` : ''}.`,
+  underwork:    p => `Média de <strong>${p.avg_day_hours}h</strong> por dia trabalhado${p.days ? ` · ${p.days} dia${p.days === 1 ? '' : 's'} com coleta` : ''}.`,
 };
 
+const ALERTS_PER_PAGE = 5;
+const _alertState = {};   // elId -> { items, kind, emptyMsg, tone, page }
+
 function _renderAlertList(elId, items, kind, emptyMsg, tone) {
+  _alertState[elId] = { items: items || [], kind, emptyMsg, tone, page: 0 };
+  _alertDraw(elId);
+}
+
+function _alertPage(elId, delta) {
+  const s = _alertState[elId];
+  if (!s) return;
+  s.page += delta;
+  _alertDraw(elId);
+}
+
+function _alertDraw(elId) {
   const el = document.getElementById(elId);
-  if (!el) return;
-  el.innerHTML = (items && items.length)
-    ? items.map(p => `
-        <div class="alert-tile ${tone}">
-          <div class="icon">${tone === 'over' ? '!' : '~'}</div>
+  const s  = _alertState[elId];
+  if (!el || !s) return;
+  const total = s.items.length;
+  if (!total) { el.innerHTML = `<div class="alert-tile empty">${s.emptyMsg}</div>`; return; }
+  const pages = Math.ceil(total / ALERTS_PER_PAGE);
+  if (s.page >= pages) s.page = pages - 1;
+  if (s.page < 0) s.page = 0;
+  const start = s.page * ALERTS_PER_PAGE;
+  const slice = s.items.slice(start, start + ALERTS_PER_PAGE);
+  const rows = slice.map(p => `
+        <div class="alert-tile ${s.tone}">
+          <div class="icon">${s.tone === 'over' ? '!' : '~'}</div>
           <div class="body">
             <div class="name">${escHtml(p.display_name || p.user_id)}</div>
-            <div class="meta">${ALERT_RENDER[kind](p)}</div>
+            <div class="meta">${ALERT_RENDER[s.kind](p)}</div>
           </div>
-        </div>`).join('')
-    : `<div class="alert-tile empty">${emptyMsg}</div>`;
+        </div>`).join('');
+  let pager = '';
+  if (pages > 1) {
+    pager = `<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:8px;font-size:12px;color:var(--text-dim)">
+      <button class="ghost" style="padding:2px 10px" ${s.page === 0 ? 'disabled' : ''} onclick="_alertPage('${elId}',-1)">‹</button>
+      <span>${start + 1}–${start + slice.length} de ${total}</span>
+      <button class="ghost" style="padding:2px 10px" ${s.page >= pages - 1 ? 'disabled' : ''} onclick="_alertPage('${elId}',1)">›</button>
+    </div>`;
+  }
+  el.innerHTML = rows + pager;
 }
 
 async function loadAlerts() {
@@ -59,6 +89,8 @@ async function loadAlertConfig() {
     document.getElementById('alAfkMin').value   = s.afk_threshold_min ?? 120;
     document.getElementById('alUnderMax').value = s.underwork_max_h ?? 2;
     document.getElementById('alOverMin').value  = s.overwork_min_h ?? 10;
+    document.getElementById('alEngDays').value  = s.engagement_days ?? 7;
+    document.getElementById('alEngToday').checked = !!s.engagement_include_today;
     _renderAlertRules(d.rules || {}, d.alert_labels || {});
     _renderRiskySites(d.risky_sites || []);
   } catch (e) { toast('Erro ao carregar alertas: ' + e.message); }
@@ -100,6 +132,8 @@ async function saveAlertConfig() {
     afk_threshold_min: parseInt(document.getElementById('alAfkMin').value, 10) || 120,
     underwork_max_h:   parseFloat(document.getElementById('alUnderMax').value) || 2,
     overwork_min_h:    parseFloat(document.getElementById('alOverMin').value) || 10,
+    engagement_days:          parseInt(document.getElementById('alEngDays').value, 10) || 7,
+    engagement_include_today: document.getElementById('alEngToday').checked,
     rules,
   };
   const st = document.getElementById('alStatus');

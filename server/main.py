@@ -2190,26 +2190,27 @@ class ReportConfigOut(ReportConfigIn):
 # ---------------------------------------------------------------------------
 def _report_period_range(freq: str):
     """Devolve (since_iso_utc, until_iso_utc, label) para o período do relatório,
-    no fuso REPORT_TZ. diário = o dia; semanal = a semana (seg–dom); mensal = o mês.
-    O fim é limitado a 'agora' (não inclui futuro)."""
+    no fuso REPORT_TZ. Sempre o **período ANTERIOR fechado** (porque o envio é no
+    início do período seguinte): diário = ontem; semanal = a semana passada (seg–dom);
+    mensal = o mês passado. Assim o relatório enviado na segunda cobre a semana toda,
+    e não só a segunda. O preview mostra exatamente o que seria enviado."""
     tz = ZoneInfo(REPORT_TZ) if ZoneInfo else dt.timezone.utc
-    now_local = dt.datetime.now(tz)
+    today = dt.datetime.now(tz).date()
     if freq == "weekly":
-        start = (now_local - dt.timedelta(days=now_local.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
-        end   = start + dt.timedelta(days=7) - dt.timedelta(seconds=1)
-        label = f"{start.strftime('%d/%m/%Y')} – {(start + dt.timedelta(days=6)).strftime('%d/%m/%Y')}"
+        this_monday = today - dt.timedelta(days=today.weekday())   # segunda desta semana
+        start_d = this_monday - dt.timedelta(days=7)               # segunda da semana passada
+        end_d   = this_monday - dt.timedelta(days=1)               # domingo da semana passada
+        label = f"{start_d.strftime('%d/%m/%Y')} – {end_d.strftime('%d/%m/%Y')}"
     elif freq == "monthly":
-        import calendar as _cal
-        start = now_local.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        last  = _cal.monthrange(start.year, start.month)[1]
-        end   = start.replace(day=last, hour=23, minute=59, second=59)
-        label = start.strftime("%m/%Y")
-    else:  # daily
-        start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
-        end   = start.replace(hour=23, minute=59, second=59)
-        label = start.strftime("%d/%m/%Y")
-    if end > now_local:
-        end = now_local
+        end_d   = today.replace(day=1) - dt.timedelta(days=1)      # último dia do mês passado
+        start_d = end_d.replace(day=1)                            # 1º do mês passado
+        label = start_d.strftime("%m/%Y")
+    else:  # daily → ontem
+        start_d = today - dt.timedelta(days=1)
+        end_d   = start_d
+        label = start_d.strftime("%d/%m/%Y")
+    start = dt.datetime(start_d.year, start_d.month, start_d.day, 0, 0, 0, tzinfo=tz)
+    end   = dt.datetime(end_d.year, end_d.month, end_d.day, 23, 59, 59, tzinfo=tz)
     since = start.astimezone(dt.timezone.utc).isoformat()
     until = end.astimezone(dt.timezone.utc).isoformat()
     return since, until, label
@@ -4608,9 +4609,14 @@ _SCHEMA_STMTS.extend([
         afk_threshold_min INTEGER NOT NULL DEFAULT 120,
         underwork_max_h   REAL NOT NULL DEFAULT 2,
         overwork_min_h    REAL NOT NULL DEFAULT 10,
+        engagement_days          INTEGER NOT NULL DEFAULT 7,
+        engagement_include_today BOOLEAN NOT NULL DEFAULT FALSE,
         updated_at        TEXT
     )
     """,
+    # Migração para tenants já existentes (idempotente).
+    "ALTER TABLE alert_settings ADD COLUMN IF NOT EXISTS engagement_days INTEGER NOT NULL DEFAULT 7",
+    "ALTER TABLE alert_settings ADD COLUMN IF NOT EXISTS engagement_include_today BOOLEAN NOT NULL DEFAULT FALSE",
     """
     CREATE TABLE IF NOT EXISTS alert_rules (
         tenant_id     TEXT NOT NULL,
@@ -4687,7 +4693,8 @@ def _alert_settings(tenant: str) -> dict:
         return dict(row)
     return {"tenant_id": tenant, "business_start": "08:00", "business_end": "18:00",
             "absent_cutoff": "10:00", "afk_threshold_min": 120,
-            "underwork_max_h": 2.0, "overwork_min_h": 10.0}
+            "underwork_max_h": 2.0, "overwork_min_h": 10.0,
+            "engagement_days": 7, "engagement_include_today": False}
 
 
 def _alert_rules(tenant: str) -> dict:
@@ -4844,36 +4851,88 @@ def _compute_day_alerts(tenant: str, settings: dict, risky: list, allowed=None) 
             "today_is_business": is_biz}
 
 
-def _compute_engagement_alerts(tenant: str, settings: dict, since: str, until: str, allowed=None) -> dict:
-    """Sobrecarga / baixo engajamento — média por DIA ÚTIL no período."""
-    sc = " AND user_id = ANY(%s)" if allowed is not None else ""
-    sa = [allowed] if allowed is not None else []
+def _last_n_business_days(n: int = 7, include_today: bool = True):
+    """Devolve a lista das últimas N datas ÚTEIS (locais), pulando fim de semana e
+    feriado nacional. Se include_today=False, começa a contar a partir de ONTEM
+    (o dia corrente é parcial e distorce a média)."""
+    tz = _local_tz()
+    d = dt.datetime.now(tz).date()
+    if not include_today:
+        d -= dt.timedelta(days=1)
+    out = []
+    guard = 0
+    while len(out) < n and guard < (n * 3 + 30):
+        if _is_business_day(d):
+            out.append(d)
+        d -= dt.timedelta(days=1)
+        guard += 1
+    return out
+
+
+def _compute_engagement_alerts(tenant: str, settings: dict, allowed=None) -> dict:
+    """Sobrecarga / baixo engajamento — média de horas ativas por **dia trabalhado**,
+    olhando os últimos 7 dias úteis (inclui hoje; ignora fim de semana e feriado).
+    Importante: divide pela quantidade de dias úteis em que a pessoa **teve coleta**
+    (esteve presente), NÃO por 7. Assim quem faltou (possível justificativa) não é
+    penalizado; o alerta isola quem **trabalhou pouco nos dias em que esteve presente**.
+    Quem não teve coleta nenhuma na janela não aparece."""
+    tz = _local_tz()
+    n_days    = int(settings.get("engagement_days", 7) or 7)
+    inc_today = bool(settings.get("engagement_include_today", False))
+    bizdays = _last_n_business_days(n_days, include_today=inc_today)
+    bizset = {d.isoformat() for d in bizdays}
+    start_d = min(bizdays)
+    since = dt.datetime(start_d.year, start_d.month, start_d.day, 0, 0, 0, tzinfo=tz).astimezone(dt.timezone.utc).isoformat()
+    until = dt.datetime.now(dt.timezone.utc).isoformat()
+
+    sc = " AND user_id = ANY(%(uids)s)" if allowed is not None else ""
+    params = {"tz": REPORT_TZ, "tenant": tenant, "since": since, "until": until}
+    if allowed is not None:
+        params["uids"] = allowed
+
     with db() as c:
         rows = c.execute(
-            f"""SELECT u.user_id, u.display_name,
-                       COALESCE(e.total_sec, 0) AS total_active
-                FROM users u
-                LEFT JOIN (
-                    SELECT user_id, SUM(duration_sec) AS total_sec
-                    FROM events WHERE tenant_id=%s AND ts>=%s AND ts<=%s AND bucket='window'
-                    GROUP BY user_id
-                ) e ON e.user_id = u.user_id
-                WHERE u.tenant_id=%s""" + (" AND u.user_id = ANY(%s)" if allowed is not None else ""),
-            tuple([tenant, since, until, tenant, *sa]),
+            f"""SELECT user_id,
+                       to_char((ts::timestamptz AT TIME ZONE %(tz)s)::date, 'YYYY-MM-DD') AS lday,
+                       SUM(duration_sec) AS sec
+                FROM events
+                WHERE tenant_id=%(tenant)s AND bucket='window'
+                  AND ts::timestamptz >= %(since)s::timestamptz
+                  AND ts::timestamptz <= %(until)s::timestamptz{sc}
+                GROUP BY user_id, lday""",
+            params,
         ).fetchall()
-    bdays = _business_days_count(since, until)
+        names = {r["user_id"]: r["display_name"] for r in c.execute(
+            "SELECT user_id, display_name FROM users WHERE tenant_id=%s", (tenant,)
+        ).fetchall()}
+
+    # Por usuário: soma de ativo e CONTAGEM de dias úteis com coleta (dias trabalhados).
+    # Cada linha (user_id, lday) só existe se houve evento 'window' naquele dia → é um
+    # dia em que a pessoa esteve presente.
+    sec_by_user  = {}
+    days_by_user = {}
+    for r in rows:
+        if r["lday"] in bizset:
+            uid = r["user_id"]
+            sec_by_user[uid]  = sec_by_user.get(uid, 0.0) + float(r["sec"] or 0)
+            days_by_user[uid] = days_by_user.get(uid, 0) + 1
+
     umax = float(settings.get("underwork_max_h", 2) or 2)
     omin = float(settings.get("overwork_min_h", 10) or 10)
     over, under = [], []
-    for r in rows:
-        avg = ((r["total_active"] or 0) / 3600.0) / bdays
+    for uid, sec in sec_by_user.items():
+        worked = days_by_user.get(uid, 0)
+        if worked <= 0:
+            continue
+        avg = (sec / 3600.0) / worked          # média por DIA TRABALHADO (com coleta)
+        nm = names.get(uid)
         if avg > omin:
-            over.append({"user_id": r["user_id"], "display_name": r["display_name"],
-                         "avg_day_hours": round(avg, 1)})
+            over.append({"user_id": uid, "display_name": nm, "avg_day_hours": round(avg, 1), "days": worked})
         if 0 < avg < umax:
-            under.append({"user_id": r["user_id"], "display_name": r["display_name"],
-                          "avg_day_hours": round(avg, 1)})
-    return {"overwork": over[:50], "underwork": under[:50], "business_days": bdays}
+            under.append({"user_id": uid, "display_name": nm, "avg_day_hours": round(avg, 1), "days": worked})
+    over.sort(key=lambda x: x["avg_day_hours"], reverse=True)
+    under.sort(key=lambda x: x["avg_day_hours"])
+    return {"overwork": over[:50], "underwork": under[:50], "window_business_days": len(bizdays)}
 
 
 # --- Modelos ---
@@ -4891,6 +4950,8 @@ class AlertConfigIn(BaseModel):
     afk_threshold_min: int = 120
     underwork_max_h:   float = 2
     overwork_min_h:    float = 10
+    engagement_days:          int = 7
+    engagement_include_today: bool = False
     rules:             list[AlertRuleIn] = []
 
 
@@ -4912,12 +4973,13 @@ def alerts_today(tenant: str, request: Request, days: int = 7,
     rules    = _alert_rules(tenant)
     risky    = _risky_sites(tenant)
     day = _compute_day_alerts(tenant, settings, risky, allowed=allowed)
-    eng = _compute_engagement_alerts(tenant, settings, since, until, allowed=allowed)
+    eng = _compute_engagement_alerts(tenant, settings, allowed=allowed)   # janela fixa: últimos 7 dias úteis
     return {
         "tenant": tenant,
         "settings": {k: settings[k] for k in
                      ("business_start", "business_end", "absent_cutoff",
-                      "afk_threshold_min", "underwork_max_h", "overwork_min_h")},
+                      "afk_threshold_min", "underwork_max_h", "overwork_min_h",
+                      "engagement_days", "engagement_include_today")},
         "rules": rules,
         "today_is_business": day["today_is_business"],
         "alerts": {
@@ -4937,7 +4999,8 @@ def alerts_config_get(tenant: str, ctx: Annotated[dict, Depends(require_role("ad
     return {
         "settings": {k: s[k] for k in
                      ("business_start", "business_end", "absent_cutoff",
-                      "afk_threshold_min", "underwork_max_h", "overwork_min_h")},
+                      "afk_threshold_min", "underwork_max_h", "overwork_min_h",
+                      "engagement_days", "engagement_include_today")},
         "rules": _alert_rules(tid),
         "risky_sites": _risky_sites(tid),
         "alert_labels": ALERT_LABELS,
@@ -4952,16 +5015,21 @@ def alerts_config_set(body: AlertConfigIn, tenant: str, request: Request,
         c.execute(
             """INSERT INTO alert_settings
                  (tenant_id, business_start, business_end, absent_cutoff,
-                  afk_threshold_min, underwork_max_h, overwork_min_h, updated_at)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                  afk_threshold_min, underwork_max_h, overwork_min_h,
+                  engagement_days, engagement_include_today, updated_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (tenant_id) DO UPDATE SET
                  business_start=EXCLUDED.business_start, business_end=EXCLUDED.business_end,
                  absent_cutoff=EXCLUDED.absent_cutoff, afk_threshold_min=EXCLUDED.afk_threshold_min,
                  underwork_max_h=EXCLUDED.underwork_max_h, overwork_min_h=EXCLUDED.overwork_min_h,
+                 engagement_days=EXCLUDED.engagement_days,
+                 engagement_include_today=EXCLUDED.engagement_include_today,
                  updated_at=EXCLUDED.updated_at""",
             (tid, body.business_start, body.business_end, body.absent_cutoff,
              int(body.afk_threshold_min), float(body.underwork_max_h),
-             float(body.overwork_min_h), _now_utc().isoformat()),
+             float(body.overwork_min_h),
+             max(1, int(body.engagement_days)), bool(body.engagement_include_today),
+             _now_utc().isoformat()),
         )
         for r in body.rules:
             if r.alert_type not in ALERT_TYPES:
@@ -5064,8 +5132,7 @@ def _do_alert_emails() -> None:
         rules    = _alert_rules(tid)
         risky    = _risky_sites(tid)
         day = _compute_day_alerts(tid, settings, risky)
-        eng = _compute_engagement_alerts(
-            tid, settings, _since_for_days(7), dt.datetime.now(dt.timezone.utc).isoformat())
+        eng = _compute_engagement_alerts(tid, settings)   # janela fixa: últimos 7 dias úteis
         bag = {"afk_today": day["afk_today"], "absent_today": day["absent_today"],
                "risky_site": day["risky_site"], "underwork": eng["underwork"],
                "overwork": eng["overwork"]}

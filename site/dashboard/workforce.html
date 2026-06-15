@@ -11,7 +11,7 @@
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
-<link rel="stylesheet" href="css/workforce.css?v=22">
+<link rel="stylesheet" href="css/workforce.css?v=23">
 <link rel="icon" type="image/jpeg" href="../assets/logo-workpulse.jpeg">
 </head>
 <body>
@@ -383,14 +383,14 @@
         <div id="peopleRange"></div>
       </div>
       <div><label>Última atividade</label>
-        <select id="peopleActivity" onchange="renderPeopleTable()">
+        <select id="peopleActivity" onchange="peopleApplyFilter()">
           <option value="all">Todos</option>
           <option value="online">Online agora</option>
           <option value="offline">Offline</option>
         </select>
       </div>
       <div style="flex:1"><label>Buscar</label>
-        <input id="peopleFilter" oninput="renderPeopleTable()" placeholder="nome, e-mail ou departamento" style="width:100%;max-width:360px">
+        <input id="peopleFilter" oninput="peopleApplyFilter()" placeholder="nome, e-mail ou departamento" style="width:100%;max-width:360px">
       </div>
       <button class="ghost" onclick="loadPeople()">↻ Atualizar</button>
     </div>
@@ -399,12 +399,17 @@
       <table id="peopleTable">
         <thead>
           <tr>
-            <th>Colaborador</th><th>Departamento</th><th>Ativo</th>
-            <th>AFK</th><th>Aderência</th><th>Status</th><th>Última atividade</th><th>Versão Agente</th><th></th>
+            <th onclick="peopleSort('name')" style="cursor:pointer;user-select:none">Colaborador<span class="sort-ar" data-k="name"></span></th>
+            <th>Departamento</th>
+            <th onclick="peopleSort('active')" style="cursor:pointer;user-select:none">Ativo<span class="sort-ar" data-k="active"></span></th>
+            <th onclick="peopleSort('afk')" style="cursor:pointer;user-select:none">AFK<span class="sort-ar" data-k="afk"></span></th>
+            <th onclick="peopleSort('adh')" style="cursor:pointer;user-select:none">Aderência<span class="sort-ar" data-k="adh"></span></th>
+            <th>Status</th><th>Última atividade</th><th>Versão Agente</th><th></th>
           </tr>
         </thead>
         <tbody></tbody>
       </table>
+      <div id="peoplePagination"></div>
     </div>
     <div id="drill" class="hide"></div>
   </section>
@@ -450,12 +455,12 @@
       </div>
       <div class="card span-6">
         <h3 style="display:flex;align-items:center;gap:8px"><span class="pill danger">Sobrecarga</span> Possíveis casos de excesso</h3>
-        <p style="color:var(--text-dim);font-size:12px;margin:6px 0 14px">Média acima do limite por <strong>dia útil</strong> no período (ignora fins de semana e feriados nacionais).</p>
+        <p style="color:var(--text-dim);font-size:12px;margin:6px 0 14px">Média de horas ativas <strong>por dia trabalhado</strong> acima do limite, na janela de dias úteis configurada. Conta só os dias com coleta (não penaliza ausências); ignora fins de semana e feriados.</p>
         <div id="overworkList"></div>
       </div>
       <div class="card span-6">
         <h3 style="display:flex;align-items:center;gap:8px"><span class="pill warn">Atenção</span> Possível baixo engajamento</h3>
-        <p style="color:var(--text-dim);font-size:12px;margin:6px 0 14px">Média diária baixa por <strong>dia útil</strong> no período (ignora fins de semana e feriados nacionais).</p>
+        <p style="color:var(--text-dim);font-size:12px;margin:6px 0 14px">Média de horas ativas <strong>por dia trabalhado</strong> abaixo do limite, na janela de dias úteis configurada. Conta só os dias com coleta — quem faltou (possível justificativa) não entra; isola quem trabalhou pouco nos dias presentes.</p>
         <div id="underworkList"></div>
       </div>
     </div>
@@ -1131,9 +1136,16 @@
         <div><label>Fim do expediente</label><input id="alBEnd" type="time" value="18:00"></div>
         <div><label>Hora de corte (ausência)</label><input id="alCutoff" type="time" value="10:00"></div>
         <div><label>AFK p/ alertar (min)</label><input id="alAfkMin" type="number" min="1" value="120" style="width:120px"></div>
-        <div><label>Baixo engaj. &lt; (h/dia útil)</label><input id="alUnderMax" type="number" step="0.5" min="0" value="2" style="width:150px"></div>
-        <div><label>Sobrecarga &gt; (h/dia útil)</label><input id="alOverMin" type="number" step="0.5" min="0" value="10" style="width:150px"></div>
+        <div><label>Baixo engaj. &lt; (h/dia trabalhado)</label><input id="alUnderMax" type="number" step="0.5" min="0" value="2" style="width:170px"></div>
+        <div><label>Sobrecarga &gt; (h/dia trabalhado)</label><input id="alOverMin" type="number" step="0.5" min="0" value="10" style="width:170px"></div>
+        <div><label>Janela de análise (dias úteis)</label><input id="alEngDays" type="number" min="1" max="60" value="7" style="width:170px"></div>
+        <div><label>&nbsp;</label>
+          <label style="display:inline-flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;padding-top:2px">
+            <input type="checkbox" id="alEngToday" style="width:auto"> Incluir o dia corrente
+          </label>
+        </div>
       </div>
+      <p style="font-size:11px;color:var(--text-dim);margin:10px 0 0">Sobrecarga e baixo engajamento usam a média de horas ativas por <strong>dia trabalhado</strong> (dias com coleta) dentro dessa janela. Por padrão o dia corrente fica de fora, pois é parcial e distorce a média.</p>
     </div>
 
     <!-- Regras por tipo + ponto focal -->
@@ -1204,9 +1216,9 @@
 <script src="js/wp-core.js?v=18" defer></script>
 <script src="js/wp-datepicker.js?v=17" defer></script>
 <script src="js/wp-overview.js?v=20" defer></script>
-<script src="js/wp-people.js?v=18" defer></script>
+<script src="js/wp-people.js?v=20" defer></script>
 <script src="js/wp-departments.js?v=17" defer></script>
-<script src="js/wp-analytics.js?v=21" defer></script>
+<script src="js/wp-analytics.js?v=24" defer></script>
 <script src="js/wp-events.js?v=17" defer></script>
 <script src="js/wp-internet.js?v=18" defer></script>
 <script src="js/wp-jornada.js?v=19" defer></script>

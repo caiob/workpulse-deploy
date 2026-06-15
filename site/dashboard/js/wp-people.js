@@ -21,8 +21,73 @@ async function loadPeople() {
     const { since, until } = wpDP.getRange('peopleRange');
     const data = await api(`/v1/team/summary?tenant=${encodeURIComponent(state.tenant)}&since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`);
     state.people = data.users || [];
+    _peoplePage = 0;
     renderPeopleTable();
   } catch (e) { toast('Erro ao carregar pessoas: ' + e.message); }
+}
+
+let _peoplePerPage = 10;
+let _peoplePage = 0;
+let _peopleSort = { key: 'active', dir: 'desc' };   // default: mais ativos primeiro
+
+function peopleApplyFilter() { _peoplePage = 0; renderPeopleTable(); }
+
+function peopleSort(key) {
+  if (_peopleSort.key === key) {
+    _peopleSort.dir = _peopleSort.dir === 'asc' ? 'desc' : 'asc';
+  } else {
+    _peopleSort.key = key;
+    _peopleSort.dir = (key === 'name') ? 'asc' : 'desc';   // nome A→Z; números maior→menor
+  }
+  _peoplePage = 0;
+  renderPeopleTable();
+}
+
+function peoplePage(d) { _peoplePage += d; renderPeopleTable(); }
+
+function peopleSetPageSize(n) { _peoplePerPage = parseInt(n, 10) || 10; _peoplePage = 0; renderPeopleTable(); }
+
+function _peopleAdh(u) {
+  const t = (u.active || 0) + (u.afk || 0);
+  return t > 0 ? (u.active || 0) / t : 0;
+}
+
+function _peopleCmp(a, b) {
+  const { key, dir } = _peopleSort;
+  const mul = dir === 'asc' ? 1 : -1;
+  if (key === 'name') {
+    const av = displayName(a).toLowerCase(), bv = displayName(b).toLowerCase();
+    return (av < bv ? -1 : av > bv ? 1 : 0) * mul;
+  }
+  const f = key === 'afk' ? (u => u.afk || 0)
+          : key === 'adh' ? _peopleAdh
+          : (u => u.active || 0);
+  return (f(a) - f(b)) * mul;
+}
+
+function _peopleUpdateArrows() {
+  document.querySelectorAll('#peopleTable .sort-ar').forEach(el => {
+    el.textContent = (el.dataset.k === _peopleSort.key)
+      ? (_peopleSort.dir === 'asc' ? ' ▲' : ' ▼') : '';
+  });
+}
+
+function _peopleRenderPager(total, start, shown) {
+  const box = document.getElementById('peoplePagination');
+  if (!box) return;
+  const pages = Math.ceil(total / _peoplePerPage);
+  const sizeSel = `<label style="font-size:12px;color:var(--text-dim)">Por página
+    <select class="card-sel" onchange="peopleSetPageSize(this.value)" style="margin-left:6px">
+      ${[10, 25, 50, 100].map(n => `<option value="${n}" ${n === _peoplePerPage ? 'selected' : ''}>${n}</option>`).join('')}
+    </select></label>`;
+  const nav = pages > 1
+    ? `<button class="ghost" ${_peoplePage === 0 ? 'disabled' : ''} onclick="peoplePage(-1)">‹ Anterior</button>
+       <span style="color:var(--text-dim)">${start + 1}–${start + shown} de ${total}</span>
+       <button class="ghost" ${_peoplePage >= pages - 1 ? 'disabled' : ''} onclick="peoplePage(1)">Próxima ›</button>`
+    : `<span style="color:var(--text-dim)">${total} colaborador${total === 1 ? '' : 'es'}</span>`;
+  box.innerHTML = `<div style="display:flex;align-items:center;gap:14px;justify-content:flex-end;margin-top:10px;font-size:13px;flex-wrap:wrap">
+    ${sizeSel}${nav}
+  </div>`;
 }
 
 function renderPeopleTable() {
@@ -39,13 +104,24 @@ function renderPeopleTable() {
     if (act === 'offline' &&  _isOnline(u.last_seen)) return false;
     return true;
   });
+  rows.sort(_peopleCmp);
+  _peopleUpdateArrows();
+
   const tb = document.querySelector('#peopleTable tbody');
-  if (!rows.length) {
+  const totalRows = rows.length;
+  if (!totalRows) {
     const msg = act === 'online' ? 'Ninguém online agora.' : 'Nenhum colaborador no período.';
     tb.innerHTML = `<tr><td colspan="9" class="empty-state">${msg}</td></tr>`;
+    const box = document.getElementById('peoplePagination'); if (box) box.innerHTML = '';
     return;
   }
-  tb.innerHTML = rows.map(u => {
+  const pages = Math.ceil(totalRows / _peoplePerPage);
+  if (_peoplePage >= pages) _peoplePage = pages - 1;
+  if (_peoplePage < 0) _peoplePage = 0;
+  const start = _peoplePage * _peoplePerPage;
+  const pageRows = rows.slice(start, start + _peoplePerPage);
+
+  tb.innerHTML = pageRows.map(u => {
     const total = (u.active || 0) + (u.afk || 0);
     const adh   = total > 0 ? Math.round((u.active || 0) / total * 100) : 0;
     const name  = displayName(u);
@@ -69,6 +145,7 @@ function renderPeopleTable() {
       </td>
     </tr>`;
   }).join('');
+  _peopleRenderPager(totalRows, start, pageRows.length);
 }
 
 /** Mapeia o valor do seletor para um rótulo legível */

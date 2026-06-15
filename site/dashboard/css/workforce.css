@@ -158,6 +158,17 @@ nav.tabs > button.active {
   transition: opacity .15s ease, transform .15s ease, visibility 0s linear .15s;
   pointer-events: none;
 }
+/* Ponte invisível que cobre o vão de 6px entre o gatilho e o painel, para o
+   hover não "cair" ao descer o mouse. Só fica ativa quando o menu está aberto
+   (o menu herda pointer-events:auto). */
+.nav-dropdown-menu::before {
+  content: "";
+  position: absolute;
+  top: -10px;
+  left: 0;
+  right: 0;
+  height: 10px;
+}
 .nav-dropdown:hover .nav-dropdown-menu,
 .nav-dropdown.open .nav-dropdown-menu {
   opacity: 1;
