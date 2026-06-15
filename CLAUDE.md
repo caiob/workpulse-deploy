@@ -1,7 +1,13 @@
 # CLAUDE.md — WorkPulse
 
 Guidance for AI agents (Claude Code / Cowork) working on WorkPulse.
-**Read this fully before changing anything.** Last updated: 2026-05-29.
+**Read this fully before changing anything.** Last updated: 2026-06-14.
+
+> **Para o estado atual (auth e-mail/senha, papéis, Localização, Administrativo,
+> Financeiro, SMTP por tenant, motor de Alertas, etc.), leia primeiro a seção
+> "## Estado atual (2026-06-14)" no FINAL deste arquivo.** As seções estruturais
+> abaixo (Auth, Schema, API, Workers) foram atualizadas, mas o changelog detalhado
+> de cada época fica no rodapé.
 
 ---
 
@@ -261,8 +267,9 @@ After `server/main.py` changes: `redeploy.sh`. After `site/` changes:
 
 ## Backend Architecture (`server/main.py`)
 
-Single-file FastAPI app, ~1700 lines, no routers — endpoints defined inline.
-`APP_VERSION = "2.0.0"`.
+Single-file FastAPI app, **~4.500 lines** (cresceu muito desde a 1ª versão), no
+routers — endpoints defined inline. `APP_VERSION = "2.0.0"`. **A auth abaixo (token)
+foi substituída por e-mail/senha + sessão + papéis — ver "Estado atual" no rodapé.**
 
 ### Authentication (two levels)
 
@@ -391,9 +398,12 @@ site/dashboard/
     wp-internet.js        Aba Internet (loadInternet, renderSitesTable, _intCatBadge, _renderIntPagination)
     wp-jornada.js         Aba Jornada de Trabalho (loadJornada, computeJornadas)
     wp-settings.js        Aba Configurações (regras, apps, depts, colaboradores)
-    wp-reports.js         Relatórios automáticos (CRUD, envio SES, histórico)
-    wp-nav.js             Navegação por tabs + dropdowns (switchTab, TABS)
-    wp-auth.js            Login com validação API, logout, tema, bootstrap IIFE
+    wp-reports.js         Relatórios + conta de e-mail SMTP do tenant (CRUD, preview, histórico)
+    wp-users.js           Usuários do painel (CRUD, papéis, escopo do Líder), Licença, Financeiro
+    wp-locations.js       Coletas → Localização (IPs públicos + geo + mapa Leaflet)
+    wp-analytics.js       Aba Alertas (5 sinais via /v1/alerts/today) + Tendências + config de Alertas
+    wp-nav.js             Navegação por tabs + dropdowns (switchTab, TABS, TAB_GROUP, loaders)
+    wp-auth.js            Login e-mail/senha (sessão), papéis, _applyRoleUI, tema, bootstrap IIFE
 ```
 
 #### Navegação (topbar)
@@ -506,6 +516,29 @@ Separate crate. Built per-client with an embedded license.
   → runs `cargo build --release` then WiX. Output in `dist/`.
 - **Build (Linux):** `VERSION="2.1.0" LICENSE_KEY="<token>" ./linux/build-deb.sh`
   → runs `cargo build --release` then `dpkg-deb`. Output in `dist/`.
+  - **Deps de build (Ubuntu/WSL):** `build-essential dpkg-dev pkg-config libx11-dev
+    libxi-dev libxtst-dev`. O `x11rb` (janela ativa) é Rust puro, mas o `device_query`
+    (AFK) puxa o crate C `x11` → exige `pkg-config` + `libx11/xi/xtst-dev`.
+  - **glibc/versão:** o binário fica preso à glibc da distro onde compila. **Compile
+    na versão de Ubuntu mais ANTIGA da frota** (ex.: 22.04 = glibc 2.35 roda em 22.04 e
+    24.04; um build em 24.04/glibc 2.39 NÃO roda em 22.04 — erro `GLIBC_2.39 not found`).
+  - **`DeviceState` é `!Send` no Linux:** no `tracker.rs`, leia teclado/mouse com um
+    `DeviceState::new()` dentro de um bloco `{ }` efêmero (criar→ler→descartar) a cada
+    ciclo; manter o `DeviceState` vivo através de um `.await` quebra o `tokio::spawn`
+    com "future cannot be sent between threads safely".
+  - **Distribuição unattended (.deb):** não há flag de silent; use
+    `DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::="--force-confold" ./pkg.deb`
+    (o `--force-confold` evita prompt de conffile no upgrade). Roda como root; o agente
+    inicia no próximo login gráfico (X11) via autostart XDG. 1 `.deb` por tenant.
+- **macOS — PARCIAL (código sim, distribuição não).** `Cargo.toml` tem deps macOS
+  (`core-graphics`/`core-foundation`/`objc`) e `src/platform.rs` tem `macos_impl`
+  (janela ativa); `device_query` cobre AFK. Ou seja, **compila e roda** num Mac. Mas
+  **NÃO existe** pasta `macos/`, instalador (`.pkg`/`.dmg`), `launchd` (autostart), nem
+  assinatura/notarização. Para entregar de fato faltam: build num Mac (binário universal
+  Intel+ARM via `lipo`), `.pkg` + LaunchAgent, **codesign + notarize** (Apple Developer
+  ID), e **permissões TCC** (Acessibilidade/Gravação de Tela) — em deploy gerenciado,
+  via **perfil PPPC pelo MDM** (Endpoint Central). Ver `PLANO_AREA_DOWNLOAD_AGENTE.md`
+  e (quando criado) o plano do agente Mac.
 - **Config:** `agent.conf` (TOML). Only `license_key` is required; `server_url`
   defaults to `https://api.workpulse.com.br`; tenant comes from inside the license.
   Installed at `%ProgramData%\WorkPulse\agent.conf` (Windows) /
@@ -543,6 +576,112 @@ Separate crate. Built per-client with an embedded license.
   `SUM(duration_sec)` reflects the real idle time. **No server or dashboard
   changes were needed** — the SQL contracts in CRITICAL #2 already expected
   this shape, the agent just wasn't honoring it.
+
+---
+
+## Estado atual (2026-06-14)
+
+Snapshot consolidado do que existe hoje. O changelog detalhado por data segue abaixo
+(histórico). `server/main.py` agora tem **~4.500 linhas** (`APP_VERSION = "2.0.0"`),
+ainda single-file; blocos novos são **adicionados antes da seção `# Entry point`**,
+cada um com seu `_SCHEMA_STMTS.extend([...])`.
+
+### Autenticação — agora é e-mail/senha com sessão + papéis
+Migrou do login Tenant+Token para **e-mail/senha** (cookie de sessão `wp_sess`).
+- Tabelas: `dash_users` (email único global, `role`, `status`, hash argon2),
+  `dash_sessions`, `dash_user_tokens` (link de definir/redefinir senha).
+- Papéis: `admin_master`, `supervisor`, `lider`, `wp_admin` (plataforma).
+  `CLIENT_ROLES=("admin_master","supervisor","lider")`, `ALL_ROLES` inclui `wp_admin`.
+- Deps no backend: `require_session`, `require_role("...")`, `require_tenant_scope`
+  (aceita cookie de sessão **ou** token break-glass). `_load_session_user`.
+- **Líder** = perfil mais restrito: vê só colaboradores no escopo dele. Tabela
+  `lider_scope` (department | user). Helpers `_lider_allowed_ids(request, tenant)`
+  (devolve lista de user_ids permitidos ou `None` = sem restrição) e `_scope_for()`
+  (devolve `(allowed, cache_tag)` p/ o cache não vazar entre escopos). Enforcement
+  injetado em ~12 endpoints (filtro Python em listas; `AND user_id = ANY(%s)` nas SQL).
+- Frontend: `wp-auth.js` faz login/sessão; `_applyRoleUI()` esconde elementos via
+  `data-role="admin_master"` (wp_admin conta como admin). Menu da conta mostra o Perfil.
+
+### Tabelas novas (além das do schema acima), por subsistema
+- **Localização/IP:** `client_ips`, `ip_geo` (geo via FreeIPAPI; mapa Leaflet + CartoDB).
+- **Financeiro:** `plan_prices` (preço/seat por plano, em centavos), `tenant_billing`
+  (override de preço + desconto% por tenant), `payments` (baixa manual mês a mês).
+- **E-mail por tenant:** `tenant_email_config` (SMTP do cliente; senha **criptografada
+  Fernet**), `app_secrets` (guarda a chave Fernet se não houver env `WORKPULSE_FERNET_KEY`).
+- **Alertas:** `alert_settings` (horário comercial, corte, limiares), `alert_rules`
+  (por tipo: enabled/email_enabled/recipients), `risky_sites` (padrões de sites),
+  `alert_notify_log` (dedupe de e-mail por tenant/tipo/usuário/dia).
+
+### Endpoints novos (todos sob `/v1`)
+- **Auth/sessão:** `POST /auth/login`, `/auth/logout`, `/auth/set-password`,
+  `/auth/me`; gestão: `/tenant-users` (CRUD), `/tenant-users/{id}/scope` (Líder).
+- **Licença do cliente:** `/tenant-license`, `/tenant-license/assign|request`.
+- **Localização:** `/locations` (lista + drill por usuário); admin `/admin/geo-test`.
+- **Custos AWS (admin):** `/admin/aws-costs`, `/admin/tenant-costs`, `/admin/cost-simulate`
+  (Cost Explorer, boto3, RECORD_TYPE=Usage p/ furar o Free Tier).
+- **Financeiro:** admin `/admin/plan-prices` (GET/PUT), `/admin/tenant-billing` (GET/PUT),
+  `/admin/payments` (GET/POST/DELETE); cliente `/tenant-finance`.
+- **Relatórios:** `/reports/{id}/preview` (devolve o PDF inline, sem enviar).
+- **E-mail SMTP:** `/tenant-email-config` (GET/PUT), `/tenant-email-config/test`.
+- **Alertas:** `/alerts/today` (5 sinais; respeita escopo do Líder),
+  `/alerts/config` (GET/PUT), `/alerts/risky-sites` (POST/DELETE/`bulk`).
+
+### Workers (asyncio, no `lifespan`)
+`_retention_worker`, `_reports_worker` e **`_alerts_worker`** (a cada ~15 min;
+`_do_alert_emails` envia por tipo ao ponto focal, dedupe diário via `alert_notify_log`;
+o site perigoso deduplica por **pessoa+site**, os demais por **pessoa**).
+
+### Relatórios — mudou bastante
+- O envio agora usa o **SMTP do tenant** (`_smtp_send`), **não** mais SES; se não houver
+  conta configurada/habilitada, o relatório **não é enviado** (fica logado no histórico).
+- Dados alinhados ao **período** (diário=o dia, semanal=a semana, mensal=o mês) via
+  `_report_period_range(freq)`, em vez de janelas móveis fixas. Datas em fuso local.
+- Seção **Jornada** do PDF é calculada a partir dos `events` (mesma lógica do `/v1/jornada`),
+  agrupada por colaborador, com as colunas da tela (Dia/Início/Final/AFK na Jornada/
+  AFK Pós Jornada/Bruta/Líquida). A criação de relatório escolhe **1 tipo por vez**
+  (Jornada **ou** Alertas; "Coletas"/"Tendências" foram removidas da UI de criação).
+
+### Alertas operacionais (tela Análises → Alertas + página Administrativo → Alertas)
+5 sinais: `afk_today` (AFK ≥ limiar no horário comercial, só se já começou),
+`absent_today` (não iniciou até a hora de corte), `risky_site` (site da lista),
+`underwork`/`overwork` (média por **dia útil** — ignora FDS e **feriados nacionais**
+calculados em `_br_holidays`/`_easter`). Config por tenant em página própria no
+Administrativo (horário comercial, corte, regras por tipo, lista de sites + importação
+em massa CSV `padrão;rótulo`).
+
+### Menu Administrativo (Admin Master) — `workforce.html`
+Novo grupo no topo com páginas: **Financeiro**, **Usuários**, **Categorização**,
+**Colaboradores**, **Relatórios**, **Alertas**, **Licenciamento**. Configurações ficou
+só com **Aparência** + **Minha conta**; os demais cards migraram para essas páginas.
+`wp-nav.js`: `TABS`, `TAB_GROUP` (grupo `administrativo`/`coletas`) e `loaders`.
+
+### Platform Admin (`site/adm/`)
+Card **Preços dos Planos** (aba Sistema) + botão **financeiro** por tenant (modal de
+override/desconto + registrar/listar pagamentos). Card "Banco" agora diz **PostgreSQL**.
+
+### Deploy — o usuário roda os **PowerShell** (.ps1), não os .sh
+- `scripts\redeploy.ps1` (backend: zip→S3→CodeBuild→ECS rolling) e
+  `scripts\publicar-site.ps1` (site→S3 + invalida CloudFront).
+- **`scripts\redeploy-publicar.ps1`** roda os dois em sequência (aborta se o 1º falhar).
+- Regra: mudou `server/main.py` → redeploy; mudou `site/` → publicar; mudou os dois →
+  o combinado. Cache-busting é **por arquivo** (`?v=N` em cada `<script>/<link>`),
+  incrementar o(s) que mudou.
+
+### Infra (Terraform)
+A **CloudFront Function de clean-URLs** foi portada para `infra/main.tf`
+(`aws_cloudfront_function "clean_urls"` + `function_association` lendo
+`scripts/clean-urls.js`) — um `terraform apply` já entrega as URLs limpas (o passo
+manual `4-setup-clean-urls.sh` deixou de ser obrigatório em ambiente novo). A política
+de Cost Explorer (`aws_iam_role_policy "ecs_task_costs"`) também está no Terraform.
+
+### Ambiente de edição — ATENÇÃO (relacionado ao CRITICAL #1)
+A pasta do projeto é **OneDrive (cloud-on-demand)**. O mount Linux do sandbox às vezes
+entrega cópias **truncadas/defasadas** dos arquivos (o `py_compile`/`node --check` do
+arquivo inteiro falha por isso, não por erro real). Os arquivos reais (caminho Windows,
+que o deploy usa) ficam íntegros. Para validar sob esse cenário: compile/`node --check`
+os **blocos novos isoladamente** com stubs, confirme o fim do arquivo via Read, e confie
+no deploy (lê o caminho Windows). Exclusão de arquivos na pasta exige o tool
+`allow_cowork_file_delete` antes do `rm`.
 
 ---
 

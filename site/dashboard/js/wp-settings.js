@@ -148,15 +148,8 @@ async function saveRule() {
   const category    = document.getElementById('ruleCategory').value;
   if (!label || !pattern) { toast('Preencha o rótulo e o padrão.'); return; }
   try {
-    const r = await fetch(
-      state.url + '/v1/productivity/rules?tenant=' + encodeURIComponent(state.tenant),
-      {
-        method: 'POST',
-        headers: { 'X-Admin-Token': state.token, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ label, pattern, match_field, match_type, category }),
-      }
-    );
-    if (!r.ok) { const t = await r.text(); throw new Error(t); }
+    await apiFetch('POST', '/v1/productivity/rules?tenant=' + encodeURIComponent(state.tenant),
+      { label, pattern, match_field, match_type, category });
     toast('Regra salva com sucesso!');
     document.getElementById('ruleLabel').value   = '';
     document.getElementById('rulePattern').value = '';
@@ -167,11 +160,7 @@ async function saveRule() {
 async function deleteRule(id) {
   if (!confirm('Excluir esta regra?')) return;
   try {
-    const r = await fetch(
-      state.url + '/v1/productivity/rules/' + id + '?tenant=' + encodeURIComponent(state.tenant),
-      { method: 'DELETE', headers: { 'X-Admin-Token': state.token } }
-    );
-    if (!r.ok) { const t = await r.text(); throw new Error(t); }
+    await apiFetch('DELETE', '/v1/productivity/rules/' + id + '?tenant=' + encodeURIComponent(state.tenant));
     toast('Regra excluída.');
     await loadRules();
   } catch (e) { toast('Erro ao excluir regra: ' + e.message); }
@@ -508,15 +497,11 @@ async function saveUser() {
   Object.keys(body).forEach(k => { if (!body[k]) delete body[k]; });
   if (!Object.keys(body).length) { toast('Nada para salvar.'); return; }
   try {
-    const r = await fetch(
-      state.url + '/v1/users/' + encodeURIComponent(uid) + '?tenant=' + encodeURIComponent(state.tenant),
-      {
-        method:  'PATCH',
-        headers: { 'X-Admin-Token': state.token, 'Content-Type': 'application/json' },
-        body:    JSON.stringify(body),
-      }
-    );
-    if (!r.ok) { const t = await r.text(); throw new Error(t); }
+    // apiFetch envia o cookie de sessão (credentials:'include') — necessário no
+    // login e-mail/senha. O fetch cru anterior não mandava o cookie → 403.
+    await apiFetch('PATCH',
+      '/v1/users/' + encodeURIComponent(uid) + '?tenant=' + encodeURIComponent(state.tenant),
+      body);
     toast('Colaborador atualizado!');
     document.getElementById('collabForm').style.display = 'none';
     await loadCollabs();

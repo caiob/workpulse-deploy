@@ -803,6 +803,16 @@ resource "aws_cloudfront_origin_access_control" "site" {
   signing_protocol                  = "sigv4"
 }
 
+# Clean URLs (viewer-request): reescreve /dashboard, /adm, /docs e paths sem
+# extensão para os .html reais no S3. Código em scripts/clean-urls.js.
+resource "aws_cloudfront_function" "clean_urls" {
+  name    = "${local.name_prefix}-clean-urls"
+  runtime = "cloudfront-js-1.0"
+  comment = "WorkPulse clean URLs"
+  publish = true
+  code    = file("${path.module}/../scripts/clean-urls.js")
+}
+
 resource "aws_cloudfront_distribution" "site" {
   enabled             = true
   is_ipv6_enabled     = true
@@ -823,6 +833,11 @@ resource "aws_cloudfront_distribution" "site" {
     allowed_methods        = ["GET", "HEAD", "OPTIONS"]
     cached_methods         = ["GET", "HEAD"]
     compress               = true
+
+    function_association {
+      event_type   = "viewer-request"
+      function_arn = aws_cloudfront_function.clean_urls.arn
+    }
 
     forwarded_values {
       query_string = false

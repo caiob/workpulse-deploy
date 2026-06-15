@@ -18,6 +18,12 @@ const SECTION_LABELS = {
   alertas:    'Alertas',
 };
 
+// Tipos de relatório oferecidos na criação (1 por vez).
+const REPORT_TYPES = {
+  jornada: 'Jornada de Trabalho',
+  alertas: 'Alertas',
+};
+
 /* ============================================================
    CARREGAMENTO PRINCIPAL
    ============================================================ */
@@ -73,6 +79,7 @@ function renderReportsList(reports) {
           <small style="color:var(--text-dim)">${recipients.map(_esc).join(' · ')}</small>
         </div>
         <div class="report-card-actions">
+          <button class="btn btn-sm btn-outline" onclick="previewReport(${r.id}, '${_esc(r.name)}', this)">👁 Pré-visualizar</button>
           <button class="btn btn-sm btn-outline" onclick="openEditReportModal(${r.id})">✏️ Editar</button>
           <button class="btn btn-sm btn-outline" onclick="showReportHistory(${r.id}, '${_esc(r.name)}')">📋 Histórico</button>
           <button class="btn btn-sm btn-outline" onclick="sendReportNow(${r.id}, '${_esc(r.name)}')">▶ Enviar Agora</button>
@@ -106,13 +113,12 @@ function _openReportModal(cfg) {
     : [];
   const sections = cfg
     ? (typeof cfg.sections === 'string' ? JSON.parse(cfg.sections) : cfg.sections)
-    : ['coletas'];
+    : ['jornada'];
 
-  const sectionChecks = Object.entries(SECTION_LABELS).map(([key, label]) => `
-    <label class="checkbox-label">
-      <input type="checkbox" name="section_${key}" value="${key}"
-        ${sections.includes(key) ? 'checked' : ''}> ${label}
-    </label>`).join('');
+  // Tipo atual = primeiro tipo válido do config (default: jornada).
+  const curType = (sections.includes('alertas') && !sections.includes('jornada')) ? 'alertas' : 'jornada';
+  const typeOpts = Object.entries(REPORT_TYPES).map(([key, label]) =>
+    `<option value="${key}" ${curType === key ? 'selected' : ''}>${label}</option>`).join('');
 
   const modal = document.createElement('div');
   modal.id = 'reportModal';
@@ -138,8 +144,8 @@ function _openReportModal(cfg) {
       </div>
 
       <div class="form-group">
-        <label>Seções incluídas no relatório</label>
-        <div class="checkbox-group">${sectionChecks}</div>
+        <label>Tipo de relatório</label>
+        <select id="rptType" class="input">${typeOpts}</select>
       </div>
 
       <div class="form-group">
@@ -173,12 +179,12 @@ function _collectReportForm() {
   const enabled = document.getElementById('rptEnabled').checked;
   const recipientsRaw = document.getElementById('rptRecipients').value;
   const recipients = recipientsRaw.split('\n').map(s => s.trim()).filter(s => s.includes('@'));
-  const sections = ['coletas','jornada','tendencias','alertas']
-    .filter(k => document.querySelector(`input[name="section_${k}"]`)?.checked);
+  const type = document.getElementById('rptType').value;
+  const sections = type ? [type] : [];
 
   if (!name) { toast('Informe o nome do relatório.'); return null; }
   if (!recipients.length) { toast('Informe ao menos um e-mail válido.'); return null; }
-  if (!sections.length) { toast('Selecione ao menos uma seção.'); return null; }
+  if (!sections.length) { toast('Selecione o tipo de relatório.'); return null; }
 
   return { name, frequency, recipients, sections, enabled };
 }
@@ -233,6 +239,35 @@ async function sendReportNow(id, name) {
     toast(`Relatório "${name}" enviado! Verifique as caixas de entrada em alguns instantes.`);
   } catch (e) {
     toast('Erro ao enviar: ' + e.message);
+  }
+}
+
+/* ============================================================
+   PRÉ-VISUALIZAÇÃO (mesmo PDF que iria por e-mail, sem enviar)
+   ============================================================ */
+async function previewReport(id, name, btn) {
+  const old = btn ? btn.innerHTML : null;
+  if (btn) { btn.disabled = true; btn.innerHTML = '⏳ Gerando…'; }
+  try {
+    const r = await fetch(
+      state.url + `/v1/reports/${id}/preview?tenant=` + encodeURIComponent(state.tenant),
+      { headers: _authHeaders(), credentials: 'include' }
+    );
+    if (r.status === 401) { if (typeof _handleAuthFail === 'function') _handleAuthFail(); throw new Error('sessão expirada'); }
+    if (!r.ok) { const t = await r.text().catch(() => r.statusText); throw new Error(t); }
+    const blob = await r.blob();
+    const url  = URL.createObjectURL(blob);
+    const win  = window.open(url, '_blank');
+    if (!win) {  // popup bloqueado → baixa o arquivo
+      const a = document.createElement('a');
+      a.href = url; a.download = `workpulse_${(name || 'relatorio').toLowerCase().replace(/\s+/g, '_')}.pdf`;
+      document.body.appendChild(a); a.click(); a.remove();
+    }
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  } catch (e) {
+    toast('Erro ao gerar a pré-visualização: ' + e.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = old; }
   }
 }
 
@@ -300,4 +335,97 @@ function _esc(str) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+
+/* ============================================================
+   CONTA DE E-MAIL (SMTP do cliente) — relatórios e alertas
+   ============================================================ */
+const EM_PRESETS = {
+  gmail:   { host: 'smtp.gmail.com',        port: 587, security: 'tls' },
+  outlook: { host: 'smtp.office365.com',    port: 587, security: 'tls' },
+};
+
+function emProviderPreset() {
+  const p = document.getElementById('emProvider').value;
+  const hint = document.getElementById('emGmailHint');
+  if (hint) hint.style.display = (p === 'gmail') ? 'block' : 'none';
+  const preset = EM_PRESETS[p];
+  if (preset) {
+    document.getElementById('emHost').value     = preset.host;
+    document.getElementById('emPort').value     = preset.port;
+    document.getElementById('emSecurity').value = preset.security;
+  }
+}
+
+async function loadEmailConfig() {
+  try {
+    const d = await api('/v1/tenant-email-config?tenant=' + encodeURIComponent(state.tenant));
+    document.getElementById('emProvider').value   = d.provider || 'gmail';
+    document.getElementById('emHost').value       = d.host || '';
+    document.getElementById('emPort').value       = d.port || 587;
+    document.getElementById('emSecurity').value   = d.security || 'tls';
+    document.getElementById('emUser').value       = d.username || '';
+    document.getElementById('emFromName').value   = d.from_name || '';
+    document.getElementById('emFromEmail').value  = d.from_email || '';
+    document.getElementById('emEnabled').checked  = !!d.enabled;
+    const pass = document.getElementById('emPass');
+    pass.value = '';
+    pass.placeholder = d.has_password ? '•••••••• (senha salva — deixe em branco p/ manter)' : 'senha ou senha de app';
+    const hint = document.getElementById('emGmailHint');
+    if (hint) hint.style.display = (d.provider === 'gmail' || !d.configured) ? 'block' : 'none';
+    emRenderStatus(d);
+  } catch (e) {
+    emSetStatus('Erro ao carregar: ' + e.message, 'var(--danger)');
+  }
+}
+
+function emRenderStatus(d) {
+  if (!d || !d.configured) { emSetStatus('Ainda não configurada — relatórios não serão enviados.', 'var(--text-dim)'); return; }
+  let txt = d.enabled ? '✅ Habilitada.' : '⚠️ Configurada, mas desabilitada (não envia).';
+  if (d.last_test_at) {
+    const when = new Date(d.last_test_at).toLocaleString('pt-BR');
+    txt += d.last_test_ok ? `  Último teste OK em ${when}.` : `  Último teste FALHOU em ${when}: ${d.last_test_error || ''}`;
+  }
+  emSetStatus(txt, d.enabled ? '#4ade80' : '#facc15');
+}
+
+function emSetStatus(msg, color) {
+  const el = document.getElementById('emStatus');
+  if (el) { el.textContent = msg; el.style.color = color || 'var(--text-dim)'; }
+}
+
+function _emCollect() {
+  return {
+    provider:   document.getElementById('emProvider').value,
+    host:       document.getElementById('emHost').value.trim(),
+    port:       parseInt(document.getElementById('emPort').value, 10) || 587,
+    security:   document.getElementById('emSecurity').value,
+    username:   document.getElementById('emUser').value.trim(),
+    password:   document.getElementById('emPass').value,            // vazio => mantém
+    from_name:  document.getElementById('emFromName').value.trim(),
+    from_email: document.getElementById('emFromEmail').value.trim() || document.getElementById('emUser').value.trim(),
+    enabled:    document.getElementById('emEnabled').checked,
+  };
+}
+
+async function saveEmailConfig() {
+  const body = _emCollect();
+  if (!body.host || !body.username) { emSetStatus('Preencha servidor e usuário.', 'var(--danger)'); return; }
+  try {
+    await apiFetch('PUT', '/v1/tenant-email-config?tenant=' + encodeURIComponent(state.tenant), body);
+    toast('Conta de e-mail salva.');
+    loadEmailConfig();
+  } catch (e) { emSetStatus('Falha ao salvar: ' + e.message, 'var(--danger)'); }
+}
+
+async function testEmailConfig() {
+  emSetStatus('Enviando e-mail de teste…', 'var(--text-dim)');
+  try {
+    // salva o que estiver no formulário antes de testar, para refletir mudanças
+    await apiFetch('PUT', '/v1/tenant-email-config?tenant=' + encodeURIComponent(state.tenant), _emCollect());
+    const r = await apiFetch('POST', '/v1/tenant-email-config/test?tenant=' + encodeURIComponent(state.tenant), {});
+    emSetStatus('✅ Teste enviado para ' + (r && r.sent_to ? r.sent_to : 'sua conta') + '.', '#4ade80');
+    loadEmailConfig();
+  } catch (e) { emSetStatus('❌ Falha no teste: ' + e.message, 'var(--danger)'); }
 }

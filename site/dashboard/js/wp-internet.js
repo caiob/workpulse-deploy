@@ -148,7 +148,7 @@ function renderSitesTable(sites, totalSec, catFilter = '') {
     return `<tr>
       <td>${when}</td>
       <td class="site-name" title="${escHtml(s.site_name)}">${escHtml(s.site_name)}</td>
-      <td>${fmtH(s.total_sec)}h <small>(${pct}%)</small></td>
+      <td>${fmtSec(s.total_sec)} <small>(${pct}%)</small></td>
       <td>${catBadge} <button class="ghost" style="font-size:11px;padding:2px 6px"
             onclick="prefillRule(${escHtml(JSON.stringify(s.site_name))})">Categorizar</button></td>
       <td>${s.user_count}</td>

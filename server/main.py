@@ -113,8 +113,7 @@ LICENSE_KEY_B64     = os.getenv("WORKPULSE_LICENSE_PRIVKEY_B64", "")
 LICENSE_KEY_SECRET_ARN = os.getenv("LICENSE_KEY_SECRET_ARN", "")
 
 APP_VERSION = "2.0.0"
-FROM_EMAIL   = os.getenv("WORKPULSE_FROM_EMAIL", "noreply@workpulse.com.br")
-SES_REGION   = os.getenv("WORKPULSE_SES_REGION", "us-east-1")
+FROM_EMAIL   = os.getenv("WORKPULSE_FROM_EMAIL", "noreply@workpulse.com.br")  # fallback p/ remetente/notify (SES removido)
 # Timezone usada para "fechar" a jornada de trabalho por dia local (início/fim/pausas).
 # Os eventos sao gravados em UTC; aqui convertemos para o fuso do cliente.
 REPORT_TZ    = os.getenv("WORKPULSE_TZ", "America/Sao_Paulo")
@@ -779,10 +778,12 @@ async def lifespan(app: FastAPI):
     load_or_create_keypair()
     task_retention = asyncio.create_task(_retention_worker())
     task_reports   = asyncio.create_task(_reports_worker())
+    task_alerts    = asyncio.create_task(_alerts_worker())
     yield
     task_retention.cancel()
     task_reports.cancel()
-    for t in (task_retention, task_reports):
+    task_alerts.cancel()
+    for t in (task_retention, task_reports, task_alerts):
         try:
             await t
         except asyncio.CancelledError:
@@ -2187,12 +2188,41 @@ class ReportConfigOut(ReportConfigIn):
 # ---------------------------------------------------------------------------
 # Geração de PDF com reportlab
 # ---------------------------------------------------------------------------
+def _report_period_range(freq: str):
+    """Devolve (since_iso_utc, until_iso_utc, label) para o período do relatório,
+    no fuso REPORT_TZ. diário = o dia; semanal = a semana (seg–dom); mensal = o mês.
+    O fim é limitado a 'agora' (não inclui futuro)."""
+    tz = ZoneInfo(REPORT_TZ) if ZoneInfo else dt.timezone.utc
+    now_local = dt.datetime.now(tz)
+    if freq == "weekly":
+        start = (now_local - dt.timedelta(days=now_local.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+        end   = start + dt.timedelta(days=7) - dt.timedelta(seconds=1)
+        label = f"{start.strftime('%d/%m/%Y')} – {(start + dt.timedelta(days=6)).strftime('%d/%m/%Y')}"
+    elif freq == "monthly":
+        import calendar as _cal
+        start = now_local.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        last  = _cal.monthrange(start.year, start.month)[1]
+        end   = start.replace(day=last, hour=23, minute=59, second=59)
+        label = start.strftime("%m/%Y")
+    else:  # daily
+        start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+        end   = start.replace(hour=23, minute=59, second=59)
+        label = start.strftime("%d/%m/%Y")
+    if end > now_local:
+        end = now_local
+    since = start.astimezone(dt.timezone.utc).isoformat()
+    until = end.astimezone(dt.timezone.utc).isoformat()
+    return since, until, label
+
+
 def _build_report_pdf(
     tenant_id: str,
     cfg: dict,
     period_label: str,
+    since: str,
+    until: str,
 ) -> bytes:
-    """Gera o PDF do relatório e devolve bytes."""
+    """Gera o PDF do relatório e devolve bytes. since/until = janela do período (UTC ISO)."""
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -2240,11 +2270,12 @@ def _build_report_pdf(
                                                THEN e.duration_sec END),0) AS afk
                        FROM users u LEFT JOIN events e
                             ON e.tenant_id=u.tenant_id AND e.user_id=u.user_id
-                               AND e.ts >= NOW() - INTERVAL '31 days'
+                               AND e.ts::timestamptz >= %s::timestamptz
+                               AND e.ts::timestamptz <= %s::timestamptz
                        WHERE u.tenant_id=%s AND u.user_id=ANY(%s)
                        GROUP BY u.display_name, u.email, u.department
                        ORDER BY active DESC""",
-                    (tenant_id, uid_filter),
+                    (since, until, tenant_id, uid_filter),
                 ).fetchall()
             else:
                 rows = c.execute(
@@ -2254,11 +2285,12 @@ def _build_report_pdf(
                                                THEN e.duration_sec END),0) AS afk
                        FROM users u LEFT JOIN events e
                             ON e.tenant_id=u.tenant_id AND e.user_id=u.user_id
-                               AND e.ts >= NOW() - INTERVAL '31 days'
+                               AND e.ts::timestamptz >= %s::timestamptz
+                               AND e.ts::timestamptz <= %s::timestamptz
                        WHERE u.tenant_id=%s
                        GROUP BY u.display_name, u.email, u.department
                        ORDER BY active DESC""",
-                    (tenant_id,),
+                    (since, until, tenant_id),
                 ).fetchall()
 
             if rows:
@@ -2288,44 +2320,112 @@ def _build_report_pdf(
         # ── JORNADA ───────────────────────────────────────────────────────
         if "jornada" in sections:
             story.append(Paragraph("Jornada de Trabalho", h2_style))
-            rows = c.execute(
-                """SELECT u.display_name, u.email,
-                          ds.day,
-                          ds.active_sec, ds.afk_sec
-                   FROM daily_summaries ds
-                   JOIN users u ON u.tenant_id=ds.tenant_id AND u.user_id=ds.user_id
-                   WHERE ds.tenant_id=%s
-                     AND ds.day >= to_char(NOW() - INTERVAL '30 days', 'YYYY-MM-DD')
-                   ORDER BY u.display_name, ds.day""",
-                (tenant_id,),
-            ).fetchall()
+            # Calcula a partir dos eventos (mesma lógica da tela Jornada):
+            # janela do dia = 1ª coleta → última coleta; AFK = AFK dentro da janela.
+            _uids = user_filter or []
+            _uf   = " AND user_id = ANY(%(uids)s)" if _uids else ""
+            _jq   = f"""
+                WITH w AS (
+                    SELECT user_id,
+                           (ts::timestamptz AT TIME ZONE %(tz)s)                 AS lts,
+                           (ts::timestamptz AT TIME ZONE %(tz)s)
+                               + (duration_sec || ' seconds')::interval          AS lend,
+                           duration_sec
+                    FROM events
+                    WHERE tenant_id = %(tenant)s AND bucket = 'window'
+                      AND ts::timestamptz >= %(since)s::timestamptz
+                      AND ts::timestamptz <= %(until)s::timestamptz{_uf}
+                ),
+                win AS (
+                    SELECT user_id, lts::date AS day, MIN(lts) AS start_ts,
+                           MAX(lend) AS end_ts, SUM(duration_sec) AS focus_sec
+                    FROM w GROUP BY user_id, lts::date
+                ),
+                afk_ev AS (
+                    SELECT user_id,
+                           (ts::timestamptz AT TIME ZONE %(tz)s)        AS lts,
+                           (ts::timestamptz AT TIME ZONE %(tz)s)::date  AS day,
+                           duration_sec
+                    FROM events
+                    WHERE tenant_id = %(tenant)s AND bucket = 'afk'
+                      AND data_json->>'status' = 'afk'
+                      AND ts::timestamptz >= %(since)s::timestamptz
+                      AND ts::timestamptz <= %(until)s::timestamptz{_uf}
+                ),
+                afk AS (
+                    SELECT a.user_id, a.day,
+                           COALESCE(SUM(a.duration_sec) FILTER (
+                               WHERE a.lts >= win.start_ts AND a.lts <= win.end_ts), 0) AS afk_in,
+                           COALESCE(SUM(a.duration_sec) FILTER (
+                               WHERE a.lts > win.end_ts), 0)                            AS afk_after
+                    FROM afk_ev a JOIN win ON win.user_id = a.user_id AND win.day = a.day
+                    GROUP BY a.user_id, a.day
+                )
+                SELECT u.display_name, u.email,
+                       to_char(win.day, 'YYYY-MM-DD')                  AS day,
+                       to_char(win.start_ts, 'HH24:MI')                AS start_hm,
+                       to_char(win.end_ts,   'HH24:MI')                AS end_hm,
+                       EXTRACT(EPOCH FROM (win.end_ts - win.start_ts)) AS gross_sec,
+                       COALESCE(afk.afk_in, 0)                         AS afk_in,
+                       COALESCE(afk.afk_after, 0)                      AS afk_after
+                FROM win
+                JOIN users u ON u.tenant_id = %(tenant)s AND u.user_id = win.user_id
+                LEFT JOIN afk ON afk.user_id = win.user_id AND afk.day = win.day
+                ORDER BY u.display_name, win.day
+            """
+            _jp = {"tz": REPORT_TZ, "tenant": tenant_id, "since": since, "until": until}
+            if _uids:
+                _jp["uids"] = _uids
+            rows = c.execute(_jq, _jp).fetchall()
             if rows:
-                data = [["Colaborador", "Dia", "Ativo (h)", "AFK (h)"]]
-                for r in rows:
-                    data.append([
-                        r["display_name"] or r["email"],
-                        r["day"],
-                        f"{r['active_sec']/3600:.1f}",
-                        f"{r['afk_sec']/3600:.1f}",
-                    ])
-                tbl = Table(data, colWidths=[6*cm, 3*cm, 3*cm, 3*cm])
-                tbl.setStyle(TableStyle([
-                    ("BACKGROUND",   (0, 0), (-1, 0), colors.HexColor("#3b82f6")),
-                    ("TEXTCOLOR",    (0, 0), (-1, 0), colors.white),
-                    ("FONTNAME",     (0, 0), (-1, 0), "Helvetica-Bold"),
-                    ("FONTSIZE",     (0, 0), (-1, -1), 8),
-                    ("GRID",         (0, 0), (-1, -1), 0.25, colors.lightgrey),
-                    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f0f4ff")]),
-                    ("ALIGN",        (2, 0), (-1, -1), "RIGHT"),
-                ]))
-                story.append(tbl)
+                from itertools import groupby as _groupby
+
+                def _hhmm(sec):
+                    s = int(sec or 0)
+                    return f"{s // 3600:02d}:{(s % 3600) // 60:02d}"
+
+                person_style = ParagraphStyle(
+                    "wp_person", parent=normal_style, fontSize=11,
+                    fontName="Helvetica-Bold", textColor=colors.HexColor("#1e3a8a"),
+                    spaceBefore=12, spaceAfter=3,
+                )
+                _keyf = lambda r: (r["display_name"] or r["email"] or "—")
+                for person, grp in _groupby(rows, key=_keyf):
+                    story.append(Paragraph(person, person_style))
+                    data = [["Dia", "Início", "Final", "AFK na Jornada",
+                             "AFK Pós Jornada", "Bruta", "Líquida"]]
+                    for r in grp:
+                        gross  = float(r["gross_sec"] or 0)
+                        afk_in = float(r["afk_in"] or 0)
+                        net    = max(0.0, gross - afk_in)
+                        data.append([
+                            r["day"],
+                            r["start_hm"] or "—",
+                            r["end_hm"] or "—",
+                            _hhmm(afk_in),
+                            _hhmm(r["afk_after"]) if (r["afk_after"] or 0) else "—",
+                            _hhmm(gross),
+                            _hhmm(net),
+                        ])
+                    tbl = Table(data, colWidths=[2.4*cm, 1.9*cm, 1.9*cm, 3.0*cm, 3.0*cm, 1.9*cm, 1.9*cm])
+                    tbl.setStyle(TableStyle([
+                        ("BACKGROUND",   (0, 0), (-1, 0), colors.HexColor("#3b82f6")),
+                        ("TEXTCOLOR",    (0, 0), (-1, 0), colors.white),
+                        ("FONTNAME",     (0, 0), (-1, 0), "Helvetica-Bold"),
+                        ("FONTSIZE",     (0, 0), (-1, -1), 8),
+                        ("GRID",         (0, 0), (-1, -1), 0.25, colors.lightgrey),
+                        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f0f4ff")]),
+                        ("ALIGN",        (1, 0), (-1, -1), "CENTER"),
+                    ]))
+                    story.append(tbl)
+                    story.append(Spacer(1, 4))
             else:
                 story.append(Paragraph("Nenhum dado no período.", dim_style))
             story.append(Spacer(1, 10))
 
         # ── TENDÊNCIAS ────────────────────────────────────────────────────
         if "tendencias" in sections:
-            story.append(Paragraph("Tendências (últimos 14 dias)", h2_style))
+            story.append(Paragraph("Tendências (dia a dia no período)", h2_style))
             rows = c.execute(
                 """SELECT substr(ts,1,10) AS day,
                           SUM(CASE WHEN bucket='window' THEN duration_sec ELSE 0 END) AS active,
@@ -2333,9 +2433,11 @@ def _build_report_pdf(
                                    THEN duration_sec ELSE 0 END) AS afk,
                           COUNT(DISTINCT user_id) AS users
                    FROM events
-                   WHERE tenant_id=%s AND ts >= NOW() - INTERVAL '14 days'
+                   WHERE tenant_id=%s
+                     AND ts::timestamptz >= %s::timestamptz
+                     AND ts::timestamptz <= %s::timestamptz
                    GROUP BY day ORDER BY day""",
-                (tenant_id,),
+                (tenant_id, since, until),
             ).fetchall()
             if rows:
                 data = [["Dia", "Usuários", "Ativo total (h)", "AFK total (h)"]]
@@ -2411,49 +2513,25 @@ def _build_report_pdf(
 
 
 # ---------------------------------------------------------------------------
-# Envio via AWS SES
+# (AWS SES removido) — todo envio de e-mail usa o SMTP do tenant (_smtp_send).
+# Relatórios: _run_report → _smtp_send. Links de senha: _send_password_token.
 # ---------------------------------------------------------------------------
-def _send_report_email(
-    recipients: list[str],
-    subject: str,
-    body_html: str,
-    pdf_bytes: bytes,
-    filename: str,
-) -> None:
-    import boto3 as _boto3
-
-    msg = email.mime.multipart.MIMEMultipart("mixed")
-    msg["Subject"] = subject
-    msg["From"]    = FROM_EMAIL
-    msg["To"]      = ", ".join(recipients)
-
-    body_part = email.mime.text.MIMEText(body_html, "html", "utf-8")
-    msg.attach(body_part)
-
-    attachment = email.mime.application.MIMEApplication(pdf_bytes, Name=filename)
-    attachment["Content-Disposition"] = f'attachment; filename="{filename}"'
-    msg.attach(attachment)
-
-    client = _boto3.client("ses", region_name=SES_REGION)
-    client.send_raw_email(
-        Source=FROM_EMAIL,
-        Destinations=recipients,
-        RawMessage={"Data": msg.as_bytes()},
-    )
 
 
 # ---------------------------------------------------------------------------
 # Função central de execução de um relatório
 # ---------------------------------------------------------------------------
-def _run_report(cfg: dict, tenant_id: str, period_label: str) -> None:
+def _run_report(cfg: dict, tenant_id: str, period_label: str | None = None) -> None:
     """Gera o PDF e envia o e-mail para um config de relatório."""
     config_id  = cfg["id"]
     recipients = json.loads(cfg["recipients"]) if isinstance(cfg["recipients"], str) else cfg["recipients"]
     rname      = cfg["name"]
+    # Janela de dados conforme a frequência (diário/semanal/mensal).
+    since, until, period_label = _report_period_range(cfg.get("frequency") or "daily")
 
     status, err_msg = "ok", None
     try:
-        pdf_bytes = _build_report_pdf(tenant_id, cfg, period_label)
+        pdf_bytes = _build_report_pdf(tenant_id, cfg, period_label, since, until)
         filename  = f"workpulse_{rname.lower().replace(' ', '_')}_{dt.date.today().isoformat()}.pdf"
         subject   = f"WorkPulse — {rname} ({period_label})"
         body_html = f"""
@@ -2462,8 +2540,11 @@ def _run_report(cfg: dict, tenant_id: str, period_label: str) -> None:
         <p>Acesse o dashboard para mais detalhes: <a href="https://workpulse.com.br/dashboard/workforce.html">WorkPulse Dashboard</a></p>
         <br><p style="color:#888;font-size:12px">WorkPulse — Monitoramento de Força de Trabalho</p>
         """
-        _send_report_email(recipients, subject, body_html, pdf_bytes, filename)
-        print(f"[reports] sent '{rname}' → {recipients}", flush=True)
+        ecfg = _email_cfg_for_send(tenant_id)
+        if not ecfg:
+            raise RuntimeError("conta de e-mail do tenant não configurada/habilitada — relatório não enviado")
+        _smtp_send(ecfg, recipients, subject, body_html, attachments=[(filename, pdf_bytes)])
+        print(f"[reports] sent '{rname}' → {recipients} (smtp {ecfg['host']})", flush=True)
     except Exception as exc:
         status, err_msg = "error", str(exc)
         print(f"[reports] ERROR sending '{rname}': {exc}", flush=True)
@@ -2623,6 +2704,30 @@ def send_report_now(cfg_id: int, tenant: str):
     return {"status": "queued"}
 
 
+@app.get("/v1/reports/{cfg_id}/preview", dependencies=[Depends(require_tenant_scope)])
+def preview_report(cfg_id: int, tenant: str, download: int = 0):
+    """Gera o MESMO PDF que iria por e-mail e devolve direto (sem enviar)."""
+    from fastapi import Response as _FResponse
+    with db() as c:
+        row = c.execute(
+            "SELECT * FROM report_configs WHERE id=%s AND tenant_id=%s",
+            (cfg_id, tenant),
+        ).fetchone()
+    if not row:
+        raise HTTPException(404, "Report config not found")
+    cfg = dict(row)
+    since, until, period_label = _report_period_range(cfg.get("frequency") or "daily")
+    pdf_bytes = _build_report_pdf(tenant, cfg, period_label, since, until)
+    safe = (cfg.get("name") or "relatorio").lower().replace(" ", "_")
+    filename = f"workpulse_{safe}_{dt.date.today().isoformat()}.pdf"
+    disp = "attachment" if download else "inline"
+    return _FResponse(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'{disp}; filename="{filename}"'},
+    )
+
+
 @app.get("/v1/reports/{cfg_id}/history", dependencies=[Depends(require_tenant_scope)])
 def report_history(cfg_id: int, tenant: str):
     tid = tenant
@@ -2779,23 +2884,11 @@ def _hash_token(t: str) -> str:
 def _to_bool(v) -> bool:
     return v in (True, 1, "t", "true", "TRUE", "1")
 
-# --- E-mail genérico (SES) -------------------------------------------------
-def _send_email_html(recipients: list[str], subject: str, body_html: str) -> None:
-    import boto3 as _boto3
-    msg = email.mime.multipart.MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"]    = FROM_EMAIL
-    msg["To"]      = ", ".join(recipients)
-    msg.attach(email.mime.text.MIMEText(body_html, "html", "utf-8"))
-    client = _boto3.client("ses", region_name=SES_REGION)
-    client.send_raw_email(
-        Source=FROM_EMAIL,
-        Destinations=recipients,
-        RawMessage={"Data": msg.as_bytes()},
-    )
-
 def _send_password_token(user_row: dict, purpose: str) -> str:
-    """Gera token de uso único, envia o link por e-mail (SES) e retorna o link."""
+    """Gera token de uso único, tenta enviar o link pela conta de e-mail (SMTP) do
+    PRÓPRIO tenant e devolve o link. Se o tenant não tiver SMTP configurado, o link
+    é retornado mesmo assim — o Admin Master copia/envia manualmente pela UI
+    (o link já é exibido na tela de Usuários)."""
     raw = _gen_secret()
     th  = _hash_token(raw)
     exp = (_now_utc() + dt.timedelta(hours=TOKEN_TTL_HOURS)).isoformat()
@@ -2818,10 +2911,15 @@ def _send_password_token(user_row: dict, purpose: str) -> str:
         f'<p><a href="{link}">{link}</a></p>'
         f"<p>Se você não solicitou, ignore este e-mail.</p>"
     )
-    try:
-        _send_email_html([user_row["email"]], "WorkPulse — acesso ao painel", html)
-    except Exception as exc:
-        print(f"[auth] AVISO: falha ao enviar e-mail de senha: {exc}", flush=True)
+    ecfg = _email_cfg_for_send(user_row.get("tenant_id"))
+    if ecfg:
+        try:
+            _smtp_send(ecfg, [user_row["email"]], "WorkPulse — acesso ao painel", html)
+        except Exception as exc:
+            print(f"[auth] AVISO: falha ao enviar e-mail de senha (SMTP do tenant): {exc}", flush=True)
+    else:
+        print("[auth] tenant sem SMTP configurado — link de senha não enviado por e-mail "
+              "(Admin Master usa o link manual na UI).", flush=True)
     return link
 
 # --- Sessões ---------------------------------------------------------------
@@ -3391,16 +3489,10 @@ def tenant_license_request(body: LicenseRequestIn, tenant: str, request: Request
                VALUES (%s,%s,%s,%s,%s,'open',%s)""",
             (tid, ctx["email"], body.plan, body.seats, body.message, _now_utc().isoformat()),
         )
-    html = (
-        f"<p>Nova solicitação de licença.</p>"
-        f"<ul><li>Tenant: {tid}</li><li>Solicitante: {ctx['email']}</li>"
-        f"<li>Plano: {body.plan or '-'}</li><li>Seats: {body.seats or '-'}</li></ul>"
-        f"<p>Mensagem: {body.message or '-'}</p>"
-    )
-    try:
-        _send_email_html([PLATFORM_NOTIFY], f"WorkPulse — solicitação de licença ({tid})", html)
-    except Exception as exc:
-        print(f"[auth] AVISO: falha ao notificar plataforma: {exc}", flush=True)
+    # Solicitação fica registrada em dash_license_requests + auditoria; a plataforma
+    # acompanha pelo Platform Admin (sem e-mail — SES removido).
+    print(f"[license] nova solicitação: tenant={tid} por={ctx['email']} "
+          f"plano={body.plan or '-'} seats={body.seats or '-'}", flush=True)
     audit(ctx["email"], "license.request", target=tid, detail=f"plan={body.plan};seats={body.seats}", ip=_client_ip(request))
     return {"ok": True}
 
@@ -4256,6 +4348,772 @@ def tenant_finance_get(tenant: str, ctx: Annotated[dict, Depends(require_role("a
         "monthly_cents": eff * seats,
         "payments": _payments_list(tid),
     }
+
+
+# ===========================================================================
+# Conta de e-mail por tenant (SMTP) — envio de relatórios e alertas pela
+# conta do próprio cliente. Senha guardada criptografada (Fernet).
+# ===========================================================================
+_SCHEMA_STMTS.extend([
+    """
+    CREATE TABLE IF NOT EXISTS app_secrets (
+        name  TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS tenant_email_config (
+        tenant_id      TEXT PRIMARY KEY,
+        provider       TEXT,                       -- gmail | outlook | custom
+        host           TEXT,
+        port           INTEGER,
+        security       TEXT,                       -- tls | ssl | none
+        username       TEXT,
+        password_enc   TEXT,                       -- Fernet
+        from_email     TEXT,
+        from_name      TEXT,
+        enabled        BOOLEAN NOT NULL DEFAULT FALSE,
+        last_test_at   TEXT,
+        last_test_ok   BOOLEAN,
+        last_test_error TEXT,
+        updated_at     TEXT,
+        updated_by     TEXT
+    )
+    """,
+])
+
+
+def _get_fernet():
+    """Chave Fernet: env WORKPULSE_FERNET_KEY se houver; senão persiste uma em
+    app_secrets (gerada na primeira vez)."""
+    from cryptography.fernet import Fernet
+    key = os.getenv("WORKPULSE_FERNET_KEY")
+    if not key:
+        with db() as c:
+            row = c.execute("SELECT value FROM app_secrets WHERE name='fernet_key'").fetchone()
+            if not row:
+                newk = Fernet.generate_key().decode()
+                c.execute(
+                    "INSERT INTO app_secrets (name, value) VALUES ('fernet_key', %s) "
+                    "ON CONFLICT (name) DO NOTHING",
+                    (newk,),
+                )
+                row = c.execute("SELECT value FROM app_secrets WHERE name='fernet_key'").fetchone()
+            key = row["value"]
+    return Fernet(key.encode() if isinstance(key, str) else key)
+
+
+def _enc(plain: str) -> str:
+    return _get_fernet().encrypt(plain.encode()).decode()
+
+
+def _dec(token: str) -> str:
+    return _get_fernet().decrypt(token.encode()).decode()
+
+
+def _email_cfg_row(tenant: str):
+    with db() as c:
+        return c.execute(
+            "SELECT * FROM tenant_email_config WHERE tenant_id=%s", (tenant,)
+        ).fetchone()
+
+
+def _email_cfg_for_send(tenant: str):
+    """Devolve dict pronto para envio (com senha decifrada) se o tenant tiver
+    conta configurada E habilitada; caso contrário None."""
+    row = _email_cfg_row(tenant)
+    if not row or not row["enabled"]:
+        return None
+    if not (row["host"] and row["username"] and row["password_enc"]):
+        return None
+    try:
+        pwd = _dec(row["password_enc"])
+    except Exception:
+        return None
+    return {
+        "host": row["host"], "port": int(row["port"] or 587),
+        "security": (row["security"] or "tls"),
+        "username": row["username"], "password": pwd,
+        "from_email": row["from_email"] or row["username"],
+        "from_name": row["from_name"] or "",
+    }
+
+
+def _smtp_send(cfg: dict, recipients: list[str], subject: str, html: str,
+               attachments: list | None = None) -> None:
+    """Envia um e-mail via SMTP do cliente. attachments: lista de (filename, bytes)."""
+    import smtplib, ssl as _ssl
+    if attachments:
+        msg = email.mime.multipart.MIMEMultipart("mixed")
+        msg.attach(email.mime.text.MIMEText(html, "html", "utf-8"))
+        for fn, data in attachments:
+            part = email.mime.application.MIMEApplication(data, Name=fn)
+            part["Content-Disposition"] = f'attachment; filename="{fn}"'
+            msg.attach(part)
+    else:
+        msg = email.mime.multipart.MIMEMultipart("alternative")
+        msg.attach(email.mime.text.MIMEText(html, "html", "utf-8"))
+
+    from_email = cfg["from_email"]
+    from_name  = cfg.get("from_name") or ""
+    msg["From"]    = f"{from_name} <{from_email}>" if from_name else from_email
+    msg["To"]      = ", ".join(recipients)
+    msg["Subject"] = subject
+
+    host = cfg["host"]; port = int(cfg["port"]); sec = (cfg.get("security") or "tls").lower()
+    if sec == "ssl":
+        server = smtplib.SMTP_SSL(host, port, context=_ssl.create_default_context(), timeout=25)
+    else:
+        server = smtplib.SMTP(host, port, timeout=25)
+        if sec == "tls":
+            server.starttls(context=_ssl.create_default_context())
+    try:
+        server.login(cfg["username"], cfg["password"])
+        server.sendmail(from_email, recipients, msg.as_bytes())
+    finally:
+        try:
+            server.quit()
+        except Exception:
+            pass
+
+
+# --- Modelos ---
+class EmailConfigIn(BaseModel):
+    provider:   str | None = None
+    host:       str
+    port:       int
+    security:   str = "tls"
+    username:   str
+    password:   str | None = None      # vazio => mantém a senha atual
+    from_email: str
+    from_name:  str | None = None
+    enabled:    bool = True
+
+
+class EmailTestIn(BaseModel):
+    to: str | None = None
+
+
+def _email_cfg_public(row) -> dict:
+    if not row:
+        return {"configured": False, "enabled": False, "security": "tls", "port": 587, "provider": "gmail"}
+    return {
+        "configured":  True,
+        "provider":    row["provider"] or "custom",
+        "host":        row["host"] or "",
+        "port":        row["port"] or 587,
+        "security":    row["security"] or "tls",
+        "username":    row["username"] or "",
+        "from_email":  row["from_email"] or "",
+        "from_name":   row["from_name"] or "",
+        "enabled":     bool(row["enabled"]),
+        "has_password": bool(row["password_enc"]),
+        "last_test_at":    row["last_test_at"],
+        "last_test_ok":    row["last_test_ok"],
+        "last_test_error": row["last_test_error"],
+    }
+
+
+@app.get("/v1/tenant-email-config")
+def tenant_email_config_get(tenant: str, ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
+    return _email_cfg_public(_email_cfg_row(tid))
+
+
+@app.put("/v1/tenant-email-config")
+def tenant_email_config_set(body: EmailConfigIn, tenant: str, request: Request,
+                            ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
+    sec = (body.security or "tls").lower()
+    if sec not in ("tls", "ssl", "none"):
+        sec = "tls"
+    existing = _email_cfg_row(tid)
+    # senha: se vier vazia, mantém a anterior (não força redigitar a cada save)
+    if body.password:
+        pwd_enc = _enc(body.password)
+    elif existing and existing["password_enc"]:
+        pwd_enc = existing["password_enc"]
+    else:
+        pwd_enc = None
+    with db() as c:
+        c.execute(
+            """INSERT INTO tenant_email_config
+                 (tenant_id, provider, host, port, security, username, password_enc,
+                  from_email, from_name, enabled, updated_at, updated_by)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               ON CONFLICT (tenant_id) DO UPDATE SET
+                 provider=EXCLUDED.provider, host=EXCLUDED.host, port=EXCLUDED.port,
+                 security=EXCLUDED.security, username=EXCLUDED.username,
+                 password_enc=EXCLUDED.password_enc, from_email=EXCLUDED.from_email,
+                 from_name=EXCLUDED.from_name, enabled=EXCLUDED.enabled,
+                 updated_at=EXCLUDED.updated_at, updated_by=EXCLUDED.updated_by""",
+            (tid, (body.provider or "custom"), body.host, int(body.port), sec,
+             body.username, pwd_enc, (body.from_email or body.username),
+             (body.from_name or None), bool(body.enabled),
+             _now_utc().isoformat(), ctx.get("email")),
+        )
+    audit(ctx.get("email"), "email_config.set", target=tid,
+          detail=f"host={body.host};enabled={body.enabled}", ip=_client_ip(request))
+    return {"ok": True, "has_password": bool(pwd_enc)}
+
+
+@app.post("/v1/tenant-email-config/test")
+def tenant_email_config_test(body: EmailTestIn, tenant: str,
+                             ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
+    row = _email_cfg_row(tid)
+    if not row or not (row["host"] and row["username"] and row["password_enc"]):
+        raise HTTPException(400, "configure e salve a conta de e-mail antes de testar")
+    cfg = {
+        "host": row["host"], "port": int(row["port"] or 587),
+        "security": row["security"] or "tls",
+        "username": row["username"], "password": _dec(row["password_enc"]),
+        "from_email": row["from_email"] or row["username"],
+        "from_name": row["from_name"] or "",
+    }
+    to = (body.to or ctx.get("email") or cfg["from_email"]).strip()
+    html = (
+        "<p>Este é um e-mail de <b>teste</b> do WorkPulse.</p>"
+        "<p>Se você recebeu esta mensagem, a conta de e-mail do seu painel está "
+        "configurada corretamente para enviar relatórios e alertas.</p>"
+        "<p style='color:#888;font-size:12px'>WorkPulse — Monitoramento de Força de Trabalho</p>"
+    )
+    ok, err = True, None
+    try:
+        _smtp_send(cfg, [to], "WorkPulse — teste de envio de e-mail", html)
+    except Exception as exc:
+        ok, err = False, str(exc)
+    with db() as c:
+        c.execute(
+            "UPDATE tenant_email_config SET last_test_at=%s, last_test_ok=%s, last_test_error=%s WHERE tenant_id=%s",
+            (_now_utc().isoformat(), ok, (err or None), tid),
+        )
+    if not ok:
+        raise HTTPException(502, f"falha no envio: {err}")
+    return {"ok": True, "sent_to": to}
+
+
+# ===========================================================================
+# Alertas operacionais — AFK no dia, ausência, sites perigosos + engajamento.
+# Config por tenant (horário comercial, corte, regras por tipo), feriados
+# nacionais oficiais, e-mail ao ponto focal (por tipo) com dedupe diário.
+# ===========================================================================
+_SCHEMA_STMTS.extend([
+    """
+    CREATE TABLE IF NOT EXISTS alert_settings (
+        tenant_id         TEXT PRIMARY KEY,
+        business_start    TEXT NOT NULL DEFAULT '08:00',
+        business_end      TEXT NOT NULL DEFAULT '18:00',
+        absent_cutoff     TEXT NOT NULL DEFAULT '10:00',
+        afk_threshold_min INTEGER NOT NULL DEFAULT 120,
+        underwork_max_h   REAL NOT NULL DEFAULT 2,
+        overwork_min_h    REAL NOT NULL DEFAULT 10,
+        updated_at        TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS alert_rules (
+        tenant_id     TEXT NOT NULL,
+        alert_type    TEXT NOT NULL,
+        enabled       BOOLEAN NOT NULL DEFAULT TRUE,
+        email_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+        recipients    TEXT,
+        PRIMARY KEY (tenant_id, alert_type)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS risky_sites (
+        id         BIGSERIAL PRIMARY KEY,
+        tenant_id  TEXT NOT NULL,
+        pattern    TEXT NOT NULL,
+        label      TEXT,
+        created_at TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_risky_sites_tenant ON risky_sites(tenant_id)",
+    """
+    CREATE TABLE IF NOT EXISTS alert_notify_log (
+        tenant_id  TEXT NOT NULL,
+        alert_type TEXT NOT NULL,
+        user_id    TEXT NOT NULL,
+        day        TEXT NOT NULL,
+        sent_at    TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, alert_type, user_id, day)
+    )
+    """,
+])
+
+ALERT_TYPES  = ("afk_today", "absent_today", "risky_site", "underwork", "overwork")
+ALERT_LABELS = {
+    "afk_today":    "Excesso de AFK no dia",
+    "absent_today": "Ausente no dia",
+    "risky_site":   "Site potencialmente perigoso",
+    "underwork":    "Possível baixo engajamento",
+    "overwork":     "Possível sobrecarga",
+}
+
+
+def _easter(year: int) -> "dt.date":
+    a = year % 19; b = year // 100; c = year % 100
+    d = b // 4; e = b % 4; f = (b + 8) // 25; g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30; i = c // 4; k = c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month = (h + l - 7 * m + 114) // 31
+    day = ((h + l - 7 * m + 114) % 31) + 1
+    return dt.date(year, month, day)
+
+
+def _br_holidays(year: int) -> set:
+    """Feriados NACIONAIS oficiais (fixos + Sexta-feira Santa). Carnaval e
+    Corpus Christi são ponto facultativo → não entram. Consciência Negra
+    (20/11) é feriado nacional desde 2024 (Lei 14.759/2023)."""
+    fixed = [(1, 1), (4, 21), (5, 1), (9, 7), (10, 12), (11, 2), (11, 15), (12, 25)]
+    hs = {dt.date(year, mo, da) for (mo, da) in fixed}
+    if year >= 2024:
+        hs.add(dt.date(year, 11, 20))
+    hs.add(_easter(year) - dt.timedelta(days=2))   # Sexta-feira Santa
+    return hs
+
+
+def _is_business_day(d: "dt.date") -> bool:
+    return d.weekday() < 5 and d not in _br_holidays(d.year)
+
+
+def _alert_settings(tenant: str) -> dict:
+    with db() as c:
+        row = c.execute("SELECT * FROM alert_settings WHERE tenant_id=%s", (tenant,)).fetchone()
+    if row:
+        return dict(row)
+    return {"tenant_id": tenant, "business_start": "08:00", "business_end": "18:00",
+            "absent_cutoff": "10:00", "afk_threshold_min": 120,
+            "underwork_max_h": 2.0, "overwork_min_h": 10.0}
+
+
+def _alert_rules(tenant: str) -> dict:
+    with db() as c:
+        rows = c.execute("SELECT * FROM alert_rules WHERE tenant_id=%s", (tenant,)).fetchall()
+    by = {r["alert_type"]: dict(r) for r in rows}
+    out = {}
+    for t in ALERT_TYPES:
+        r = by.get(t)
+        rec = []
+        if r and r.get("recipients"):
+            try:
+                rec = json.loads(r["recipients"])
+            except Exception:
+                rec = []
+        out[t] = {
+            "enabled":       bool(r["enabled"]) if r else True,
+            "email_enabled": bool(r["email_enabled"]) if r else False,
+            "recipients":    rec,
+        }
+    return out
+
+
+def _risky_sites(tenant: str) -> list:
+    with db() as c:
+        rows = c.execute(
+            "SELECT id, pattern, label FROM risky_sites WHERE tenant_id=%s ORDER BY pattern",
+            (tenant,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _local_tz():
+    return ZoneInfo(REPORT_TZ) if ZoneInfo else dt.timezone.utc
+
+
+def _hhmm_local(base_local, hhmm: str):
+    try:
+        h, m = (hhmm or "00:00").split(":")
+        return base_local.replace(hour=int(h), minute=int(m), second=0, microsecond=0)
+    except Exception:
+        return base_local.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _business_days_count(since_iso: str, until_iso: str) -> int:
+    """Número de dias úteis (seg–sex, sem feriado nacional) no intervalo local."""
+    tz = _local_tz()
+    try:
+        d0 = dt.datetime.fromisoformat(since_iso.replace("Z", "+00:00")).astimezone(tz).date()
+        d1 = dt.datetime.fromisoformat(until_iso.replace("Z", "+00:00")).astimezone(tz).date()
+    except Exception:
+        return 1
+    n, d = 0, d0
+    while d <= d1:
+        if _is_business_day(d):
+            n += 1
+        d += dt.timedelta(days=1)
+    return max(n, 1)
+
+
+def _compute_day_alerts(tenant: str, settings: dict, risky: list, allowed=None) -> dict:
+    """AFK no dia, ausência e sites perigosos — sempre referentes a HOJE (local)."""
+    tz = _local_tz()
+    now_local = dt.datetime.now(tz)
+    today = now_local.date()
+    is_biz = _is_business_day(today)
+
+    bstart  = _hhmm_local(now_local, settings.get("business_start", "08:00"))
+    bend    = _hhmm_local(now_local, settings.get("business_end", "18:00"))
+    cutoff  = _hhmm_local(now_local, settings.get("absent_cutoff", "10:00"))
+    bend_eff = min(bend, now_local)
+
+    day_start_utc = now_local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(dt.timezone.utc).isoformat()
+    now_utc       = now_local.astimezone(dt.timezone.utc).isoformat()
+    bstart_utc    = bstart.astimezone(dt.timezone.utc).isoformat()
+    bend_eff_utc  = bend_eff.astimezone(dt.timezone.utc).isoformat()
+    prev7_utc     = (now_local - dt.timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(dt.timezone.utc).isoformat()
+
+    sc = " AND user_id = ANY(%s)" if allowed is not None else ""
+    sa = [allowed] if allowed is not None else []
+
+    with db() as c:
+        users = {r["user_id"]: dict(r) for r in c.execute(
+            f"SELECT user_id, display_name, department, last_seen FROM users WHERE tenant_id=%s"
+            + (" AND user_id = ANY(%s)" if allowed is not None else ""),
+            tuple([tenant, *([allowed] if allowed is not None else [])]),
+        ).fetchall()}
+        started = {r["user_id"] for r in c.execute(
+            f"SELECT DISTINCT user_id FROM events WHERE tenant_id=%s AND bucket='window' AND ts>=%s AND ts<=%s{sc}",
+            tuple([tenant, day_start_utc, now_utc, *sa]),
+        ).fetchall()}
+        afk_rows = c.execute(
+            f"""SELECT user_id, SUM(duration_sec) AS afk
+                FROM events WHERE tenant_id=%s AND bucket='afk' AND data_json->>'status'='afk'
+                  AND ts>=%s AND ts<=%s{sc}
+                GROUP BY user_id""",
+            tuple([tenant, bstart_utc, bend_eff_utc, *sa]),
+        ).fetchall()
+        expected = {r["user_id"] for r in c.execute(
+            f"SELECT DISTINCT user_id FROM events WHERE tenant_id=%s AND bucket='window' AND ts>=%s AND ts<%s{sc}",
+            tuple([tenant, prev7_utc, day_start_utc, *sa]),
+        ).fetchall()}
+        risky_rows = []
+        if risky:
+            risky_rows = c.execute(
+                f"""SELECT user_id, data_json->>'app' AS app, data_json->>'title' AS title,
+                           SUM(duration_sec) AS sec
+                    FROM events WHERE tenant_id=%s AND bucket='window' AND ts>=%s AND ts<=%s{sc}
+                    GROUP BY user_id, app, title""",
+                tuple([tenant, day_start_utc, now_utc, *sa]),
+            ).fetchall()
+
+    afk_list, absent_list, risky_list = [], [], []
+    thr = int(settings.get("afk_threshold_min", 120) or 120) * 60
+
+    if is_biz:
+        for r in afk_rows:
+            uid = r["user_id"]; sec = r["afk"] or 0
+            if uid in started and sec >= thr:
+                u = users.get(uid, {})
+                afk_list.append({"user_id": uid, "display_name": u.get("display_name"),
+                                 "department": u.get("department"), "afk_minutes": round(sec / 60)})
+        if now_local >= cutoff:
+            for uid in sorted(expected):
+                if uid not in started:
+                    u = users.get(uid, {})
+                    absent_list.append({"user_id": uid, "display_name": u.get("display_name"),
+                                        "department": u.get("department"), "last_seen": u.get("last_seen")})
+
+    if risky and risky_rows:
+        agg = {}
+        for r in risky_rows:
+            app = r["app"] or ""; title = r["title"] or ""
+            if not _is_browser(app):
+                continue
+            hay = (app + " " + title).casefold()
+            matched = None
+            for p in risky:
+                pp = (p.get("pattern") or "").casefold()
+                if pp and pp in hay:
+                    matched = p.get("pattern"); break
+            if matched:
+                uid = r["user_id"]; key = (uid, matched)
+                e = agg.setdefault(key, {"user_id": uid, "site": matched,
+                                         "sample": _clean_title(title), "sec": 0.0})
+                e["sec"] += r["sec"] or 0.0
+        for (uid, _mat), e in agg.items():
+            u = users.get(uid, {})
+            risky_list.append({"user_id": uid, "display_name": u.get("display_name"),
+                               "site": e["site"], "sample": e["sample"],
+                               "minutes": round(e["sec"] / 60)})
+
+    return {"afk_today": afk_list, "absent_today": absent_list, "risky_site": risky_list,
+            "today_is_business": is_biz}
+
+
+def _compute_engagement_alerts(tenant: str, settings: dict, since: str, until: str, allowed=None) -> dict:
+    """Sobrecarga / baixo engajamento — média por DIA ÚTIL no período."""
+    sc = " AND user_id = ANY(%s)" if allowed is not None else ""
+    sa = [allowed] if allowed is not None else []
+    with db() as c:
+        rows = c.execute(
+            f"""SELECT u.user_id, u.display_name,
+                       COALESCE(e.total_sec, 0) AS total_active
+                FROM users u
+                LEFT JOIN (
+                    SELECT user_id, SUM(duration_sec) AS total_sec
+                    FROM events WHERE tenant_id=%s AND ts>=%s AND ts<=%s AND bucket='window'
+                    GROUP BY user_id
+                ) e ON e.user_id = u.user_id
+                WHERE u.tenant_id=%s""" + (" AND u.user_id = ANY(%s)" if allowed is not None else ""),
+            tuple([tenant, since, until, tenant, *sa]),
+        ).fetchall()
+    bdays = _business_days_count(since, until)
+    umax = float(settings.get("underwork_max_h", 2) or 2)
+    omin = float(settings.get("overwork_min_h", 10) or 10)
+    over, under = [], []
+    for r in rows:
+        avg = ((r["total_active"] or 0) / 3600.0) / bdays
+        if avg > omin:
+            over.append({"user_id": r["user_id"], "display_name": r["display_name"],
+                         "avg_day_hours": round(avg, 1)})
+        if 0 < avg < umax:
+            under.append({"user_id": r["user_id"], "display_name": r["display_name"],
+                          "avg_day_hours": round(avg, 1)})
+    return {"overwork": over[:50], "underwork": under[:50], "business_days": bdays}
+
+
+# --- Modelos ---
+class AlertRuleIn(BaseModel):
+    alert_type:    str
+    enabled:       bool = True
+    email_enabled: bool = False
+    recipients:    list[str] = []
+
+
+class AlertConfigIn(BaseModel):
+    business_start:    str = "08:00"
+    business_end:      str = "18:00"
+    absent_cutoff:     str = "10:00"
+    afk_threshold_min: int = 120
+    underwork_max_h:   float = 2
+    overwork_min_h:    float = 10
+    rules:             list[AlertRuleIn] = []
+
+
+class RiskySiteIn(BaseModel):
+    pattern: str
+    label:   str | None = None
+
+
+# --- Endpoints ---
+@app.get("/v1/alerts/today", dependencies=[Depends(require_tenant_scope)])
+def alerts_today(tenant: str, request: Request, days: int = 7,
+                 since: str | None = None, until: str | None = None):
+    if since is None:
+        since = _since_for_days(days)
+    if until is None:
+        until = dt.datetime.now(dt.timezone.utc).isoformat()
+    allowed = _lider_allowed_ids(request, tenant)
+    settings = _alert_settings(tenant)
+    rules    = _alert_rules(tenant)
+    risky    = _risky_sites(tenant)
+    day = _compute_day_alerts(tenant, settings, risky, allowed=allowed)
+    eng = _compute_engagement_alerts(tenant, settings, since, until, allowed=allowed)
+    return {
+        "tenant": tenant,
+        "settings": {k: settings[k] for k in
+                     ("business_start", "business_end", "absent_cutoff",
+                      "afk_threshold_min", "underwork_max_h", "overwork_min_h")},
+        "rules": rules,
+        "today_is_business": day["today_is_business"],
+        "alerts": {
+            "afk_today":    day["afk_today"],
+            "absent_today": day["absent_today"],
+            "risky_site":   day["risky_site"],
+            "underwork":    eng["underwork"],
+            "overwork":     eng["overwork"],
+        },
+    }
+
+
+@app.get("/v1/alerts/config")
+def alerts_config_get(tenant: str, ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
+    s = _alert_settings(tid)
+    return {
+        "settings": {k: s[k] for k in
+                     ("business_start", "business_end", "absent_cutoff",
+                      "afk_threshold_min", "underwork_max_h", "overwork_min_h")},
+        "rules": _alert_rules(tid),
+        "risky_sites": _risky_sites(tid),
+        "alert_labels": ALERT_LABELS,
+    }
+
+
+@app.put("/v1/alerts/config")
+def alerts_config_set(body: AlertConfigIn, tenant: str, request: Request,
+                      ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
+    with db() as c:
+        c.execute(
+            """INSERT INTO alert_settings
+                 (tenant_id, business_start, business_end, absent_cutoff,
+                  afk_threshold_min, underwork_max_h, overwork_min_h, updated_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+               ON CONFLICT (tenant_id) DO UPDATE SET
+                 business_start=EXCLUDED.business_start, business_end=EXCLUDED.business_end,
+                 absent_cutoff=EXCLUDED.absent_cutoff, afk_threshold_min=EXCLUDED.afk_threshold_min,
+                 underwork_max_h=EXCLUDED.underwork_max_h, overwork_min_h=EXCLUDED.overwork_min_h,
+                 updated_at=EXCLUDED.updated_at""",
+            (tid, body.business_start, body.business_end, body.absent_cutoff,
+             int(body.afk_threshold_min), float(body.underwork_max_h),
+             float(body.overwork_min_h), _now_utc().isoformat()),
+        )
+        for r in body.rules:
+            if r.alert_type not in ALERT_TYPES:
+                continue
+            recips = [e.strip() for e in (r.recipients or []) if e and "@" in e]
+            c.execute(
+                """INSERT INTO alert_rules (tenant_id, alert_type, enabled, email_enabled, recipients)
+                   VALUES (%s,%s,%s,%s,%s)
+                   ON CONFLICT (tenant_id, alert_type) DO UPDATE SET
+                     enabled=EXCLUDED.enabled, email_enabled=EXCLUDED.email_enabled,
+                     recipients=EXCLUDED.recipients""",
+                (tid, r.alert_type, bool(r.enabled), bool(r.email_enabled), json.dumps(recips)),
+            )
+    audit(ctx.get("email"), "alerts.config_set", target=tid, ip=_client_ip(request))
+    return {"ok": True}
+
+
+@app.post("/v1/alerts/risky-sites")
+def alerts_risky_add(body: RiskySiteIn, tenant: str,
+                     ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
+    pat = (body.pattern or "").strip()
+    if not pat:
+        raise HTTPException(400, "informe o padrão do site (ex.: facebook.com)")
+    with db() as c:
+        c.execute(
+            "INSERT INTO risky_sites (tenant_id, pattern, label, created_at) VALUES (%s,%s,%s,%s)",
+            (tid, pat, (body.label or None), _now_utc().isoformat()),
+        )
+    return {"ok": True}
+
+
+@app.delete("/v1/alerts/risky-sites/{rid}")
+def alerts_risky_del(rid: int, tenant: str,
+                     ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
+    with db() as c:
+        c.execute("DELETE FROM risky_sites WHERE id=%s AND tenant_id=%s", (rid, tid))
+    return {"ok": True}
+
+
+class RiskyBulkIn(BaseModel):
+    items: list[RiskySiteIn] = []
+
+
+@app.post("/v1/alerts/risky-sites/bulk")
+def alerts_risky_bulk(body: RiskyBulkIn, tenant: str,
+                      ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
+    added, skipped = 0, 0
+    with db() as c:
+        existing = {(r["pattern"] or "").casefold() for r in c.execute(
+            "SELECT pattern FROM risky_sites WHERE tenant_id=%s", (tid,)).fetchall()}
+        for it in (body.items or []):
+            pat = (it.pattern or "").strip()
+            if not pat:
+                continue
+            if pat.casefold() in existing:
+                skipped += 1
+                continue
+            c.execute(
+                "INSERT INTO risky_sites (tenant_id, pattern, label, created_at) VALUES (%s,%s,%s,%s)",
+                (tid, pat, (it.label or None), _now_utc().isoformat()),
+            )
+            existing.add(pat.casefold())
+            added += 1
+    return {"ok": True, "added": added, "skipped": skipped}
+
+
+# --- Worker de e-mail (envia quando o alerta acontece, dedupe por dia) ---
+def _alert_email_html(alert_type: str, items: list) -> str:
+    label = ALERT_LABELS.get(alert_type, alert_type)
+    li = []
+    for it in items:
+        name = it.get("display_name") or it.get("user_id")
+        if alert_type == "afk_today":
+            li.append(f"<li><b>{name}</b> — {it.get('afk_minutes', 0)} min de AFK no horário comercial</li>")
+        elif alert_type == "absent_today":
+            li.append(f"<li><b>{name}</b> — ainda não iniciou a jornada</li>")
+        elif alert_type == "risky_site":
+            li.append(f"<li><b>{name}</b> — acessou <code>{it.get('site')}</code> ({it.get('minutes', 0)} min)</li>")
+        else:
+            li.append(f"<li><b>{name}</b> — média {it.get('avg_day_hours', 0)}h/dia útil</li>")
+    return (f"<p>Alerta WorkPulse — <b>{label}</b>:</p><ul>{''.join(li)}</ul>"
+            f"<p style='color:#888;font-size:12px'>WorkPulse — use como ponto de partida para conversas, não como veredicto.</p>")
+
+
+def _do_alert_emails() -> None:
+    tz = _local_tz()
+    today_iso = dt.datetime.now(tz).date().isoformat()
+    with db() as c:
+        tenants = [r["tenant_id"] for r in c.execute(
+            "SELECT DISTINCT tenant_id FROM alert_rules WHERE email_enabled=TRUE"
+        ).fetchall()]
+    for tid in tenants:
+        ecfg = _email_cfg_for_send(tid)
+        if not ecfg:
+            continue  # sem SMTP configurado → não há como enviar
+        settings = _alert_settings(tid)
+        rules    = _alert_rules(tid)
+        risky    = _risky_sites(tid)
+        day = _compute_day_alerts(tid, settings, risky)
+        eng = _compute_engagement_alerts(
+            tid, settings, _since_for_days(7), dt.datetime.now(dt.timezone.utc).isoformat())
+        bag = {"afk_today": day["afk_today"], "absent_today": day["absent_today"],
+               "risky_site": day["risky_site"], "underwork": eng["underwork"],
+               "overwork": eng["overwork"]}
+        for atype, items in bag.items():
+            rule = rules.get(atype, {})
+            if not (rule.get("enabled") and rule.get("email_enabled") and rule.get("recipients")):
+                continue
+            fresh = []
+            with db() as c:
+                for it in items:
+                    uid = it.get("user_id")
+                    if not uid:
+                        continue
+                    # Site perigoso: dedupe por pessoa+site (cada domínio novo alerta).
+                    # Demais alertas: dedupe por pessoa (1x no dia).
+                    log_key = uid
+                    if atype == "risky_site":
+                        log_key = f"{uid}|{(it.get('site') or '').casefold()}"
+                    try:
+                        c.execute(
+                            "INSERT INTO alert_notify_log (tenant_id, alert_type, user_id, day, sent_at) "
+                            "VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
+                            (tid, atype, log_key, today_iso, _now_utc().isoformat()),
+                        )
+                        if c.rowcount and c.rowcount > 0:
+                            fresh.append(it)
+                    except Exception:
+                        pass
+            if not fresh:
+                continue
+            try:
+                _smtp_send(ecfg, rule["recipients"],
+                           f"WorkPulse — {ALERT_LABELS.get(atype, atype)}",
+                           _alert_email_html(atype, fresh))
+                print(f"[alerts] emailed {atype} → {rule['recipients']} ({len(fresh)} pessoa(s))", flush=True)
+            except Exception as exc:
+                print(f"[alerts] ERRO email {atype} tenant={tid}: {exc}", flush=True)
+
+
+async def _alerts_worker() -> None:
+    """Verifica periodicamente e envia e-mails de alerta (dedupe por dia)."""
+    await asyncio.sleep(45)
+    while True:
+        try:
+            _do_alert_emails()
+        except Exception as exc:
+            print(f"[alerts] worker erro: {exc}", flush=True)
+        await asyncio.sleep(15 * 60)
 
 
 # ---------------------------------------------------------------------------

@@ -180,6 +180,7 @@
         <button data-tab="categorizacao">🏷️ Categorização</button>
         <button data-tab="colaboradores">👥 Colaboradores</button>
         <button data-tab="relatorios">📧 Relatórios</button>
+        <button data-tab="admalertas">🔔 Alertas</button>
         <button data-tab="admlicenca">📄 Licenciamento</button>
       </div>
     </div>
@@ -428,17 +429,33 @@
   <!-- ── ALERTAS ── -->
   <section id="tab-alerts" class="hide">
     <h1 class="page-title"><span class="em">Sinais</span> que merecem atenção.</h1>
-    <p class="page-sub">Identificamos automaticamente padrões de sobrecarga (&gt;10h/dia) e baixo engajamento (média &lt;2h/dia). Use como ponto de partida para conversas, não como veredicto.</p>
+    <p class="page-sub">Alertas do dia (no horário comercial) e padrões do período. Use como ponto de partida para conversas, não como veredicto.</p>
+    <div id="alertsBizNote" style="display:none;margin:0 0 14px;padding:8px 12px;border-radius:8px;background:var(--bg-2);border:1px solid var(--border);font-size:13px;color:var(--text-dim)"></div>
 
     <div class="grid">
+      <div class="card span-4">
+        <h3 style="display:flex;align-items:center;gap:8px"><span class="pill warn">AFK</span> Excesso de AFK hoje</h3>
+        <p style="color:var(--text-dim);font-size:12px;margin:6px 0 14px">Muito tempo ocioso no horário comercial. Só conta quem já começou a trabalhar.</p>
+        <div id="afkTodayList"></div>
+      </div>
+      <div class="card span-4">
+        <h3 style="display:flex;align-items:center;gap:8px"><span class="pill warn">Ausente</span> Ausente no dia</h3>
+        <p style="color:var(--text-dim);font-size:12px;margin:6px 0 14px">Quem ainda não iniciou a jornada após a hora de corte.</p>
+        <div id="absentTodayList"></div>
+      </div>
+      <div class="card span-4">
+        <h3 style="display:flex;align-items:center;gap:8px"><span class="pill danger">Risco</span> Sites perigosos</h3>
+        <p style="color:var(--text-dim);font-size:12px;margin:6px 0 14px">Acessos hoje a páginas da lista de sites monitorados.</p>
+        <div id="riskyList"></div>
+      </div>
       <div class="card span-6">
         <h3 style="display:flex;align-items:center;gap:8px"><span class="pill danger">Sobrecarga</span> Possíveis casos de excesso</h3>
-        <p style="color:var(--text-dim);font-size:12px;margin:6px 0 14px">Pessoas que registraram pelo menos um dia com mais de 10h ativas no período.</p>
+        <p style="color:var(--text-dim);font-size:12px;margin:6px 0 14px">Média acima do limite por <strong>dia útil</strong> no período (ignora fins de semana e feriados nacionais).</p>
         <div id="overworkList"></div>
       </div>
       <div class="card span-6">
         <h3 style="display:flex;align-items:center;gap:8px"><span class="pill warn">Atenção</span> Possível baixo engajamento</h3>
-        <p style="color:var(--text-dim);font-size:12px;margin:6px 0 14px">Pessoas com média diária abaixo de 2h ativas. Pode indicar dificuldade técnica, perfil de função ou agentes desligados.</p>
+        <p style="color:var(--text-dim);font-size:12px;margin:6px 0 14px">Média diária baixa por <strong>dia útil</strong> no período (ignora fins de semana e feriados nacionais).</p>
         <div id="underworkList"></div>
       </div>
     </div>
@@ -928,6 +945,48 @@
   <section id="tab-relatorios" class="hide">
     <h1 class="page-title"><span class="em">Relatórios</span>.</h1>
     <p class="page-sub">Relatórios automáticos enviados por e-mail.</p>
+
+    <!-- ── CONTA DE E-MAIL (SMTP do cliente) ── -->
+    <div class="card no-bar" style="margin-bottom:18px" data-role="admin_master">
+      <h3>Conta de e-mail (envio de relatórios e alertas)</h3>
+      <p style="font-size:12px;color:var(--text-dim);margin:4px 0 14px">
+        Configure a conta que vai <strong>enviar</strong> os relatórios e alertas da sua empresa. Enquanto não estiver configurada e habilitada, os relatórios não são enviados.
+      </p>
+      <div class="config-form" style="display:flex;flex-wrap:wrap;gap:12px">
+        <div><label>Provedor</label>
+          <select id="emProvider" class="card-sel" onchange="emProviderPreset()" style="min-width:200px">
+            <option value="gmail">Gmail</option>
+            <option value="outlook">Outlook / Microsoft 365</option>
+            <option value="custom">Outro (SMTP)</option>
+          </select>
+        </div>
+        <div><label>Servidor SMTP</label><input id="emHost" placeholder="smtp.gmail.com" style="min-width:190px"></div>
+        <div><label>Porta</label><input id="emPort" type="number" value="587" style="width:90px"></div>
+        <div><label>Segurança</label>
+          <select id="emSecurity" class="card-sel" style="min-width:160px">
+            <option value="tls">STARTTLS (587)</option>
+            <option value="ssl">SSL (465)</option>
+            <option value="none">Nenhuma</option>
+          </select>
+        </div>
+        <div><label>Usuário (e-mail)</label><input id="emUser" placeholder="conta@empresa.com" style="min-width:200px"></div>
+        <div><label>Senha</label><input id="emPass" type="password" placeholder="senha ou senha de app" style="min-width:190px"></div>
+        <div><label>Remetente (nome)</label><input id="emFromName" placeholder="Ex.: RH WorkPulse" style="min-width:170px"></div>
+        <div><label>Remetente (e-mail)</label><input id="emFromEmail" placeholder="conta@empresa.com" style="min-width:200px"></div>
+      </div>
+      <div id="emGmailHint" style="font-size:12px;color:var(--text-dim);margin-top:10px">
+        💡 No Gmail, ative a verificação em duas etapas e use uma <strong>Senha de app</strong> (Conta Google → Segurança → Senhas de app) — não a sua senha normal.
+      </div>
+      <label class="checkbox-label" style="margin-top:12px;display:inline-flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+        <input type="checkbox" id="emEnabled" style="width:auto"> Habilitar envio por esta conta
+      </label>
+      <div style="margin-top:14px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+        <button class="primary" onclick="saveEmailConfig()">Salvar</button>
+        <button class="cat-btn" onclick="testEmailConfig()">Enviar teste</button>
+        <span id="emStatus" style="font-size:12px;color:var(--text-dim)"></span>
+      </div>
+    </div>
+
     <!-- ── RELATÓRIOS AUTOMÁTICOS ── -->
     <div class="card no-bar" style="margin-bottom:18px">
       <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:16px">
@@ -1058,6 +1117,57 @@
     </div>
   </section>
 
+  <!-- ── ADMINISTRATIVO: Alertas ── -->
+  <section id="tab-admalertas" class="hide">
+    <h1 class="page-title"><span class="em">Alertas</span>.</h1>
+    <p class="page-sub">Configure os alertas operacionais, o ponto focal de cada um e a lista de sites monitorados.</p>
+
+    <!-- Horário comercial e limites -->
+    <div class="card no-bar" style="margin-bottom:18px" data-role="admin_master">
+      <h3>Horário comercial e limites</h3>
+      <p style="font-size:12px;color:var(--text-dim);margin:4px 0 14px">Base dos alertas do dia (AFK e ausência) e da média por dia útil.</p>
+      <div class="config-form" style="display:flex;flex-wrap:wrap;gap:14px">
+        <div><label>Início do expediente</label><input id="alBStart" type="time" value="08:00"></div>
+        <div><label>Fim do expediente</label><input id="alBEnd" type="time" value="18:00"></div>
+        <div><label>Hora de corte (ausência)</label><input id="alCutoff" type="time" value="10:00"></div>
+        <div><label>AFK p/ alertar (min)</label><input id="alAfkMin" type="number" min="1" value="120" style="width:120px"></div>
+        <div><label>Baixo engaj. &lt; (h/dia útil)</label><input id="alUnderMax" type="number" step="0.5" min="0" value="2" style="width:150px"></div>
+        <div><label>Sobrecarga &gt; (h/dia útil)</label><input id="alOverMin" type="number" step="0.5" min="0" value="10" style="width:150px"></div>
+      </div>
+    </div>
+
+    <!-- Regras por tipo + ponto focal -->
+    <div class="card no-bar" style="margin-bottom:18px" data-role="admin_master">
+      <h3>Alertas e ponto focal</h3>
+      <p style="font-size:12px;color:var(--text-dim);margin:4px 0 14px">Ligue/desligue cada alerta, escolha se envia e-mail e para quem. O e-mail usa a conta configurada em <strong>Relatórios</strong> e é enviado quando o alerta acontece (verificação a cada ~15 min). Para evitar repetição, cada pessoa gera <strong>no máximo 1 e-mail por dia</strong> em cada alerta — <strong>exceto “Site potencialmente perigoso”, que envia 1 e-mail por site novo, por pessoa, por dia</strong> (cada domínio diferente da lista alerta; o mesmo site repetido não reenvia).</p>
+      <div id="alertRulesBox"><p class="empty-state">Carregando…</p></div>
+      <div style="margin-top:14px;display:flex;gap:10px;align-items:center">
+        <button class="primary" onclick="saveAlertConfig()">Salvar configurações</button>
+        <span id="alStatus" style="font-size:12px;color:var(--text-dim)"></span>
+      </div>
+    </div>
+
+    <!-- Sites perigosos -->
+    <div class="card no-bar" data-role="admin_master">
+      <h3>Sites potencialmente perigosos</h3>
+      <p style="font-size:12px;color:var(--text-dim);margin:4px 0 12px">Padrões (parte do endereço ou título). Ex.: <code>facebook.com</code>, <code>bet</code>, <code>apostas</code>. Qualquer acesso que contenha o padrão dispara o alerta.</p>
+      <div class="config-form" style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;margin-bottom:12px">
+        <div><label>Padrão</label><input id="rsPattern" placeholder="ex.: bet365.com" style="min-width:200px"></div>
+        <div><label>Rótulo (opcional)</label><input id="rsLabel" placeholder="ex.: Apostas" style="min-width:160px"></div>
+        <button class="primary" onclick="addRiskySite()">Adicionar</button>
+      </div>
+      <input id="rsFilter" oninput="riskyFilter()" placeholder="🔎 Buscar padrão ou rótulo já cadastrado…" style="width:100%;box-sizing:border-box;margin-bottom:12px;background:var(--bg-2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px 12px;font-size:13px">
+      <div id="riskySitesBox"></div>
+
+      <details style="margin-top:16px">
+        <summary style="cursor:pointer;font-size:13px;color:var(--primary)">Importar lista (em massa)</summary>
+        <p style="font-size:12px;color:var(--text-dim);margin:8px 0">Cole uma linha por site. Aceita só o padrão (<code>mega.nz</code>) ou <code>padrão, rótulo</code> (<code>mega.nz, Drive web</code>). Itens já cadastrados são ignorados.</p>
+        <textarea id="rsBulk" rows="6" placeholder="mega.nz, Drive web&#10;nordvpn.com, VPN&#10;wetransfer.com, Upload" style="width:100%;box-sizing:border-box;resize:vertical"></textarea>
+        <div style="margin-top:8px"><button class="primary" onclick="bulkImportRiskySites()">Importar</button></div>
+      </details>
+    </div>
+  </section>
+
   <!-- ── CONFIGURAÇÕES ── -->
   <section id="tab-config" class="hide">
     <h1 class="page-title"><span class="em">Configurações</span>.</h1>
@@ -1096,15 +1206,15 @@
 <script src="js/wp-overview.js?v=20" defer></script>
 <script src="js/wp-people.js?v=18" defer></script>
 <script src="js/wp-departments.js?v=17" defer></script>
-<script src="js/wp-analytics.js?v=17" defer></script>
+<script src="js/wp-analytics.js?v=21" defer></script>
 <script src="js/wp-events.js?v=17" defer></script>
-<script src="js/wp-internet.js?v=17" defer></script>
+<script src="js/wp-internet.js?v=18" defer></script>
 <script src="js/wp-jornada.js?v=19" defer></script>
 <script src="js/wp-locations.js?v=3" defer></script>
-<script src="js/wp-settings.js?v=18" defer></script>
+<script src="js/wp-settings.js?v=19" defer></script>
 <script src="js/wp-users.js?v=24" defer></script>
-<script src="js/wp-reports.js?v=17" defer></script>
-<script src="js/wp-nav.js?v=23" defer></script>
+<script src="js/wp-reports.js?v=20" defer></script>
+<script src="js/wp-nav.js?v=25" defer></script>
 <script src="js/wp-auth.js?v=19" defer></script>
 
 </body>
