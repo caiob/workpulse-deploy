@@ -67,8 +67,9 @@ locals {
   api_domain = "api.${var.public_domain}"
   www_domain = "www.${var.public_domain}"
 
-  deploy_bucket = "workpulse-deploy-${local.account_id}"
-  site_bucket   = "workpulse-site-${local.account_id}"
+  deploy_bucket   = "workpulse-deploy-${local.account_id}"
+  site_bucket     = "workpulse-site-${local.account_id}"
+  releases_bucket = "workpulse-releases-${local.account_id}"
 }
 
 # =============================================================================
@@ -297,6 +298,10 @@ resource "aws_db_instance" "main" {
   max_allocated_storage = 100   # autoscaling automático até 100 GB
   storage_type          = "gp2"
   storage_encrypted     = true
+
+  # Aplica mudanças (ex.: instance_class) JÁ, sem esperar a janela de manutenção.
+  # Troca de classe = modify in-place com ~1-2 min de failover (sem perder dados).
+  apply_immediately = true
 
   db_name  = var.db_name
   username = var.db_username
@@ -588,6 +593,8 @@ resource "aws_ecs_task_definition" "server" {
       { name = "WEB_CONCURRENCY",         value = "2" },
       # ARN para o servidor gravar a chave de licença gerada no primeiro boot
       { name = "LICENSE_KEY_SECRET_ARN",  value = aws_secretsmanager_secret.license_key.arn },
+      # Bucket privada dos instaladores do agente (releases)
+      { name = "WORKPULSE_RELEASES_BUCKET", value = aws_s3_bucket.releases.id },
     ]
 
     secrets = [
@@ -794,6 +801,50 @@ resource "aws_s3_bucket_public_access_block" "site" {
   block_public_policy     = true
   ignore_public_acls      = true
   restrict_public_buckets = true
+}
+
+# -----------------------------------------------------------------------------
+# Bucket PRIVADA dos instaladores do agente (releases). NÃO é pública nem está
+# atrás do CloudFront — o download é feito por URL pré-assinada gerada pela API.
+# -----------------------------------------------------------------------------
+resource "aws_s3_bucket" "releases" {
+  bucket = local.releases_bucket
+  tags   = { Name = "${local.name_prefix}-releases" }
+}
+
+resource "aws_s3_bucket_public_access_block" "releases" {
+  bucket                  = aws_s3_bucket.releases.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_versioning" "releases" {
+  bucket = aws_s3_bucket.releases.id
+  versioning_configuration { status = "Enabled" }
+}
+
+# A task ECS lê/grava os instaladores e gera URLs pré-assinadas.
+resource "aws_iam_role_policy" "ecs_task_releases" {
+  name = "releases-bucket-rw"
+  role = aws_iam_role.ecs_task.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "s3:PutObject",
+        "s3:GetObject",
+        "s3:DeleteObject",
+        "s3:ListBucket",
+      ]
+      Resource = [
+        aws_s3_bucket.releases.arn,
+        "${aws_s3_bucket.releases.arn}/*",
+      ]
+    }]
+  })
 }
 
 resource "aws_cloudfront_origin_access_control" "site" {

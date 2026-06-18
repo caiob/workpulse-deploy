@@ -13,9 +13,9 @@ fargate_cpu       = "1024"
 fargate_memory    = "2048"
 ecs_desired_count = 1
 
-# RDS PostgreSQL — db.t3.micro (~$15/mês).
-# Para escalar depois: db.t3.small, db.t3.medium, etc.
-db_instance_class = "db.t3.micro"
+# RDS PostgreSQL — db.t3.small (2 GB RAM, ~$26-30/mês). Subido de micro em
+# 2026-06-18 (o micro ficava sem fôlego com rollup + tráfego). Modify in-place.
+db_instance_class = "db.t3.small"
 db_name           = "workpulse"
 db_username       = "workpulse"
 

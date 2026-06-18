@@ -292,6 +292,38 @@ main { padding: 28px 32px; max-width: 1480px; margin: 0 auto; }
 }
 .toolbar .spacer { flex: 1; }
 
+/* Atalho por pessoa (tela Pessoas) — nome/avatar clicável + menu flutuante */
+.person-link { cursor: pointer; display: inline-flex; align-items: center; gap: 8px; border-radius: 8px; padding: 2px 4px; transition: background .12s ease; }
+.person-link:hover { background: var(--panel-soft); }
+.person-link:hover strong { color: var(--primary); }
+.person-menu {
+  position: fixed; z-index: 9999; min-width: 220px;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 12px; box-shadow: var(--shadow); padding: 6px;
+}
+.person-menu .pm-head {
+  font-size: 12px; font-weight: 700; color: var(--text);
+  padding: 6px 10px 8px; border-bottom: 1px solid var(--border-soft); margin-bottom: 4px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 240px;
+}
+.person-menu button {
+  display: block; width: 100%; text-align: left; background: transparent;
+  color: var(--text-dim); border: none; padding: 9px 12px; border-radius: 8px;
+  cursor: pointer; font-size: 13px; white-space: nowrap;
+}
+.person-menu button:hover { background: var(--panel-soft); color: var(--text); }
+
+/* Ícone de ajuda "?" (ex.: ao lado do campo Perfil) */
+.role-help {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; border-radius: 50%;
+  background: var(--panel-soft); color: var(--text-dim);
+  border: 1px solid var(--border);
+  font-size: 11px; font-weight: 700; cursor: pointer; margin-left: 5px;
+  vertical-align: middle; line-height: 1;
+}
+.role-help:hover { background: var(--primary); color: #fff; border-color: var(--primary); }
+
 /* Select compacto para usar dentro de cards (fora da toolbar) */
 .card-sel {
   background: var(--bg-2); color: var(--text);
@@ -746,9 +778,10 @@ body.theme-light .global-loader { background: rgba(232, 237, 246, 0.62); }
   font-weight: 500;
 }
 .ev-page-btn.ev-page-active {
-  background: var(--primary) !important;
+  background: #2f6fed !important;
   color: #fff !important;
-  border-color: var(--primary) !important;
+  border-color: #2f6fed !important;
+  box-shadow: 0 2px 8px rgba(47, 111, 237, .35);
 }
 .cfg-page-size {
   background: transparent; color: var(--text);

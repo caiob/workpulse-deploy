@@ -562,7 +562,141 @@ async function loadSystem() {
     loadTenantCosts();
     runSim();
     loadPlanPrices();
+    loadAgentConfig();
+    loadReleases();
   } catch (e) { toast('Erro: '+e.message); }
+}
+
+// ---------- Builds do agente (releases) ----------
+function _relBytes(n) {
+  if (!n) return '—';
+  if (n >= 1048576) return (n/1048576).toFixed(1) + ' MB';
+  if (n >= 1024) return (n/1024).toFixed(0) + ' KB';
+  return n + ' B';
+}
+
+async function loadReleases() {
+  const box = document.getElementById('relList');
+  if (!box) return;
+  try {
+    const d = await api('/v1/admin/releases');
+    const list = d.releases || [];
+    if (!list.length) { box.innerHTML = '<p style="color:var(--text-muted)">Nenhum build enviado ainda.</p>'; return; }
+    const _latest = '<span style="background:rgba(47,111,237,.15);color:#2f6fed;border:1px solid rgba(47,111,237,.4);border-radius:10px;padding:1px 7px;font-size:10px;font-weight:600;margin-left:4px">última</span>';
+    box.innerHTML = '<table><thead><tr><th>Versão</th><th>SO</th><th>Canal</th><th>Arquivo</th><th>Tamanho</th><th>SHA-256</th><th>Enviado</th><th></th></tr></thead><tbody>' +
+      list.map(r => `<tr>
+        <td><strong>${r.version}</strong>${r.is_latest ? _latest : ''}</td>
+        <td>${r.os}${r.arch && r.arch!=='amd64' ? ' · '+r.arch : ''}</td>
+        <td>${r.channel === 'generic' ? 'Genérico' : (r.channel||'')}</td>
+        <td title="${r.filename||''}">${r.filename||'—'}</td>
+        <td>${_relBytes(r.size_bytes)}</td>
+        <td><code style="font-size:11px">${(r.sha256||'').slice(0,12)}…</code></td>
+        <td style="font-size:12px">${r.created_at ? new Date(r.created_at).toLocaleString('pt-BR') : '—'}</td>
+        <td style="white-space:nowrap">
+          <button class="ghost" onclick="downloadRelease(${r.id})">Baixar</button>
+          <button class="ghost" onclick="copyReleaseLink(${r.id})" title="Gera um link de download válido por 24h para enviar ao suporte / EndpointCentral">Copiar link</button>
+          ${r.is_latest ? '' : `<button class="ghost" onclick="promoteRelease(${r.id})">Tornar última</button>`}
+          <button class="ghost" style="color:var(--danger)" onclick="deleteRelease(${r.id},'${(r.version||'').replace(/'/g,'')}')">Excluir</button>
+        </td>
+      </tr>`).join('') + '</tbody></table>';
+  } catch (e) { box.innerHTML = '<p style="color:var(--text-muted)">Erro: '+e.message+'</p>'; }
+}
+
+async function uploadRelease() {
+  const fileEl = document.getElementById('relFile');
+  const f = fileEl && fileEl.files && fileEl.files[0];
+  const msg = document.getElementById('relMsg');
+  if (!f) { if (msg) msg.textContent = 'Selecione um arquivo (.msi/.deb).'; return; }
+  const os      = document.getElementById('relOs').value;
+  const version = document.getElementById('relVersion').value.trim();
+  const channel = document.getElementById('relChannel').value;
+  const tenant  = document.getElementById('relTenant').value.trim();
+  const notes   = document.getElementById('relNotes').value.trim();
+  if (!/^\d+\.\d+\.\d+$/.test(version)) { if (msg) msg.textContent = 'Versão inválida (use X.Y.Z).'; return; }
+  if (channel === 'tenant' && !tenant)  { if (msg) msg.textContent = 'Informe o tenant para canal por cliente.'; return; }
+
+  const qs = new URLSearchParams({ os, version, filename: f.name, channel: channel === 'tenant' ? 'tenant' : 'generic' });
+  if (channel === 'tenant') qs.set('tenant_id', tenant);
+  if (notes) qs.set('notes', notes);
+
+  if (msg) msg.textContent = 'Enviando ' + f.name + '…';
+  try {
+    const buf = await f.arrayBuffer();
+    const r = await fetch(state.url + '/v1/admin/releases?' + qs.toString(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream', 'X-Admin-Token': state.token },
+      body: buf,
+    });
+    if (!r.ok) { const t = await r.text().catch(()=>r.statusText); throw new Error(`${r.status}: ${t}`); }
+    if (msg) msg.textContent = 'Build enviado.';
+    if (fileEl) fileEl.value = '';
+    loadReleases();
+  } catch (e) { if (msg) msg.textContent = 'Falha: ' + e.message; }
+}
+
+async function promoteRelease(id) {
+  try { await api('/v1/admin/releases/' + id + '/promote', { method: 'PUT' }); loadReleases(); }
+  catch (e) { toast('Falha: ' + e.message); }
+}
+
+async function downloadRelease(id) {
+  try {
+    const d = await api('/v1/admin/releases/' + id + '/download');
+    if (d.url) window.open(d.url, '_blank');
+  } catch (e) { toast('Falha ao gerar link: ' + e.message); }
+}
+
+async function copyReleaseLink(id) {
+  try {
+    const d = await api('/v1/admin/releases/' + id + '/download?expires=86400');  // 24h
+    if (d.url && navigator.clipboard) {
+      await navigator.clipboard.writeText(d.url);
+      toast('Link copiado (válido por 24h).');
+    } else if (d.url) {
+      window.prompt('Copie o link (válido 24h):', d.url);
+    }
+  } catch (e) { toast('Falha ao gerar link: ' + e.message); }
+}
+
+async function deleteRelease(id, version) {
+  if (!confirm('Excluir o build ' + version + '? O arquivo sai do S3 e do histórico.')) return;
+  try { await api('/v1/admin/releases/' + id, { method: 'DELETE' }); loadReleases(); }
+  catch (e) { toast('Falha: ' + e.message); }
+}
+
+function _relChannelToggle() {
+  const ch = document.getElementById('relChannel').value;
+  const t  = document.getElementById('relTenantWrap');
+  if (t) t.style.display = (ch === 'tenant') ? '' : 'none';
+}
+
+async function loadAgentConfig() {
+  try {
+    const d = await api('/v1/admin/agent-config');
+    const g = d.global || {};
+    document.getElementById('acAfk').value    = g.afk_timeout_sec ?? 180;
+    document.getElementById('acPoll').value   = g.poll_interval_ms ?? 1000;
+    document.getElementById('acHb').value     = g.heartbeat_interval_sec ?? 5;
+    document.getElementById('acTitles').value = (g.capture_titles === false) ? 'false' : 'true';
+    document.getElementById('acMeet').value   = (g.meeting_patterns || []).join('\n');
+  } catch (e) { /* silencioso */ }
+}
+
+async function saveAgentConfig() {
+  const msg = document.getElementById('acMsg');
+  const body = {
+    afk_timeout_sec:        parseInt(document.getElementById('acAfk').value, 10) || 180,
+    poll_interval_ms:       parseInt(document.getElementById('acPoll').value, 10) || 1000,
+    heartbeat_interval_sec: parseInt(document.getElementById('acHb').value, 10),
+    capture_titles:         document.getElementById('acTitles').value === 'true',
+    meeting_patterns:       document.getElementById('acMeet').value.split('\n').map(s => s.trim()).filter(Boolean),
+  };
+  if (isNaN(body.heartbeat_interval_sec)) body.heartbeat_interval_sec = 5;
+  try {
+    await api('/v1/admin/agent-config', { method: 'PUT', body: JSON.stringify(body) });
+    if (msg) { msg.textContent = 'Config global salva.'; setTimeout(() => msg.textContent = '', 2500); }
+    toast('Config do agente (global) atualizada.');
+  } catch (e) { if (msg) msg.textContent = 'Falha: ' + e.message; }
 }
 
 // ===========================================================================

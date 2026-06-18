@@ -422,6 +422,49 @@
       </div>
 
       <div class="card span-12">
+        <h3>Config do agente (global)</h3>
+        <p style="font-size:11px;color:var(--text-muted);margin:0 0 10px">Valores aplicados a <strong>todos os tenants</strong>. O agente busca essa config no servidor (sem recompilar) e cada cliente pode sobrescrever na própria conta. Mudanças valem no próximo refresh do agente (~10 min) ou ao reiniciar.</p>
+        <div style="display:flex;gap:16px;align-items:flex-end;flex-wrap:wrap">
+          <div><label class="fld-label">AFK após (s)</label><br><input id="acAfk" class="fld" type="number" min="10" style="width:120px"></div>
+          <div><label class="fld-label">Poll (ms)</label><br><input id="acPoll" class="fld" type="number" min="200" style="width:120px"></div>
+          <div><label class="fld-label">Heartbeat (s)</label><br><input id="acHb" class="fld" type="number" min="0" style="width:120px"></div>
+          <div><label class="fld-label">Capturar títulos</label><br>
+            <select id="acTitles" class="fld" style="width:130px"><option value="true">Sim</option><option value="false">Não</option></select></div>
+        </div>
+        <div style="margin-top:12px">
+          <label class="fld-label">Apps/sites de reunião (keepalive) — um por linha</label>
+          <textarea id="acMeet" class="fld" rows="5" style="width:100%;box-sizing:border-box;font-family:var(--mono);font-size:12px" placeholder="meet:&#10;google meet&#10;microsoft teams&#10;zoom meeting"></textarea>
+        </div>
+        <div style="margin-top:10px;display:flex;gap:12px;align-items:center">
+          <button class="primary" onclick="saveAgentConfig()">Salvar config global</button>
+          <span id="acMsg" style="font-size:12px;color:var(--text-muted)"></span>
+        </div>
+      </div>
+
+      <div class="card span-12">
+        <h3>Builds do agente</h3>
+        <p style="font-size:11px;color:var(--text-muted);margin:0 0 10px">Repositório de instaladores (.msi/.deb) com histórico. A WorkPulse sobe aqui; o arquivo fica numa bucket privada e o download é por link temporário. "Tornar última" marca a versão alvo por canal/SO.</p>
+        <div style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap">
+          <div><label class="fld-label">Arquivo (.msi/.deb)</label><br><input id="relFile" class="fld" type="file" accept=".msi,.deb" style="width:230px"></div>
+          <div><label class="fld-label">SO</label><br>
+            <select id="relOs" class="fld" style="width:120px"><option value="windows">Windows</option><option value="linux">Linux</option></select></div>
+          <div><label class="fld-label">Versão</label><br><input id="relVersion" class="fld" placeholder="2.3.0" style="width:100px"></div>
+          <div><label class="fld-label">Canal</label><br>
+            <select id="relChannel" class="fld" style="width:150px" onchange="_relChannelToggle()"><option value="generic">Genérico (POC)</option><option value="tenant">Por cliente</option></select></div>
+          <div id="relTenantWrap" style="display:none"><label class="fld-label">Tenant</label><br><input id="relTenant" class="fld" placeholder="tenant_id" style="width:150px"></div>
+        </div>
+        <div style="margin-top:10px">
+          <label class="fld-label">Notas (opcional)</label>
+          <input id="relNotes" class="fld" style="width:100%;box-sizing:border-box" placeholder="ex.: corrige Wayland; adiciona watchdog">
+        </div>
+        <div style="margin-top:10px;display:flex;gap:12px;align-items:center">
+          <button class="primary" onclick="uploadRelease()">Enviar build</button>
+          <span id="relMsg" style="font-size:12px;color:var(--text-muted)"></span>
+        </div>
+        <div id="relList" style="margin-top:14px;overflow-x:auto"><p style="color:var(--text-muted)">Carregando…</p></div>
+      </div>
+
+      <div class="card span-12">
         <h3>Custos AWS</h3>
         <div id="awsCostSummary" style="display:flex;gap:24px;flex-wrap:wrap;margin:8px 0 4px;font-size:14px">
           <span style="color:var(--text-muted)">Carregando...</span>
@@ -539,6 +582,6 @@
 
 <div id="toast" class="toast hide"></div>
 
-<script src="js/admin.js?v=15"></script>
+<script src="js/admin.js?v=18"></script>
 </body>
 </html>

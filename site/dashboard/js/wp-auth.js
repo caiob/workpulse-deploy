@@ -347,15 +347,23 @@ function _acctSetUser() {
   }
   const rl = document.getElementById('acctRole');
   if (rl) {
-    const map = { admin_master: 'Admin Master', supervisor: 'Supervisor', lider: 'Líder', wp_admin: 'WorkPulse' };
+    const map = { admin_master: 'Admin Master', admin: 'Admin', supervisor: 'Supervisor', lider: 'Líder', wp_admin: 'WorkPulse' };
     rl.textContent = map[state.role] || state.role || '—';
   }
 }
 
-/* Mostra/oculta elementos conforme o perfil (data-role="admin_master"). */
+/* Mostra/oculta elementos conforme o perfil.
+   data-role="admin_master" → só Admin Master (e WorkPulse): Financeiro, Licenciamento,
+     Usuários do painel, exclusão/limpeza de coletas, lista de bloqueio.
+   data-role="admin"        → Admin Master OU Admin: demais áreas administrativas
+     (Categorização, Colaboradores, Relatórios, Alertas). */
 function _applyRoleUI() {
-  const isAdmin = state.role === 'admin_master' || state.role === 'wp_admin';
+  const isMaster = state.role === 'admin_master' || state.role === 'wp_admin';
+  const isAdmin  = isMaster || state.role === 'admin';
   document.querySelectorAll('[data-role="admin_master"]').forEach(el => {
+    el.style.display = isMaster ? '' : 'none';
+  });
+  document.querySelectorAll('[data-role="admin"]').forEach(el => {
     el.style.display = isAdmin ? '' : 'none';
   });
 }

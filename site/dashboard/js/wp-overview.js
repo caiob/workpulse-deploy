@@ -11,40 +11,49 @@ function setAutoRefresh() {
 }
 
 async function loadOverview() {
-  try {
-    const { since, until } = wpDP.getRange('rangeDays');
-    const [data, team] = await Promise.all([
-      api(`/v1/workforce/overview?tenant=${encodeURIComponent(state.tenant)}&since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`),
-      api(`/v1/team/summary?tenant=${encodeURIComponent(state.tenant)}&since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`),
-    ]);
-    state.lastOverview = data;
+  const { since, until } = wpDP.getRange('rangeDays');
+  const qs = `tenant=${encodeURIComponent(state.tenant)}&since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`;
 
-    const t = data.totals;
-    document.getElementById('kpiOnline').innerHTML    = `${t.online_now || 0}<small>pessoas</small>`;
-    document.getElementById('kpiOnlineSub').textContent = `${t.total_users || 0} cadastrados no período`;
-    document.getElementById('kpiActive').innerHTML    = `${fmtH(t.active_seconds)}<small>h</small>`;
-    document.getElementById('kpiActiveSub').textContent = `equivalente a ${Math.round((t.active_seconds || 0) / 3600 / (t.total_users || 1))}h por pessoa`;
-    document.getElementById('kpiToday').innerHTML     = `${fmtH(t.today_active_seconds)}<small>h</small>`;
+  // Feedback imediato: marca os KPIs como "carregando" enquanto as queries rodam.
+  ['kpiOnline', 'kpiActive', 'kpiToday', 'kpiAdh'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.innerHTML = '<span style="opacity:.4">···</span>';
+  });
+  _setConnectionStatus('carregando', false);
 
-    const sumTotal = (t.active_seconds || 0) + (t.afk_seconds || 0);
-    const adh      = sumTotal > 0 ? (t.active_seconds / sumTotal * 100) : 0;
-    document.getElementById('kpiAdh').innerHTML       = `${adh.toFixed(0)}<small>%</small>`;
+  // As duas chamadas seguem em paralelo, mas cada bloco PINTA assim que chega
+  // a sua resposta — quem volta primeiro não fica esperando o outro.
+  const pOverview = api(`/v1/workforce/overview?${qs}`)
+    .then(data => {
+      state.lastOverview = data;
+      const t = data.totals;
+      document.getElementById('kpiOnline').innerHTML    = `${t.online_now || 0}<small>pessoas</small>`;
+      document.getElementById('kpiOnlineSub').textContent = `${t.total_users || 0} cadastrados no período`;
+      document.getElementById('kpiActive').innerHTML    = `${fmtH(t.active_seconds)}<small>h</small>`;
+      document.getElementById('kpiActiveSub').textContent = `equivalente a ${Math.round((t.active_seconds || 0) / 3600 / (t.total_users || 1))}h por pessoa`;
+      document.getElementById('kpiToday').innerHTML     = `${fmtH(t.today_active_seconds)}<small>h</small>`;
+      const sumTotal = (t.active_seconds || 0) + (t.afk_seconds || 0);
+      const adh      = sumTotal > 0 ? (t.active_seconds / sumTotal * 100) : 0;
+      document.getElementById('kpiAdh').innerHTML       = `${adh.toFixed(0)}<small>%</small>`;
+      drawDailyChart(data.daily || []);
+      drawDepartments(data.by_department || []);
+      drawHeatmap(data.hourly || [], data.daily || []);
+    })
+    .catch(e => { _setConnectionStatus('erro', true); toast('Falha ao carregar visão geral: ' + e.message); });
 
-    drawDailyChart(data.daily || []);
-    drawDepartments(data.by_department || []);
-    state.teamUsers = team.users || [];
-    drawUsersChart();
-    drawAppsChart(team.top_apps || []);
-    drawHeatmap(data.hourly || [], data.daily || []);
+  const pTeam = api(`/v1/team/summary?${qs}`)
+    .then(team => {
+      state.teamUsers = team.users || [];
+      drawUsersChart();
+      drawAppsChart(team.top_apps || []);
+    })
+    .catch(e => { toast('Falha ao carregar equipe: ' + e.message); });
 
-    _setConnectionStatus('conectado', false);
-    const hhmm = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-    const lbl  = document.getElementById('lastRefreshLabel');
-    if (lbl) lbl.textContent = `Atualizado às ${hhmm}`;
-  } catch (e) {
-    _setConnectionStatus('erro', true);
-    toast('Falha ao carregar visão geral: ' + e.message);
-  }
+  await Promise.allSettled([pOverview, pTeam]);
+  _setConnectionStatus('conectado', false);
+  const hhmm = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+  const lbl  = document.getElementById('lastRefreshLabel');
+  if (lbl) lbl.textContent = `Atualizado às ${hhmm}`;
 }
 
 function drawDailyChart(daily) {

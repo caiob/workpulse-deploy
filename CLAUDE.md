@@ -1,7 +1,7 @@
 # CLAUDE.md — WorkPulse
 
 Guidance for AI agents (Claude Code / Cowork) working on WorkPulse.
-**Read this fully before changing anything.** Last updated: 2026-06-14.
+**Read this fully before changing anything.** Last updated: 2026-06-17.
 
 > **Para o estado atual (auth e-mail/senha, papéis, Localização, Administrativo,
 > Financeiro, SMTP por tenant, motor de Alertas, etc.), leia primeiro a seção
@@ -297,9 +297,77 @@ Schema lives in `_SCHEMA_STMTS` (run by `init_db()`); JSONB expression indexes
 
 ### In-memory TTL cache
 
-`_CACHE` dict, `_CACHE_TTL = 90s`, keys namespaced `"{tenant}:{endpoint}:{params}"`.
-**Any endpoint that writes data must call `_cache_bust(tenant)`** — this includes
-ingest, PATCH user, create/delete productivity rule, delete department, purge.
+`_CACHE` dict, `_CACHE_TTL` (env `WORKPULSE_CACHE_TTL`, default **300s**), keys
+namespaced `"{tenant}:{endpoint}:{params}"`. **Any endpoint that writes data must
+call `_cache_bust(tenant)`** — ingest, PATCH user, create/delete rule, delete dept, purge.
+
+### Rollup / agregados (perf dos painéis) — 2026-06-16
+
+Os painéis NÃO varrem mais `events` cru a cada carga. Tabelas pré-agregadas:
+- **`agg_user_hour`** (tenant, user, hora-UTC, active_sec, afk_sec) → alimenta
+  `overview` e o ativo/AFK por pessoa do `team_summary`.
+- **`agg_user_day`** (tenant, user, dia-LOCAL, focus/afk_in/afk_after/start/end_sec)
+  → alimenta o `afk_in` (AFK na jornada); reaproveitável p/ Jornada/engajamento.
+- **`agg_app_day`** (tenant, dia-LOCAL, app, active_sec) → alimenta o "Top Aplicações"
+  (`_top_apps`). Sem user_id: quando há escopo de líder, cai no fallback de events.
+- **`rollup_state`** (tenant, oldest_day, done, **ver**) → cursor do backfill. `ver`
+  vs `ROLLUP_SCHEMA_VER`: ao subir um agregado novo, o worker reabre o backfill UMA
+  vez por tenant p/ repreencher os dias antigos (bump `ROLLUP_SCHEMA_VER`).
+
+`_rollup_worker()` (task no `lifespan`, a cada `WORKPULSE_ROLLUP_SEC`=300s): refaz
+ontem+hoje sempre (upsert via `_rollup_local_day` = `_rollup_hours`+`_rollup_days`+
+`_rollup_apps`) e faz backfill p/ trás `WORKPULSE_ROLLUP_BACKFILL_DAYS`=7 dias/ciclo
+até a retenção. `_rollup_hours`/`_rollup_apps` são seguros p/ qualquer faixa;
+`_rollup_days` exige dias locais inteiros. Helpers de leitura `_hour_rows` /
+`_afk_in_by_user` / `_top_apps` leem do agregado se `_agg_ready` (range coberto pelo
+backfill) **senão caem no fallback de varrer `events`** — então nada quebra enquanto
+o backfill roda no 1º deploy.
+
+**Resultado medido (tenant ASAPTECH, ~91 colaboradores, período Hoje):**
+
+| Métrica            | Antes  | Depois  |
+|--------------------|--------|---------|
+| `overview`         | 36,9 s | ~0,2 s  |
+| `team_summary`     | 29,0 s | ~0,63 s (cache-miss) |
+| Página (Load)      | ~44 s  | ~0,6 s  |
+
+Caminho até aqui (todos no commit desta sprint): (1) render progressivo + cache TTL
+90→300s + logs `_Perf`; (2) consolidação do `overview` (6 varreduras → 1 scan + users,
+agrega em Python) e `afk_in`/Jornada sem o cast `ts::timestamptz` (texto puro,
+indexável); (3) rollup completo (este bloco).
+
+**Perf via CloudWatch:** Logs Insights no grupo `/aws/ecs/workpulse-prod-server`,
+filtro `@message like /\[perf\]/`. As linhas `[perf]` logam o tempo de cada query
+(`WORKPULSE_PERF_MS`=200 limiar). Cache-hit retorna antes do `_Perf` (não loga).
+
+### Pendência opcional: `ts` TEXT → `timestamptz`
+
+`events.ts` é TEXT (ISO-8601 UTC). Comparações de faixa usam texto (`ts >= %s`,
+lexicográfico = cronológico). Migrar p/ `timestamptz` removeria os casts restantes
+e deixaria índices 100%. **Virou opcional** — o rollup já contornou o gargalo e o
+dashboard ficou rápido sem isso. Faxina futura, sem pressa.
+
+### Gestão de frota do agente — distribuição + enrollment — 2026-06-17
+
+Plano completo em `../PLANO_GESTAO_FROTA_AGENTE.md` (3 fases). **Fase 1 entregue**;
+F2 (watchdog) e F3 (auto-update) pendentes.
+
+**Distribuição de builds (F1a):** bucket privada `workpulse-releases-<conta>` (terraform,
+versionada). Tabela `agent_releases` (channel `generic`|`tenant:<id>`, os, version, s3_key,
+sha256, is_latest…). Endpoints `require_admin`: `POST /v1/admin/releases` (upload corpo cru
+octet-stream + query; calcula sha256, grava no S3), `GET .../releases`, `PUT .../{id}/promote`,
+`GET .../{id}/download` (URL pré-assinada 5 min), `DELETE`. Página: Platform Admin → Sistema →
+"Builds do agente". Env `WORKPULSE_RELEASES_BUCKET`.
+
+**Enrollment (F1c):** agente genérico troca um **código** pela licença do tenant.
+- Tabelas: `enrollment_codes` (code, tenant_id, expires_at null=permanente, active),
+  `enrolled_devices` (status pending|approved|rejected), `tenants.enroll_approval` (default TRUE).
+- `POST /v1/enroll` (público; código = credencial): valida, aplica fila de aprovação, e quando
+  aprovado devolve a **licença atual do tenant** (`_tenant_license_token`, mesmo modelo de hoje).
+- Admin Master: códigos CRUD, settings (aprovação), fila `GET /v1/enroll-devices`, decide/delete.
+  Card em Administrativo → Colaboradores → "Onboarding de agentes" (`loadEnrollment` em wp-settings.js).
+- Agente (F1c-2): `src/enroll.rs` + `cfg.enroll_code`; main.rs resolve licença embutida →
+  `license.dat` salvo → enrollment (loop 60s se pending; exit 4 se rejected).
 
 ### License signing (Ed25519)
 
@@ -314,6 +382,9 @@ Public key is served at `GET /v1/license/pubkey`; agents verify licenses locally
 
 `_retention_worker()` (asyncio task, started in `lifespan`) archives events older
 than `tenants.retention_days` (default 90) into `daily_summaries`, then deletes them.
+
+`_rollup_worker()` (asyncio task, started in `lifespan`) mantém `agg_user_hour` /
+`agg_user_day` (ver "Rollup / agregados" acima).
 
 `_reports_worker()` (asyncio task, started in `lifespan`) sleeps until 10:00 UTC
 (07:00 BRT) daily, then calls `_do_reports()` which queries `report_configs` and
@@ -459,8 +530,11 @@ Pickers por aba:
 | `intDays` | Internet | Hoje |
 | `jorDays` | Jornada de Trabalho | 7 dias |
 
-**Cache busting:** versão atual do site é `?v=16` (em todos os `<script>` e `<link>`
-de `workforce.html`). Incrementar a cada deploy que muda JS/CSS.
+**Cache busting:** `?v=N` é **por arquivo** em `workforce.html` (não há um número
+único global). Incrementar só o(s) arquivo(s) alterado(s) a cada deploy. Estado
+atual (2026-06-17): `wp-core.js?v=20`, `wp-settings.js?v=25`, `wp-nav.js?v=30`,
+`wp-overview.js?v=21`, `wp-internet.js?v=20`, `wp-events.js?v=19`, `wp-users.js?v=26`,
+`wp-analytics.js?v=24`, `workforce.css?v=26`; painel adm `admin.js?v=17`.
 
 #### Aba Jornada de Trabalho (adicionada 2026-05-27)
 
@@ -511,11 +585,26 @@ everything in `site/` — keep `.bak`/temp files out of that folder.**
 
 ## The Rust Agent (`../workpulse-agent`)
 
-Separate crate. Built per-client with an embedded license.
-- **Build (Windows):** `windows/build-msi.ps1 -LicenseKey "<token>" -ClientName "X" -Version "2.1.0"`
-  → runs `cargo build --release` then WiX. Output in `dist/`.
-- **Build (Linux):** `VERSION="2.1.0" LICENSE_KEY="<token>" ./linux/build-deb.sh`
-  → runs `cargo build --release` then `dpkg-deb`. Output in `dist/`.
+Separate crate. Built per-client with an embedded license **ou** genérico (sem licença,
+com enrollment).
+- **Resolução de licença no boot (main.rs, antes do `license::validate`):**
+  embutida (`cfg.license_key`) → `license.dat` salvo (enroll anterior) → **enrollment**
+  (se `cfg.enroll_code` setado): `enroll.rs` chama `POST /v1/enroll`, recebe a licença e
+  salva em `license.dat` (data dir, instalador não toca). Pending → tenta a cada 60s;
+  rejeitado → `exit(4)`. Adicionado 2026-06-17.
+- **REGRA: todo rebuild de agente é SEMPRE Windows E Linux** (os dois, nunca só um).
+- **Nomes de saída (fixos):**
+  - Windows: `workpulse-agent-windows-<empresa>-<versao>.msi`
+  - Linux:   `workpulse-agent-ubuntu_22.04-<empresa>-<versao>.deb`
+- **Build por-cliente (licença embutida):**
+  - Windows: `windows/build-msi.ps1 -LicenseKey "<token>" -ClientName "<empresa>" -Version "2.2.2"`
+  - Linux:   `VERSION="2.2.2" CLIENT_NAME="<empresa>" LICENSE_KEY="<token>" ./linux/build-deb.sh`
+- **Build genérico (enrollment):** licença vazia + código de enrollment (gerado no painel):
+  - Windows: `build-msi.ps1 -LicenseKey "" -EnrollCode "<código>" -ClientName "<empresa>" -Version "2.2.2"`
+  - Linux:   `VERSION="2.2.2" CLIENT_NAME="<empresa>" LICENSE_KEY="" ENROLL_CODE="<código>" ./linux/build-deb.sh`
+- **Trava de build (F1c-3):** os scripts **recusam** gerar pacote sem licença E sem código
+  (agente zumbi). Bypass: `-AllowEmpty` (Win) / `ALLOW_EMPTY=1` (Linux).
+- `CLIENT_NAME`/`-ClientName` default `generico`; ambos rodam `cargo build --release`.
   - **Deps de build (Ubuntu/WSL):** `build-essential dpkg-dev pkg-config libx11-dev
     libxi-dev libxtst-dev`. O `x11rb` (janela ativa) é Rust puro, mas o `device_query`
     (AFK) puxa o crate C `x11` → exige `pkg-config` + `libx11/xi/xtst-dev`.
@@ -543,6 +632,18 @@ Separate crate. Built per-client with an embedded license.
   defaults to `https://api.workpulse.com.br`; tenant comes from inside the license.
   Installed at `%ProgramData%\WorkPulse\agent.conf` (Windows) /
   `/etc/workpulse/agent.conf` (Linux).
+- **Reunião → não-AFK (keepalive), 2026-06-15.** No `tracker.rs`, o `afk` agora é
+  `idle && !in_meeting`: enquanto a janela ativa casar com um padrão de reunião, o
+  agente NÃO entra em AFK (o heartbeat de janela segue → a call conta ativa inteira,
+  mesmo sem teclado/mouse). Helper `is_meeting_window` (substring no app OU no título,
+  case-insensitive). Lista configurável `meeting_patterns` em `config.rs`/`agent.conf`
+  (defaults: Meet, Teams, Zoom, Webex, Whereby, GoTo, BlueJeans; lista vazia desliga).
+  `afk_timeout_sec` (os "3 min") já era configurável. **Só agente** — sem mudança no
+  servidor; o stream de eventos é o mesmo (durante a call o agente emite `window`
+  heartbeats e não emite `afk`). **Forward/backward-compatible:** agentes antigos
+  (sem o fix) e novos convivem; só o resultado difere por máquina até o rollout
+  terminar. Detecção é por título/app — exige `capture_titles=true` p/ Meet no browser;
+  "zoom meeting" é preciso (só em call), "microsoft teams" casa com o Teams em foco.
 - **License flow (`src/license.rs`):** the agent verifies the Ed25519 signature
   locally. It fetches the server public key from `/v1/license/pubkey` and caches
   it at `%APPDATA%\WorkPulse\Agent\data\server_pubkey.txt`. As of 2026-05-25 the
@@ -579,12 +680,18 @@ Separate crate. Built per-client with an embedded license.
 
 ---
 
-## Estado atual (2026-06-14)
+## Estado atual (2026-06-17)
 
 Snapshot consolidado do que existe hoje. O changelog detalhado por data segue abaixo
-(histórico). `server/main.py` agora tem **~4.500 linhas** (`APP_VERSION = "2.0.0"`),
-ainda single-file; blocos novos são **adicionados antes da seção `# Entry point`**,
-cada um com seu `_SCHEMA_STMTS.extend([...])`.
+(histórico). `server/main.py` agora tem **~6.200 linhas**, ainda single-file; blocos
+novos são **adicionados antes da seção `# Entry point`**, cada um com seu
+`_SCHEMA_STMTS.extend([...])`.
+
+**Trabalho recente (jun/2026), por seção acima:** perf dos painéis (consolidação do
+overview + rollup `agg_*` + cache 300s); SMTP por tenant; alertas (engajamento/AFK/ausente/
+sites de risco); papéis Admin/Admin Master + blocklist; config central do agente; keepalive
+de reunião; e a **Fase 1 da gestão de frota** (distribuição de builds + enrollment) — ver
+"Gestão de frota do agente" acima e `../PLANO_GESTAO_FROTA_AGENTE.md`. **Pausado** em F2/F3.
 
 ### Autenticação — agora é e-mail/senha com sessão + papéis
 Migrou do login Tenant+Token para **e-mail/senha** (cookie de sessão `wp_sess`).

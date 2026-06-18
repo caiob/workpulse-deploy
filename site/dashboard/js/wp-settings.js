@@ -436,10 +436,16 @@ function _renderCollabsPage() {
     return;
   }
 
+  const isMaster = state.role === 'admin_master' || state.role === 'wp_admin';
   const slice = users.slice(_collabsPage * _COLLABS_PAGE_SIZE, (_collabsPage + 1) * _COLLABS_PAGE_SIZE);
   tb.innerHTML = slice.map(u => {
-    const uid     = u.user_id || '';
-    const safeUid = uid.replace(/'/g, "\\'");
+    const uid      = u.user_id || '';
+    const safeUid  = uid.replace(/'/g, "\\'");
+    const name     = u.display_name || cleanUserId(uid);
+    const safeName = (name || '').replace(/'/g, "\\'");
+    const danger = isMaster ? `
+      <button class="ghost" title="Apaga as coletas, mantém o cadastro" onclick="collabPurge('${safeUid}','${safeName}')">🧹 Limpar coletas</button>
+      <button class="btn-danger-outline" onclick="collabDelete('${safeUid}','${safeName}')">🗑 Excluir</button>` : '';
     return `<tr>
       <td><code style="color:var(--text-dim);font-size:11px">${cleanUserId(uid)}</code></td>
       <td>${u.display_name || '<span style="color:var(--text-muted)">—</span>'}</td>
@@ -447,7 +453,7 @@ function _renderCollabsPage() {
       <td>${u.department   || '<span style="color:var(--text-muted)">—</span>'}</td>
       <td>${u.role         || '<span style="color:var(--text-muted)">—</span>'}</td>
       <td style="color:var(--text-dim);font-size:12px">${relTime(u.last_seen)}</td>
-      <td><button class="cat-btn" onclick="editUser('${safeUid}')">✏ Editar</button></td>
+      <td style="white-space:nowrap;display:flex;gap:6px;flex-wrap:wrap"><button class="cat-btn" onclick="editUser('${safeUid}')">✏ Editar</button>${danger}</td>
     </tr>`;
   }).join('');
 
@@ -510,3 +516,268 @@ async function saveUser() {
 
 // Alias — chamado pela aba Internet para pré-preencher regra de site
 function prefillRule(siteName) { quickRule(siteName, "site"); }
+
+
+// ── Exclusão de coletas / colaborador + bloqueio (somente Admin Master) ──────
+async function collabPurge(uid, name) {
+  if (!confirm(`Limpar TODAS as coletas de "${name}"?\n\nOs dados coletados são apagados; o colaborador continua cadastrado e segue coletando normalmente.`)) return;
+  try {
+    await apiFetch('POST', '/v1/users/' + encodeURIComponent(uid) + '/purge-events?tenant=' + encodeURIComponent(state.tenant));
+    toast('Coletas apagadas.');
+    await loadCollabs();
+  } catch (e) { toast('Falha ao limpar: ' + e.message); }
+}
+
+async function collabDelete(uid, name) {
+  const typed = prompt(`Excluir o colaborador "${name}" e TODAS as coletas dele?\n\nIsto também BLOQUEIA o agente: mesmo instalado, ele não volta a enviar dados (dá para desbloquear depois).\n\nDigite EXCLUIR para confirmar:`);
+  if ((typed || '').trim().toUpperCase() !== 'EXCLUIR') {
+    if (typed !== null) toast('Confirmação não confere — exclusão cancelada.');
+    return;
+  }
+  try {
+    await apiFetch('DELETE', '/v1/users/' + encodeURIComponent(uid) + '?tenant=' + encodeURIComponent(state.tenant) + '&block=true');
+    toast('Colaborador excluído e agente bloqueado.');
+    await loadCollabs();
+    if (typeof loadBlocked === 'function') loadBlocked();
+  } catch (e) { toast('Falha ao excluir: ' + e.message); }
+}
+
+async function loadBlocked() {
+  const box = document.getElementById('blockedList');
+  if (!box) return;
+  if (!(state.role === 'admin_master' || state.role === 'wp_admin')) return;  // só Admin Master
+  try {
+    const d = await api('/v1/blocked-devices?tenant=' + encodeURIComponent(state.tenant));
+    const list = d.blocked || [];
+    if (!list.length) { box.innerHTML = '<p class="empty-state">Nenhum agente bloqueado.</p>'; return; }
+    box.innerHTML = '<table><thead><tr><th>Device</th><th>Quando</th><th>Por</th><th></th></tr></thead><tbody>' +
+      list.map(b => `<tr>
+        <td><code style="font-size:11px;color:var(--text-dim)">${cleanUserId(b.user_id)}</code></td>
+        <td style="font-size:12px;color:var(--text-dim)">${b.blocked_at ? relTime(b.blocked_at) : '—'}</td>
+        <td style="font-size:12px;color:var(--text-dim)">${escHtml(b.blocked_by || '—')}</td>
+        <td><button class="ghost" onclick="unblockDevice('${(b.user_id||'').replace(/'/g, "\\'")}')">Desbloquear</button></td>
+      </tr>`).join('') + '</tbody></table>';
+  } catch (e) {
+    box.innerHTML = '<p class="empty-state">Erro: ' + escHtml(e.message) + '</p>';
+  }
+}
+
+async function unblockDevice(uid) {
+  if (!confirm('Desbloquear este agente? Ele volta a poder enviar coletas e o colaborador reaparece no próximo envio.')) return;
+  try {
+    await apiFetch('DELETE', '/v1/blocked-devices/' + encodeURIComponent(uid) + '?tenant=' + encodeURIComponent(state.tenant));
+    toast('Agente desbloqueado.');
+    loadBlocked();
+  } catch (e) { toast('Falha: ' + e.message); }
+}
+
+/* ---------- Config do agente: override por tenant (Admin Master) ---------- */
+async function loadAgentCfgTenant() {
+  if (!document.getElementById('taAfk')) return;
+  if (!(state.role === 'admin_master' || state.role === 'wp_admin')) return;  // só Admin Master
+  try {
+    const d = await api('/v1/agent-config?tenant=' + encodeURIComponent(state.tenant));
+    const g = d.global || {}, o = d.override || {};
+    // placeholders mostram o valor global herdado; valor preenchido = override
+    const setNum = (id, ov, gv) => {
+      const el = document.getElementById(id); if (!el) return;
+      el.placeholder = (gv != null ? 'global: ' + gv : 'herdar');
+      el.value = (ov != null ? ov : '');
+    };
+    setNum('taAfk',  o.afk_timeout_sec,       g.afk_timeout_sec);
+    setNum('taPoll', o.poll_interval_ms,      g.poll_interval_ms);
+    setNum('taHb',   o.heartbeat_interval_sec, g.heartbeat_interval_sec);
+    const tt = document.getElementById('taTitles');
+    if (tt) tt.value = (o.capture_titles === true ? 'true' : o.capture_titles === false ? 'false' : '');
+    const tm = document.getElementById('taMeet');
+    if (tm) {
+      tm.value = Array.isArray(o.meeting_patterns) ? o.meeting_patterns.join('\n') : '';
+      tm.placeholder = Array.isArray(g.meeting_patterns) ? g.meeting_patterns.join('\n') : 'herdar do global';
+    }
+    const msg = document.getElementById('taMsg'); if (msg) msg.textContent = '';
+  } catch (e) {
+    const msg = document.getElementById('taMsg'); if (msg) msg.textContent = 'Erro ao carregar: ' + e.message;
+  }
+}
+
+function _taNum(id) {
+  const v = (document.getElementById(id).value || '').trim();
+  return v === '' ? null : Number(v);
+}
+
+async function saveAgentCfgTenant() {
+  const msg = document.getElementById('taMsg');
+  const tt = document.getElementById('taTitles').value;
+  const meetRaw = (document.getElementById('taMeet').value || '').trim();
+  const body = {
+    afk_timeout_sec:        _taNum('taAfk'),
+    poll_interval_ms:       _taNum('taPoll'),
+    heartbeat_interval_sec: _taNum('taHb'),
+    capture_titles:         (tt === '' ? null : tt === 'true'),
+    meeting_patterns:       (meetRaw === '' ? null : meetRaw.split('\n').map(s => s.trim()).filter(Boolean)),
+  };
+  try {
+    await apiFetch('PUT', '/v1/agent-config?tenant=' + encodeURIComponent(state.tenant), body);
+    if (msg) msg.textContent = 'Salvo. Os agentes aplicam no próximo refresh (~10 min) ou ao reiniciar.';
+    loadAgentCfgTenant();
+  } catch (e) { if (msg) msg.textContent = 'Falha ao salvar: ' + e.message; }
+}
+
+function openAgentCfgHelp()  { const m = document.getElementById('agentCfgHelpModal'); if (m) m.style.display = 'flex'; }
+function closeAgentCfgHelp() { const m = document.getElementById('agentCfgHelpModal'); if (m) m.style.display = 'none'; }
+
+async function clearAgentCfgTenant() {
+  if (!confirm('Remover o override e voltar a herdar TODA a config do global?')) return;
+  const msg = document.getElementById('taMsg');
+  const body = { afk_timeout_sec:null, poll_interval_ms:null, heartbeat_interval_sec:null, capture_titles:null, meeting_patterns:null };
+  try {
+    await apiFetch('PUT', '/v1/agent-config?tenant=' + encodeURIComponent(state.tenant), body);
+    if (msg) msg.textContent = 'Override removido — herdando o global.';
+    loadAgentCfgTenant();
+  } catch (e) { if (msg) msg.textContent = 'Falha: ' + e.message; }
+}
+
+/* ---------- Onboarding de agentes (enrollment) — Admin Master ---------- */
+async function loadEnrollment() {
+  if (!document.getElementById('enrollApproval')) return;
+  if (!(state.role === 'admin_master' || state.role === 'wp_admin')) return;
+  const t = encodeURIComponent(state.tenant);
+  try {
+    const s = await api('/v1/enroll-settings?tenant=' + t);
+    document.getElementById('enrollApproval').checked = !!s.approval_required;
+  } catch (_) {}
+  _renderEnrollCodes();
+  _renderEnrollPending();
+}
+
+async function _renderEnrollCodes() {
+  const box = document.getElementById('enrollCodesList');
+  if (!box) return;
+  try {
+    const d = await api('/v1/enroll-codes?tenant=' + encodeURIComponent(state.tenant));
+    const list = d.codes || [];
+    if (!list.length) { box.innerHTML = '<p class="empty-state">Nenhum código ativo. Gere um acima.</p>'; return; }
+    box.innerHTML = '<table><thead><tr><th>Código</th><th>Rótulo</th><th>Validade</th><th>Status</th><th></th></tr></thead><tbody>' +
+      list.map(c => {
+        const exp = c.expires_at ? new Date(c.expires_at).toLocaleDateString('pt-BR') : 'permanente';
+        const expired = c.expires_at && c.expires_at < new Date().toISOString();
+        const st = !c.active ? 'revogado' : (expired ? 'expirado' : 'ativo');
+        const stColor = st === 'ativo' ? '#16a34a' : 'var(--text-muted)';
+        return `<tr>
+          <td><code style="font-size:13px;font-weight:600">${escHtml(c.code)}</code>
+              <button class="ghost" style="font-size:11px;padding:2px 6px" onclick="copyEnroll('${c.code}')">copiar</button></td>
+          <td>${escHtml(c.label || '—')}</td>
+          <td style="font-size:12px">${exp}</td>
+          <td style="color:${stColor};font-size:12px">${st}</td>
+          <td>${c.active ? `<button class="ghost" style="color:var(--danger)" onclick="revokeEnroll('${c.code}')">Revogar</button>` : ''}</td>
+        </tr>`;
+      }).join('') + '</tbody></table>';
+  } catch (e) { box.innerHTML = '<p class="empty-state">Erro: ' + escHtml(e.message) + '</p>'; }
+}
+
+const _ENROLL_ST = {
+  pending:  { label: 'Pendente',  color: '#d97706' },
+  approved: { label: 'Aprovado',  color: '#16a34a' },
+  rejected: { label: 'Rejeitado', color: 'var(--danger)' },
+};
+
+let _enrollDevs    = [];
+let _enrollPage    = 0;
+const _ENROLL_PP   = 8;   // agentes por página
+
+async function _renderEnrollPending() {
+  const box = document.getElementById('enrollPendingList');
+  if (!box) return;
+  try {
+    const d = await api('/v1/enroll-devices?tenant=' + encodeURIComponent(state.tenant));  // todos os status
+    _enrollDevs = d.devices || [];
+    _enrollPage = 0;
+    _paintEnroll();
+  } catch (e) { box.innerHTML = '<p class="empty-state">Erro: ' + escHtml(e.message) + '</p>'; }
+}
+
+function _enrollGoPage(n) { _enrollPage = n; _paintEnroll(); }
+
+function _paintEnroll() {
+  const box = document.getElementById('enrollPendingList');
+  if (!box) return;
+  const list = _enrollDevs;
+  if (!list.length) { box.innerHTML = '<p class="empty-state">Nenhum agente enrollado ainda.</p>'; return; }
+
+  const totalPages = Math.max(1, Math.ceil(list.length / _ENROLL_PP));
+  if (_enrollPage >= totalPages) _enrollPage = totalPages - 1;
+  const start    = _enrollPage * _ENROLL_PP;
+  const pageRows = list.slice(start, start + _ENROLL_PP);
+
+  let html = '<table><thead><tr><th>Máquina</th><th>SO</th><th>Device</th><th>Status</th><th>Quando</th><th></th></tr></thead><tbody>' +
+    pageRows.map(v => {
+      const st = _ENROLL_ST[v.status] || { label: v.status, color: 'var(--text-muted)' };
+      return `<tr>
+        <td><strong>${escHtml(v.hostname || '—')}</strong></td>
+        <td>${escHtml(v.os || '—')}</td>
+        <td><code style="font-size:11px;color:var(--text-dim)">${escHtml(cleanUserId(v.device_id))}</code></td>
+        <td><span style="color:${st.color};font-weight:600;font-size:12px">${st.label}</span></td>
+        <td style="font-size:12px;color:var(--text-dim)">${v.requested_at ? relTime(v.requested_at) : '—'}</td>
+        <td style="white-space:nowrap">
+          ${v.status === 'pending' ? `<button class="primary" style="padding:3px 10px" onclick="decideEnroll(${v.id},'approve')">Aprovar</button>
+            <button class="ghost" onclick="decideEnroll(${v.id},'reject')">Rejeitar</button>` : ''}
+          <button class="ghost" style="color:var(--danger)" onclick="deleteEnrollDevice(${v.id},'${(v.hostname||v.device_id||'').replace(/'/g,'')}')">Excluir</button>
+        </td>
+      </tr>`;
+    }).join('') + '</tbody></table>';
+
+  if (totalPages > 1) {
+    let nums = '';
+    const s = Math.max(0, _enrollPage - 2), e = Math.min(totalPages - 1, s + 4);
+    for (let i = s; i <= e; i++) {
+      nums += `<button class="ghost ev-page-btn${i === _enrollPage ? ' ev-page-active' : ''}" onclick="_enrollGoPage(${i})">${i + 1}</button>`;
+    }
+    html += `<div class="ev-pagination" style="margin-top:10px">
+      <button class="ghost ev-page-nav" ${_enrollPage > 0 ? '' : 'disabled'} onclick="_enrollGoPage(${_enrollPage - 1})">← Anterior</button>
+      <div class="ev-page-numbers">${nums}</div>
+      <button class="ghost ev-page-nav" ${_enrollPage + 1 < totalPages ? '' : 'disabled'} onclick="_enrollGoPage(${_enrollPage + 1})">Próxima →</button>
+    </div>`;
+  }
+  box.innerHTML = html;
+}
+
+async function deleteEnrollDevice(id, name) {
+  if (!confirm('Excluir o registro de enrollment de "' + name + '"?\n\nSe a máquina re-enrollar, passa pela fila de novo. Não revoga licença já entregue nem para coleta em andamento (para isso use "Agentes bloqueados").')) return;
+  try { await apiFetch('DELETE', '/v1/enroll-devices/' + id + '?tenant=' + encodeURIComponent(state.tenant)); _renderEnrollPending(); }
+  catch (e) { toast('Falha: ' + e.message); }
+}
+
+async function saveEnrollSettings() {
+  const v = document.getElementById('enrollApproval').checked;
+  try { await apiFetch('PUT', '/v1/enroll-settings?tenant=' + encodeURIComponent(state.tenant), { approval_required: v }); toast('Preferência salva.'); }
+  catch (e) { toast('Falha: ' + e.message); }
+}
+
+async function createEnrollCode() {
+  const label = (document.getElementById('enrollLabel').value || '').trim();
+  const daysRaw = (document.getElementById('enrollDays').value || '').trim();
+  const msg = document.getElementById('enrollMsg');
+  const body = { label: label || null, days_valid: daysRaw ? parseInt(daysRaw, 10) : null };
+  try {
+    const r = await apiFetch('POST', '/v1/enroll-codes?tenant=' + encodeURIComponent(state.tenant), body);
+    if (msg) msg.textContent = 'Código gerado: ' + r.code;
+    document.getElementById('enrollLabel').value = '';
+    document.getElementById('enrollDays').value = '';
+    _renderEnrollCodes();
+  } catch (e) { if (msg) msg.textContent = 'Falha: ' + e.message; }
+}
+
+async function revokeEnroll(code) {
+  if (!confirm('Revogar o código ' + code + '? Novas instalações com ele param de funcionar (as já plugadas continuam).')) return;
+  try { await apiFetch('DELETE', '/v1/enroll-codes/' + encodeURIComponent(code) + '?tenant=' + encodeURIComponent(state.tenant)); _renderEnrollCodes(); }
+  catch (e) { toast('Falha: ' + e.message); }
+}
+
+async function decideEnroll(id, action) {
+  try { await apiFetch('POST', '/v1/enroll-devices/' + id + '/decide?tenant=' + encodeURIComponent(state.tenant), { action }); _renderEnrollPending(); }
+  catch (e) { toast('Falha: ' + e.message); }
+}
+
+function copyEnroll(code) {
+  if (navigator.clipboard) navigator.clipboard.writeText(code).then(() => toast('Código copiado.'), () => {});
+}

@@ -16,6 +16,14 @@ async function loadLocations() {
     const d = await api(`/v1/locations?tenant=${encodeURIComponent(state.tenant)}&since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`);
     _locData = d.users || [];
     locRenderTable();
+    // Atalho vindo da tela Pessoas: filtra a lista pelo nome da pessoa.
+    if (typeof _deepLinkUser !== 'undefined' && _deepLinkUser) {
+      const f = document.getElementById('locFilter');
+      if (f) f.value = _deepLinkUser.name || '';
+      _deepLinkUser = null;
+      if (typeof locShowList === 'function') locShowList();   // garante a visão de lista
+      locRenderTable();
+    }
     const mv = document.getElementById('locMapView');
     if (mv && !mv.classList.contains('hide')) _locRenderMap();
   } catch (e) {

@@ -186,6 +186,27 @@ function _onAuthFail() {
   if (typeof _handleAuthFail === 'function') _handleAuthFail();
 }
 
+/* Atalho "ver pessoa em X": a tela Pessoas seta _deepLinkUser e troca de aba;
+   o loader da aba-destino consome via _applyDeepLinkUser() (select) ou lê o nome. */
+let _deepLinkUser = null;   // { uid, name }
+function _applyDeepLinkUser(selectId) {
+  if (!_deepLinkUser) return null;
+  const u = _deepLinkUser; _deepLinkUser = null;
+  const sel = document.getElementById(selectId);
+  if (sel) sel.value = u.uid;
+  return u;
+}
+
+/* Pula para outra aba mantendo o colaborador selecionado no select de origem.
+   Ex.: da Internet → Aplicativos com a mesma pessoa filtrada (e vice-versa). */
+function jumpUserTo(fromSelectId, page) {
+  const sel = document.getElementById(fromSelectId);
+  const uid = sel ? sel.value.trim() : '';
+  if (!uid) { if (typeof toast === 'function') toast('Selecione um colaborador primeiro.'); return; }
+  const name = (sel.selectedIndex >= 0 && sel.options[sel.selectedIndex]) ? sel.options[sel.selectedIndex].text : '';
+  if (typeof goToUserPage === 'function') goToUserPage(page, uid, name);
+}
+
 async function api(path, signal) {
   const timeout = new AbortController();
   const tid     = setTimeout(() => timeout.abort(), 90000);

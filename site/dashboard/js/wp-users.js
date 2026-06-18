@@ -8,7 +8,11 @@ function _duShowErr(msg) {
   if (e) { e.textContent = msg; e.style.display = msg ? 'block' : 'none'; }
 }
 
-const _DU_ROLE_LBL = { admin_master: 'Admin Master', supervisor: 'Supervisor', lider: 'Líder', wp_admin: 'WorkPulse' };
+// Modal de ajuda: comparação dos perfis (ícone "?" ao lado de Perfil)
+function openRoleHelp()  { const m = document.getElementById('roleHelpModal'); if (m) m.style.display = 'flex'; }
+function closeRoleHelp() { const m = document.getElementById('roleHelpModal'); if (m) m.style.display = 'none'; }
+
+const _DU_ROLE_LBL = { admin_master: 'Admin Master', admin: 'Admin', supervisor: 'Supervisor', lider: 'Líder', wp_admin: 'WorkPulse' };
 
 async function loadUsers() {
   const tb = document.querySelector('#duTable tbody');

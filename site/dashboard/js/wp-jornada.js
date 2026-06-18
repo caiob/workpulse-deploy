@@ -181,6 +181,7 @@ async function _jorViaEvents(user, jorSince, jorUntil, sig) {
 /* ---------- Loader principal ---------- */
 async function loadJornada() {
   await _populateUserDropdown('jorUser');
+  if (typeof _applyDeepLinkUser === 'function') _applyDeepLinkUser('jorUser');
   const { since: jorSince, until: jorUntil } = wpDP.getRange('jorDays');
   const user = document.getElementById('jorUser').value.trim();
   const sig  = _tabAbort ? _tabAbort.signal : undefined;

@@ -6,6 +6,7 @@
 let _evPageSize = 100;  // eventos brutos por página (sincronizado com #evPageSize)
 let _evPage     = 0;    // página atual (0-indexed)
 let _evTotal    = 0;    // total de eventos retornado pelo backend
+let _evShowAll  = false; // true = consulta explícita de TODOS (botão "Ver todos")
 
 /** Lê o valor atual do seletor de itens por página. */
 function _evGetPageSize() {
@@ -137,9 +138,12 @@ async function loadEvents(resetPage = true) {
   if (resetPage) _evPage = 0;
 
   await _populateUserDropdown('evUser');
+  if (typeof _applyDeepLinkUser === 'function') _applyDeepLinkUser('evUser');
 
   const { since, until } = wpDP.getRange('evDays');
   const user   = document.getElementById('evUser').value.trim();
+  // Abre vazio: a consulta aqui é por colaborador. Só busca todos via "Ver todos".
+  if (!user && !_evShowAll) { _renderEvPrompt(); return; }
   const bucket = document.getElementById('evBucket').value;
   const sig    = _tabAbort ? _tabAbort.signal : undefined;
 
@@ -228,6 +232,36 @@ async function loadEvents(resetPage = true) {
     _setConnectionStatus('erro', true);
     toast('Falha ao carregar eventos: ' + e.message);
   }
+}
+
+// Loader da aba: abre vazio (reseta o modo "ver todos") — a consulta é por pessoa.
+function openEvents() { _evShowAll = false; loadEvents(); }
+
+// Trocou o usuário/filtro: sai do modo "ver todos" e reflete a seleção atual.
+function applyEvents() { _evShowAll = false; loadEvents(); }
+
+// Visão completa (todos os colaboradores) — ação explícita, pode demorar.
+function loadEventsAll() {
+  _evShowAll = true;
+  const s = document.getElementById('evUser'); if (s) s.value = '';
+  loadEvents();
+}
+
+// Estado inicial / vazio: limpa KPIs, gráfico, tabela e mostra a instrução.
+function _renderEvPrompt() {
+  ['kpiEvTotal', 'kpiEvProd', 'kpiEvUnprod', 'kpiEvUncat'].forEach(id => {
+    const e = document.getElementById(id); if (e) e.innerHTML = '—';
+  });
+  if (state.charts.evDaily) { state.charts.evDaily.destroy(); state.charts.evDaily = null; }
+  _evPage = 0; _evTotal = 0;
+  const lbl = document.getElementById('evCountLabel'); if (lbl) lbl.textContent = '';
+  const pag = document.getElementById('evPagination'); if (pag) pag.innerHTML = '';
+  const tbody = document.querySelector('#eventsTable tbody');
+  if (tbody) tbody.innerHTML = `<tr><td colspan="6" class="empty-state">
+      <h4>Selecione um colaborador</h4>
+      Escolha alguém no filtro <strong>Usuário</strong> acima para ver os aplicativos dele no período.
+      <div style="margin-top:10px"><button class="ghost" onclick="loadEventsAll()">Ver todos (pode demorar)</button></div>
+    </td></tr>`;
 }
 
 // ─────────────────────────────────────────────────────────────────────

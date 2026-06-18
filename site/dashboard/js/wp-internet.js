@@ -22,13 +22,52 @@ function _intChangePageSize() {
   renderSitesTable(_intFiltered, _intTotalCache);
 }
 
+// Loader da aba: NÃO carrega ninguém por padrão (a consulta aqui é por pessoa).
+// Só busca se houver um colaborador selecionado (ex.: via deep-link da tela Pessoas).
 async function loadInternet() {
   await _populateUserDropdown('intUser');
+  if (typeof _applyDeepLinkUser === 'function') _applyDeepLinkUser('intUser');
   if (!state.people || !state.people.length) {
     try { const _d = await api(`/v1/users?tenant=${encodeURIComponent(state.tenant)}`); state.people = _d.users || []; } catch (_) {}
   }
+  const user = document.getElementById('intUser').value.trim();
+  if (!user) { _renderIntPrompt(); return; }   // abre vazio, sem agregar todo mundo
+  await _fetchInternet(user);
+}
+
+// Aplicado ao trocar o usuário (onchange) ou o período: reflete a seleção atual.
+function applyInternet() {
+  const user = document.getElementById('intUser').value.trim();
+  if (!user) { _renderIntPrompt(); return; }
+  _fetchInternet(user);
+}
+
+// Visão completa (todos os colaboradores) — ação explícita, pode demorar.
+function loadInternetAll() {
+  const sel = document.getElementById('intUser');
+  if (sel) sel.value = '';
+  _fetchInternet('');   // '' = todos
+}
+
+// Estado inicial / vazio: limpa KPIs, gráfico e tabela e mostra a instrução.
+function _renderIntPrompt() {
+  ['kpiIntTotal', 'kpiIntProd', 'kpiIntUnprod', 'kpiIntUncat'].forEach(id => {
+    const e = document.getElementById(id); if (e) e.innerHTML = '—';
+  });
+  if (state.charts.intDaily) { state.charts.intDaily.destroy(); state.charts.intDaily = null; }
+  _intSitesCache = []; _intFiltered = []; _intTotalCache = 0; _intPage = 0;
+  const tbody = document.querySelector('#intSitesTable tbody');
+  if (tbody) tbody.innerHTML = `<tr><td colspan="6" class="empty-state">
+      <h4>Selecione um colaborador</h4>
+      Escolha alguém no filtro <strong>Usuário</strong> acima para ver a navegação dele no período.
+      <div style="margin-top:10px"><button class="ghost" onclick="loadInternetAll()">Ver todos (pode demorar)</button></div>
+    </td></tr>`;
+  const pag = document.getElementById('intPagination'); if (pag) pag.innerHTML = '';
+}
+
+// Busca de fato os dados (1 colaborador, ou todos quando user === '').
+async function _fetchInternet(user) {
   const { since, until } = wpDP.getRange('intDays');
-  const user   = document.getElementById('intUser').value.trim();
   const params = new URLSearchParams({ tenant: state.tenant, since, until });
   if (user) params.set('user_id', user);
 

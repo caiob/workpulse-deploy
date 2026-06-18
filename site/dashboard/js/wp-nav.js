@@ -10,7 +10,7 @@
 //   status • tenant • [⚙ ▾ → Configurações / Sair]
 // =====================================================================
 
-const TABS = ['overview', 'people', 'departments', 'alerts', 'trends', 'events', 'internet', 'jornada', 'localizacao', 'financeiro', 'admusuarios', 'admlicenca', 'admalertas', 'categorizacao', 'colaboradores', 'relatorios', 'config'];
+const TABS = ['overview', 'people', 'departments', 'alerts', 'trends', 'events', 'internet', 'consolidado', 'jornada', 'localizacao', 'financeiro', 'admusuarios', 'admlicenca', 'admalertas', 'categorizacao', 'colaboradores', 'relatorios', 'config'];
 
 // Mapeamento tab → grupo de dropdown (null = standalone)
 const TAB_GROUP = {
@@ -18,6 +18,7 @@ const TAB_GROUP = {
   departments: 'coletas',
   events:      'coletas',
   internet:    'coletas',
+  consolidado: 'coletas',
   jornada:     'coletas',
   localizacao: 'coletas',
   financeiro:  'administrativo',
@@ -70,8 +71,9 @@ function switchTab(name) {
     departments: loadDepartments,
     alerts:      loadAlerts,
     trends:      loadTrends,
-    events:      loadEvents,
+    events:      () => (typeof openEvents === 'function' ? openEvents() : loadEvents()),
     internet:    loadInternet,
+    consolidado: () => (typeof openConsolidado === 'function' ? openConsolidado() : null),
     jornada:     loadJornada,
     localizacao: loadLocations,
     financeiro:  () => { if (typeof loadFinance === 'function') loadFinance(); },
@@ -79,7 +81,7 @@ function switchTab(name) {
     admlicenca:  loadLicense,
     admalertas:  () => { if (typeof loadAlertConfig === 'function') loadAlertConfig(); },
     categorizacao: () => { if (typeof loadRules === 'function') loadRules(); if (typeof loadAppsForConfig === 'function') loadAppsForConfig(); if (typeof loadSitesForConfig === 'function') loadSitesForConfig(); },
-    colaboradores: () => { if (typeof loadDepts === 'function') loadDepts(); if (typeof loadCollabs === 'function') loadCollabs(); },
+    colaboradores: () => { if (typeof loadDepts === 'function') loadDepts(); if (typeof loadCollabs === 'function') loadCollabs(); if (typeof loadBlocked === 'function') loadBlocked(); if (typeof loadAgentCfgTenant === 'function') loadAgentCfgTenant(); if (typeof loadEnrollment === 'function') loadEnrollment(); },
     relatorios:  () => { if (typeof loadReports === 'function') loadReports(); if (typeof loadEmailConfig === 'function') loadEmailConfig(); },
     config:      loadConfig,
   };
@@ -124,7 +126,8 @@ function switchTab(name) {
   wpDP.init('rangeDays',   { defaultDays: 1,  onChange: () => { loadOverview(); loadAlerts(); } });
   wpDP.init('peopleRange', { defaultDays: 1,  onChange: loadPeople });
   wpDP.init('trendDays',   { defaultDays: 30, onChange: loadTrends });
-  wpDP.init('evDays',      { defaultDays: 1,  onChange: loadEvents });
-  wpDP.init('intDays',     { defaultDays: 1,  onChange: loadInternet });
+  wpDP.init('evDays',      { defaultDays: 1,  onChange: () => (typeof applyEvents === 'function' ? applyEvents() : loadEvents()) });
+  wpDP.init('intDays',     { defaultDays: 1,  onChange: () => (typeof applyInternet === 'function' ? applyInternet() : loadInternet()) });
+  wpDP.init('consDays',    { defaultDays: 1,  onChange: () => (typeof applyConsolidado === 'function' ? applyConsolidado() : null) });
   wpDP.init('jorDays',     { defaultDays: 7,  onChange: loadJornada });
 })();

@@ -82,7 +82,7 @@ import psycopg2
 import psycopg2.errors
 import psycopg2.extras
 import psycopg2.pool
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -347,7 +347,10 @@ def init_db() -> None:
 # ---------------------------------------------------------------------------
 _CACHE: dict[str, tuple[float, Any]] = {}
 _CACHE_LOCK = threading.Lock()
-_CACHE_TTL  = 90  # segundos
+# TTL do cache dos painéis. Dashboard de monitoramento tolera alguns minutos de
+# defasagem; um TTL maior faz recargas repetidas baterem em cache quente (rápido)
+# em vez de re-agregar a tabela events. Ajustável via env.
+_CACHE_TTL  = int(os.getenv("WORKPULSE_CACHE_TTL", "300"))  # segundos
 
 
 def _cache_get(key: str) -> Any | None:
@@ -361,6 +364,29 @@ def _cache_get(key: str) -> Any | None:
 def _cache_set(key: str, val: Any) -> None:
     with _CACHE_LOCK:
         _CACHE[key] = (time.monotonic(), val)
+
+
+class _Perf:
+    """Cronômetro leve para medir gargalos. Loga só o que passar do limiar.
+    Uso:  p = _Perf("overview"); ...; p.mark("totals"); ...; p.done()."""
+    THRESHOLD_MS = float(os.getenv("WORKPULSE_PERF_MS", "200"))
+
+    def __init__(self, label: str):
+        self.label = label
+        self.t0 = time.monotonic()
+        self.last = self.t0
+        self.parts: list[str] = []
+
+    def mark(self, name: str) -> None:
+        now = time.monotonic()
+        ms = (now - self.last) * 1000.0
+        self.last = now
+        self.parts.append(f"{name}={ms:.0f}ms")
+
+    def done(self) -> None:
+        total = (time.monotonic() - self.t0) * 1000.0
+        if total >= self.THRESHOLD_MS:
+            print(f"[perf] {self.label} total={total:.0f}ms | " + " ".join(self.parts), flush=True)
 
 
 def _cache_bust(tenant: str) -> None:
@@ -769,6 +795,340 @@ async def _retention_worker() -> None:
 
 
 # ---------------------------------------------------------------------------
+# ROLLUP (agregados) — compute, worker e helpers de leitura
+# ---------------------------------------------------------------------------
+ROLLUP_INTERVAL_SEC  = int(os.getenv("WORKPULSE_ROLLUP_SEC", "300"))          # refresh a cada 5 min
+ROLLUP_BACKFILL_DAYS = int(os.getenv("WORKPULSE_ROLLUP_BACKFILL_DAYS", "3"))  # dias antigos por ciclo (suave)
+# Versão do esquema de rollup. Ao subir (ex.: nova tabela agg_app_day), o worker
+# reabre o backfill UMA vez por tenant p/ repreencher os agregados antigos.
+ROLLUP_SCHEMA_VER    = 2
+
+
+def _local_day_utc_bounds(local_day: dt.date) -> tuple[str, str]:
+    """(início, fim) em ISO-UTC cobrindo o dia LOCAL inteiro.
+    BRT = UTC + DASH_TZ_OFFSET_HOURS (-3) → meia-noite local = 03:00 UTC."""
+    start = dt.datetime(local_day.year, local_day.month, local_day.day,
+                        tzinfo=dt.timezone.utc) - dt.timedelta(hours=DASH_TZ_OFFSET_HOURS)
+    return start.isoformat(), (start + dt.timedelta(days=1)).isoformat()
+
+
+def _today_local(now: dt.datetime) -> dt.date:
+    return (now + dt.timedelta(hours=DASH_TZ_OFFSET_HOURS)).date()
+
+
+def _rollup_hours(c, tenant: str, since: str, until: str) -> None:
+    """(Re)agrega ativo/AFK por (usuário, hora-UTC) na faixa [since, until).
+    Seguro p/ qualquer faixa: cada bucket de hora é independente."""
+    c.execute(
+        """INSERT INTO agg_user_hour (tenant_id, user_id, hour, active_sec, afk_sec)
+           SELECT %s, user_id, substr(ts,1,13) AS hour,
+                  SUM(CASE WHEN bucket='window' THEN duration_sec ELSE 0 END),
+                  SUM(CASE WHEN bucket='afk' AND data_json->>'status'='afk'
+                           THEN duration_sec ELSE 0 END)
+           FROM events
+           WHERE tenant_id=%s AND ts>=%s AND ts<%s
+           GROUP BY user_id, substr(ts,1,13)
+           ON CONFLICT (tenant_id, user_id, hour) DO UPDATE SET
+               active_sec = EXCLUDED.active_sec,
+               afk_sec    = EXCLUDED.afk_sec""",
+        (tenant, tenant, since, until),
+    )
+
+
+def _rollup_days(c, tenant: str, since: str, until: str) -> None:
+    """(Re)agrega a JORNADA por (usuário, dia-LOCAL). A faixa DEVE cobrir dias
+    locais inteiros (senão start/end/afk_in saem parciais)."""
+    c.execute(
+        """INSERT INTO agg_user_day
+               (tenant_id, user_id, day, focus_sec, afk_in_sec, afk_after_sec, start_sec, end_sec)
+           WITH w AS (
+               SELECT user_id,
+                      (ts::timestamptz AT TIME ZONE %(tz)s)                 AS lts,
+                      (ts::timestamptz AT TIME ZONE %(tz)s)
+                          + (duration_sec || ' seconds')::interval          AS lend,
+                      duration_sec
+               FROM events
+               WHERE tenant_id=%(tenant)s AND bucket='window'
+                 AND ts>=%(since)s AND ts<%(until)s
+           ),
+           win AS (
+               SELECT user_id, lts::date AS day, MIN(lts) AS start_ts,
+                      MAX(lend) AS end_ts, SUM(duration_sec) AS focus_sec
+               FROM w GROUP BY user_id, lts::date
+           ),
+           afk_ev AS (
+               SELECT user_id,
+                      (ts::timestamptz AT TIME ZONE %(tz)s)        AS lts,
+                      (ts::timestamptz AT TIME ZONE %(tz)s)::date  AS day,
+                      duration_sec
+               FROM events
+               WHERE tenant_id=%(tenant)s AND bucket='afk'
+                 AND data_json->>'status'='afk'
+                 AND ts>=%(since)s AND ts<%(until)s
+           ),
+           afk AS (
+               SELECT a.user_id, a.day,
+                      COALESCE(SUM(a.duration_sec) FILTER (
+                          WHERE a.lts >= win.start_ts AND a.lts <= win.end_ts), 0) AS afk_in,
+                      COALESCE(SUM(a.duration_sec) FILTER (
+                          WHERE a.lts > win.end_ts), 0)                            AS afk_after
+               FROM afk_ev a JOIN win ON win.user_id=a.user_id AND win.day=a.day
+               GROUP BY a.user_id, a.day
+           )
+           SELECT %(tenant)s, win.user_id, to_char(win.day,'YYYY-MM-DD'),
+                  win.focus_sec,
+                  COALESCE(afk.afk_in, 0), COALESCE(afk.afk_after, 0),
+                  EXTRACT(EPOCH FROM (win.start_ts - win.day::timestamp)),
+                  EXTRACT(EPOCH FROM (win.end_ts   - win.day::timestamp))
+           FROM win LEFT JOIN afk ON afk.user_id=win.user_id AND afk.day=win.day
+           ON CONFLICT (tenant_id, user_id, day) DO UPDATE SET
+               focus_sec     = EXCLUDED.focus_sec,
+               afk_in_sec    = EXCLUDED.afk_in_sec,
+               afk_after_sec = EXCLUDED.afk_after_sec,
+               start_sec     = EXCLUDED.start_sec,
+               end_sec       = EXCLUDED.end_sec""",
+        {"tz": REPORT_TZ, "tenant": tenant, "since": since, "until": until},
+    )
+
+
+def _rollup_apps(c, tenant: str, since: str, until: str) -> None:
+    """(Re)agrega tempo ativo por (dia-LOCAL, app). Faixa = dias locais inteiros."""
+    c.execute(
+        """INSERT INTO agg_app_day (tenant_id, day, app, active_sec)
+           SELECT %(tenant)s,
+                  to_char((ts::timestamptz AT TIME ZONE %(tz)s)::date, 'YYYY-MM-DD') AS day,
+                  MIN(data_json->>'app')                                             AS app,
+                  SUM(duration_sec)                                                  AS active_sec
+           FROM events
+           WHERE tenant_id=%(tenant)s AND bucket='window'
+             AND ts>=%(since)s AND ts<%(until)s
+             AND data_json->>'app' IS NOT NULL
+           GROUP BY (ts::timestamptz AT TIME ZONE %(tz)s)::date, LOWER(data_json->>'app')
+           ON CONFLICT (tenant_id, day, app) DO UPDATE SET active_sec = EXCLUDED.active_sec""",
+        {"tz": REPORT_TZ, "tenant": tenant, "since": since, "until": until},
+    )
+
+
+def _rollup_local_day(c, tenant: str, local_day: dt.date) -> None:
+    s, u = _local_day_utc_bounds(local_day)
+    _rollup_hours(c, tenant, s, u)
+    _rollup_days(c, tenant, s, u)
+    _rollup_apps(c, tenant, s, u)
+
+
+ROLLUP_LOCK_KEY = 0x52504C50  # 'RPLP' — advisory lock p/ 1 backfiller por vez
+
+
+def _do_rollups() -> None:
+    """Refresh dos dias quentes (ontem+hoje) + backfill incremental p/ trás.
+
+    Proteções (o backfill usa queries pesadas com casts e não pode derrubar o
+    banco/pool sob carga):
+      - kill-switch por env WORKPULSE_ROLLUP_ENABLED;
+      - advisory lock: SÓ UM processo faz rollup por ciclo (há N workers web);
+      - statement_timeout: nenhuma query do rollup segura a conexão p/ sempre;
+      - lote pequeno + pausa entre dias p/ ceder CPU às requisições dos usuários.
+    Toda a operação roda numa ÚNICA conexão (a que detém a trava)."""
+    # LIGADO por padrão (RDS subiu p/ t3.small + backfill resiliente, 2026-06-18).
+    # Kill-switch de emergência: WORKPULSE_ROLLUP_ENABLED=0 desliga.
+    if os.getenv("WORKPULSE_ROLLUP_ENABLED", "1") != "1":
+        return
+    try:
+        with db() as c:
+            got = c.execute("SELECT pg_try_advisory_lock(%s) AS ok", (ROLLUP_LOCK_KEY,)).fetchone()
+            if not got or not got["ok"]:
+                return  # outra instância já está cuidando deste ciclo
+            try:
+                # Protege a conexão: queries do rollup têm teto de tempo.
+                c.execute("SET statement_timeout = %s",
+                          (os.getenv("WORKPULSE_ROLLUP_STMT_TIMEOUT", "20s"),))
+                now   = dt.datetime.now(dt.timezone.utc)
+                today = _today_local(now)
+                yday  = today - dt.timedelta(days=1)
+                sleep_s = float(os.getenv("WORKPULSE_ROLLUP_SLEEP_SEC", "2"))
+
+                tenants = c.execute(
+                    "SELECT id, COALESCE(retention_days, %s) AS days FROM tenants WHERE status='active'",
+                    (_DEFAULT_RETENTION_DAYS,),
+                ).fetchall()
+
+                for t in tenants:
+                    tid    = t["id"]
+                    cutoff = today - dt.timedelta(days=int(t["days"]))
+                    try:
+                        c.execute(
+                            "INSERT INTO rollup_state (tenant_id, updated_at) VALUES (%s,%s) "
+                            "ON CONFLICT (tenant_id) DO NOTHING",
+                            (tid, now.isoformat()),
+                        )
+                        st = c.execute(
+                            "SELECT oldest_day, done, ver FROM rollup_state WHERE tenant_id=%s", (tid,)
+                        ).fetchone()
+
+                        # 1) Dias QUENTES: ontem (completo) e hoje (parcial). Cada
+                        #    dia é resiliente — falha de um não aborta o ciclo.
+                        for _hot in (yday, today):
+                            try:
+                                _rollup_local_day(c, tid, _hot)
+                            except Exception as exc:
+                                print(f"[rollup_worker] dia quente {_hot} pulado (tenant={tid}): {exc}", flush=True)
+                            time.sleep(sleep_s)
+
+                        oldest = (st["oldest_day"] if st and st["oldest_day"] else yday.isoformat())
+                        if oldest > yday.isoformat():
+                            oldest = yday.isoformat()
+                        done = bool(st["done"]) if st else False
+
+                        # Migração de esquema: reabre o backfill p/ repreencher
+                        # agregados novos (ex.: agg_app_day). Uma vez por tenant.
+                        if (st["ver"] if st and st["ver"] is not None else 0) < ROLLUP_SCHEMA_VER:
+                            oldest = yday.isoformat()
+                            done   = False
+
+                        # 2) BACKFILL: poucos dias por ciclo. SEMPRE avança (pula o
+                        #    dia que falhar) — nunca trava reprocessando o mesmo dia.
+                        if not done:
+                            cur = dt.date.fromisoformat(oldest)
+                            for _ in range(ROLLUP_BACKFILL_DAYS):
+                                prev = cur - dt.timedelta(days=1)
+                                if prev < cutoff:
+                                    done = True
+                                    break
+                                try:
+                                    _rollup_local_day(c, tid, prev)
+                                except Exception as exc:
+                                    print(f"[rollup_worker] backfill {prev} pulado (tenant={tid}): {exc}", flush=True)
+                                cur = prev   # avança mesmo se o dia falhar
+                                time.sleep(sleep_s)
+                            oldest = cur.isoformat()
+
+                        c.execute(
+                            "UPDATE rollup_state SET oldest_day=%s, done=%s, ver=%s, updated_at=%s "
+                            "WHERE tenant_id=%s",
+                            (oldest, done, ROLLUP_SCHEMA_VER, now.isoformat(), tid),
+                        )
+                    except Exception as exc:
+                        print(f"[rollup_worker] tenant={tid} error: {exc}", flush=True)
+            finally:
+                try:
+                    c.execute("SET statement_timeout = 0")
+                except Exception:
+                    pass
+                c.execute("SELECT pg_advisory_unlock(%s)", (ROLLUP_LOCK_KEY,))
+    except Exception as exc:
+        print(f"[rollup_worker] error: {exc}", flush=True)
+
+
+async def _rollup_worker() -> None:
+    await asyncio.sleep(20)   # deixa o boot respirar
+    while True:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _do_rollups)
+        await asyncio.sleep(ROLLUP_INTERVAL_SEC)
+
+
+def _agg_ready(c, tenant: str, since: str) -> bool:
+    """True se o range [since..] já está coberto pelos agregados (backfill alcançou).
+    Com o rollup DESLIGADO, retorna False → os endpoints leem os eventos crus
+    (dados frescos, com o cache segurando), evitando servir agregado parado."""
+    if os.getenv("WORKPULSE_ROLLUP_ENABLED", "1") != "1":
+        return False
+    r = c.execute("SELECT oldest_day FROM rollup_state WHERE tenant_id=%s", (tenant,)).fetchone()
+    if not r or not r["oldest_day"]:
+        return False
+    return _utc_hour_to_local_day(since[:13]) >= r["oldest_day"]
+
+
+def _hour_rows(c, tenant, since, until, SC, A):
+    """Linhas (h, user_id, active, afk): do agregado se pronto, senão varre events."""
+    if _agg_ready(c, tenant, since):
+        return c.execute(
+            f"""SELECT hour AS h, user_id, active_sec AS active, afk_sec AS afk
+                FROM agg_user_hour
+                WHERE tenant_id=%s{SC} AND hour>=%s AND hour<=%s""",
+            tuple([tenant, *A, since[:13], until[:13]]),
+        ).fetchall()
+    return c.execute(
+        f"""SELECT substr(ts,1,13) AS h, user_id,
+                   SUM(CASE WHEN bucket='window' THEN duration_sec ELSE 0 END) AS active,
+                   SUM(CASE WHEN bucket='afk' AND data_json->>'status'='afk'
+                            THEN duration_sec ELSE 0 END) AS afk
+            FROM events WHERE tenant_id=%s{SC} AND ts>=%s AND ts<=%s
+            GROUP BY h, user_id""",
+        tuple([tenant, *A, since, until]),
+    ).fetchall()
+
+
+def _top_apps(c, tenant, since, until, SC, A, scoped):
+    """Top 15 apps por tempo ativo. Lê de agg_app_day quando pronto E sem escopo
+    de líder (o agregado não guarda user_id); senão varre events."""
+    if not scoped and _agg_ready(c, tenant, since):
+        d0 = _utc_hour_to_local_day(since[:13])
+        d1 = _utc_hour_to_local_day(until[:13])
+        return c.execute(
+            """SELECT MIN(app) AS app, SUM(active_sec) AS seconds
+               FROM agg_app_day
+               WHERE tenant_id=%s AND day>=%s AND day<=%s
+               GROUP BY LOWER(app) ORDER BY seconds DESC LIMIT 15""",
+            (tenant, d0, d1),
+        ).fetchall()
+    return c.execute(
+        f"""SELECT MIN(data_json->>'app') AS app, SUM(duration_sec) AS seconds
+           FROM events
+           WHERE tenant_id=%s{SC} AND ts>=%s AND ts<=%s AND bucket='window'
+           GROUP BY LOWER(data_json->>'app') ORDER BY seconds DESC LIMIT 15""",
+        tuple([tenant, *A, since, until]),
+    ).fetchall()
+
+
+def _afk_in_by_user(c, tenant, since, until):
+    """[(user_id, afk_in)]: do agregado se pronto, senão CTE sobre events."""
+    if _agg_ready(c, tenant, since):
+        d0 = _utc_hour_to_local_day(since[:13])
+        d1 = _utc_hour_to_local_day(until[:13])
+        return c.execute(
+            """SELECT user_id, SUM(afk_in_sec) AS afk_in
+               FROM agg_user_day
+               WHERE tenant_id=%s AND day>=%s AND day<=%s
+               GROUP BY user_id""",
+            (tenant, d0, d1),
+        ).fetchall()
+    return c.execute(
+        """
+        WITH w AS (
+            SELECT user_id,
+                   (ts::timestamptz AT TIME ZONE %(tz)s)                 AS lts,
+                   (ts::timestamptz AT TIME ZONE %(tz)s)
+                       + (duration_sec || ' seconds')::interval          AS lend
+            FROM events
+            WHERE tenant_id = %(tenant)s AND bucket = 'window'
+              AND ts >= %(since)s AND ts < %(until)s
+        ),
+        win AS (
+            SELECT user_id, lts::date AS day, MIN(lts) AS start_ts, MAX(lend) AS end_ts
+            FROM w GROUP BY user_id, lts::date
+        ),
+        afk_ev AS (
+            SELECT user_id,
+                   (ts::timestamptz AT TIME ZONE %(tz)s)        AS lts,
+                   (ts::timestamptz AT TIME ZONE %(tz)s)::date  AS day,
+                   duration_sec
+            FROM events
+            WHERE tenant_id = %(tenant)s AND bucket = 'afk'
+              AND data_json->>'status' = 'afk'
+              AND ts >= %(since)s AND ts < %(until)s
+        )
+        SELECT a.user_id,
+               COALESCE(SUM(a.duration_sec) FILTER (
+                   WHERE a.lts >= win.start_ts AND a.lts <= win.end_ts), 0) AS afk_in
+        FROM afk_ev a JOIN win ON win.user_id = a.user_id AND win.day = a.day
+        GROUP BY a.user_id
+        """,
+        {"tz": REPORT_TZ, "tenant": tenant, "since": since, "until": until},
+    ).fetchall()
+
+
+# ---------------------------------------------------------------------------
 # FastAPI — app + lifespan
 # ---------------------------------------------------------------------------
 @asynccontextmanager
@@ -779,11 +1139,13 @@ async def lifespan(app: FastAPI):
     task_retention = asyncio.create_task(_retention_worker())
     task_reports   = asyncio.create_task(_reports_worker())
     task_alerts    = asyncio.create_task(_alerts_worker())
+    task_rollup    = asyncio.create_task(_rollup_worker())
     yield
     task_retention.cancel()
     task_reports.cancel()
     task_alerts.cancel()
-    for t in (task_retention, task_reports, task_alerts):
+    task_rollup.cancel()
+    for t in (task_retention, task_reports, task_alerts, task_rollup):
         try:
             await t
         except asyncio.CancelledError:
@@ -839,6 +1201,17 @@ def ingest(
     user_id   = payload.user_id or (x_device or payload.device)
     device_id = x_device or payload.device
     now_iso   = dt.datetime.now(dt.timezone.utc).isoformat()
+
+    # Bloqueio do agente: se o Device foi excluído/bloqueado pelo Admin Master, descarta
+    # o envio — NÃO recria o usuário nem grava eventos. Responde ok para o agente não
+    # ficar reenviando em loop. (Desbloquear remove daqui e a coleta volta a entrar.)
+    with db() as c:
+        _blk = c.execute(
+            "SELECT 1 FROM blocked_devices WHERE tenant_id=%s AND user_id=%s",
+            (claims["tenant"], user_id),
+        ).fetchone()
+    if _blk:
+        return {"ok": True, "blocked": True, "stored": 0}
 
     with db() as c:
         c.execute(
@@ -1119,87 +1492,63 @@ def team_summary(tenant: str, request: Request, days: int = 7,
     if until is None:
         until = dt.datetime.now(dt.timezone.utc).isoformat()
     allowed, _stag = _scope_for(request, tenant)
-    SC = " AND user_id = ANY(%s)" if allowed is not None else ""
-    A  = [allowed] if allowed is not None else []
+    SC  = " AND user_id = ANY(%s)"   if allowed is not None else ""
+    SCU = " AND u.user_id = ANY(%s)" if allowed is not None else ""
+    A   = [allowed] if allowed is not None else []
     cache_key = f"{tenant}:team_summary:{since}:{until}{_stag}"
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
 
+    _perf = _Perf(f"team_summary tenant={tenant} since={since}")
     with db() as c:
-        per_user = c.execute(
-            """SELECT u.user_id, u.display_name, u.email, u.department, u.last_seen,
-                      COALESCE(SUM(CASE WHEN e.bucket='window' THEN e.duration_sec END), 0) AS active,
-                      COALESCE(SUM(CASE WHEN e.bucket='afk' AND e.data_json->>'status'='afk'
-                                        THEN e.duration_sec END), 0) AS afk,
-                      (SELECT d.agent_version FROM devices d
-                       WHERE d.tenant_id = u.tenant_id AND d.user_id = u.user_id
-                       ORDER BY d.last_seen DESC LIMIT 1) AS agent_version
-               FROM users u LEFT JOIN events e
-                    ON e.tenant_id = u.tenant_id AND e.user_id = u.user_id
-                    AND e.ts >= %s AND e.ts <= %s
-               WHERE u.tenant_id = %s
-               GROUP BY u.user_id, u.display_name, u.email, u.department, u.last_seen, u.tenant_id
-               ORDER BY active DESC""",
-            (since, until, tenant),
-        ).fetchall()
-        if allowed is not None:
-            _aset = set(allowed)
-            per_user = [r for r in per_user if r["user_id"] in _aset]
-        global_top = c.execute(
-            f"""SELECT MIN(data_json->>'app') AS app, SUM(duration_sec) AS seconds
-               FROM events
-               WHERE tenant_id=%s{SC} AND ts>=%s AND ts<=%s AND bucket='window'
-               GROUP BY LOWER(data_json->>'app') ORDER BY seconds DESC LIMIT 15""",
-            tuple([tenant, *A, since, until]),
-        ).fetchall()
+        _perf.mark("connect")
+        # Ativo/AFK por usuário — do agregado (agg_user_hour) quando pronto.
+        _sum: dict[str, list] = {}
+        for r in _hour_rows(c, tenant, since, until, SC, A):
+            s = _sum.setdefault(r["user_id"], [0.0, 0.0])
+            s[0] += float(r["active"] or 0.0)
+            s[1] += float(r["afk"]    or 0.0)
+        _perf.mark("active_afk")
 
-        # AFK *dentro da jornada* por colaborador (mesma lógica de /v1/jornada):
-        # só conta AFK cujo horário local cai entre o início e o fim da jornada do
-        # dia (1ª coleta → última coleta). Exclui o "AFK pós jornada".
-        afk_in_rows = c.execute(
-            """
-            WITH w AS (
-                SELECT user_id,
-                       (ts::timestamptz AT TIME ZONE %(tz)s)                 AS lts,
-                       (ts::timestamptz AT TIME ZONE %(tz)s)
-                           + (duration_sec || ' seconds')::interval          AS lend
-                FROM events
-                WHERE tenant_id = %(tenant)s AND bucket = 'window'
-                  AND ts::timestamptz >= %(since)s::timestamptz
-                  AND ts::timestamptz <  %(until)s::timestamptz
-            ),
-            win AS (
-                SELECT user_id, lts::date AS day, MIN(lts) AS start_ts, MAX(lend) AS end_ts
-                FROM w GROUP BY user_id, lts::date
-            ),
-            afk_ev AS (
-                SELECT user_id,
-                       (ts::timestamptz AT TIME ZONE %(tz)s)        AS lts,
-                       (ts::timestamptz AT TIME ZONE %(tz)s)::date  AS day,
-                       duration_sec
-                FROM events
-                WHERE tenant_id = %(tenant)s AND bucket = 'afk'
-                  AND data_json->>'status' = 'afk'
-                  AND ts::timestamptz >= %(since)s::timestamptz
-                  AND ts::timestamptz <  %(until)s::timestamptz
-            )
-            SELECT a.user_id,
-                   COALESCE(SUM(a.duration_sec) FILTER (
-                       WHERE a.lts >= win.start_ts AND a.lts <= win.end_ts), 0) AS afk_in
-            FROM afk_ev a JOIN win ON win.user_id = a.user_id AND win.day = a.day
-            GROUP BY a.user_id
-            """,
-            {"tz": REPORT_TZ, "tenant": tenant, "since": since, "until": until},
+        # Metadados dos usuários (tabela pequena) + versão do agente.
+        meta = c.execute(
+            f"""SELECT u.user_id, u.display_name, u.email, u.department, u.last_seen,
+                       (SELECT d.agent_version FROM devices d
+                        WHERE d.tenant_id = u.tenant_id AND d.user_id = u.user_id
+                        ORDER BY d.last_seen DESC LIMIT 1) AS agent_version
+                FROM users u WHERE u.tenant_id=%s{SCU}""",
+            tuple([tenant, *A]),
         ).fetchall()
+        _perf.mark("meta")
+
+        global_top = _top_apps(c, tenant, since, until, SC, A, allowed is not None)
+        _perf.mark("global_top")
+
+        # AFK *dentro da jornada* por colaborador — do agregado (agg_user_day)
+        # quando pronto; senão CTE sobre events (mesma lógica de /v1/jornada).
+        afk_in_rows = _afk_in_by_user(c, tenant, since, until)
+        _perf.mark("afk_in")
+    _perf.done()
 
     afk_in_map = {r["user_id"]: float(r["afk_in"] or 0.0) for r in afk_in_rows}
 
     users_out = []
-    for r in per_user:
-        d = dict(r)
-        d["afk_in"] = afk_in_map.get(r["user_id"], 0.0)   # AFK na Jornada (exclui pós-jornada)
-        users_out.append(d)
+    for u in meta:
+        uid       = u["user_id"]
+        act, afkv = _sum.get(uid, (0.0, 0.0))
+        users_out.append({
+            "user_id":       uid,
+            "display_name":  u["display_name"],
+            "email":         u["email"],
+            "department":    u["department"],
+            "last_seen":     u["last_seen"],
+            "agent_version": u["agent_version"],
+            "active":        act,
+            "afk":           afkv,
+            "afk_in":        afk_in_map.get(uid, 0.0),   # AFK na Jornada (exclui pós-jornada)
+        })
+    users_out.sort(key=lambda d: d["active"], reverse=True)
 
     result = {
         "tenant":   tenant,
@@ -1494,6 +1843,99 @@ def productivity_events_summary(
     return result
 
 
+@app.get("/v1/productivity/consolidado", dependencies=[Depends(require_tenant_scope)])
+def productivity_consolidado(
+    tenant:  str,
+    request: Request,
+    user_id: str | None = None,
+    bucket:  str | None = None,   # ''/'window' = atividade | 'afk' | 'all' = todos
+    since:   str | None = None,
+    until:   str | None = None,
+    days:    int = Query(1, le=90),
+):
+    """Coleta CONSOLIDADA de uma pessoa no período — agregada NO SERVIDOR por
+    app/site (o dia todo, sem limite de eventos). Inclui browsers (internet) e,
+    opcionalmente, AFK. É o backend da aba Consolidado."""
+    if since is None:
+        since = _since_for_days(days)
+    if until is None:
+        until = dt.datetime.now(dt.timezone.utc).isoformat()
+    allowed = _lider_allowed_ids(request, tenant)
+    if allowed is not None and user_id and user_id not in set(allowed):
+        raise HTTPException(status_code=403, detail="colaborador fora do seu escopo")
+
+    all_b = (bucket == "all")
+    one_b = None if all_b else (bucket or "window")
+    cache_key = f"{tenant}:consolidado:{user_id or ''}:{since}:{until}:{bucket or 'window'}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    where = ["tenant_id=%s", "ts>=%s", "ts<=%s"]
+    args: list = [tenant, since, until]
+    if not all_b:
+        where.append("bucket=%s"); args.append(one_b)
+    if user_id:
+        where.append("user_id=%s"); args.append(user_id)
+    elif allowed is not None:
+        where.append("user_id = ANY(%s)"); args.append(allowed)
+    wc = " AND ".join(where)
+
+    with db() as c:
+        rules = [dict(r) for r in c.execute(
+            "SELECT * FROM productivity_rules WHERE tenant_id=%s ORDER BY created_at", (tenant,),
+        ).fetchall()]
+        agg = c.execute(
+            f"""SELECT data_json->>'app' AS app, data_json->>'title' AS title, bucket,
+                       SUM(duration_sec) AS total_sec, MAX(ts) AS last_ts
+                FROM events WHERE {wc}
+                GROUP BY app, title, bucket""",
+            tuple(args),
+        ).fetchall()
+        day_raw = c.execute(
+            f"""SELECT substr(ts,1,13) AS h, data_json->>'app' AS app,
+                       data_json->>'title' AS title, bucket, SUM(duration_sec) AS total_sec
+                FROM events WHERE {wc}
+                GROUP BY h, app, title, bucket""",
+            tuple(args),
+        ).fetchall()
+
+    def _cat(row):
+        return "afk" if row["bucket"] == "afk" else _apply_rules(_clean_title(row["title"] or ""), row["app"] or "", rules)
+
+    totals = {"productive": 0.0, "unproductive": 0.0, "neutral": 0.0, "uncategorized": 0.0, "afk": 0.0, "total": 0.0}
+    items = []
+    for row in agg:
+        cat = _cat(row); sec = row["total_sec"] or 0.0
+        totals[cat]    = totals.get(cat, 0.0) + sec
+        totals["total"] += sec
+        app  = row["app"] or "—"
+        tipo = "AFK" if row["bucket"] == "afk" else ("Internet" if _is_browser(app) else "App")
+        items.append({
+            "app": app, "title": _clean_title(row["title"] or ""),
+            "total_sec": round(sec, 1), "category": cat, "type": tipo,
+            "last_access": row["last_ts"],
+        })
+    items.sort(key=lambda x: -x["total_sec"])
+    items = items[:500]   # top 500 por tempo — payload enxuto, cobre o dia
+
+    dagg: dict[str, dict] = {}
+    for row in day_raw:
+        day = _utc_hour_to_local_day(row["h"]); cat = _cat(row)
+        d = dagg.setdefault(day, {"productive": 0.0, "unproductive": 0.0, "neutral": 0.0, "uncategorized": 0.0, "afk": 0.0})
+        d[cat] = d.get(cat, 0.0) + (row["total_sec"] or 0.0)
+    daily = [{"day": k, **{kk: round(vv, 1) for kk, vv in v.items()}} for k, v in sorted(dagg.items())]
+
+    result = {
+        "tenant": tenant, "since": since, "until": until,
+        "totals": {k: round(v, 1) for k, v in totals.items()},
+        "items":  items,
+        "daily":  daily,
+    }
+    _cache_set(cache_key, result)
+    return result
+
+
 # ===========================================================================
 # Workforce dashboard
 # ===========================================================================
@@ -1550,105 +1992,80 @@ def workforce_overview(tenant: str, request: Request, days: int = 7,
         return cached
 
     today_start      = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    today_h          = today_start[:13]      # 'YYYY-MM-DDTHH' p/ comparar com substr(ts,1,13)
     online_threshold = (now - dt.timedelta(minutes=ONLINE_THRESHOLD_MINUTES)).isoformat()
 
+    _perf = _Perf(f"overview tenant={tenant} since={since}")
     with db() as c:
-        totals = c.execute(
-            f"""SELECT
-                   COUNT(DISTINCT user_id) AS total_users,
-                   SUM(CASE WHEN bucket='window' THEN duration_sec END) AS active,
-                   SUM(CASE WHEN bucket='afk' AND data_json->>'status'='afk'
-                            THEN duration_sec END) AS afk,
-                   SUM(CASE WHEN bucket='window' AND ts>=%s THEN duration_sec END) AS today_active
-               FROM events WHERE tenant_id=%s{SC} AND ts>=%s AND ts<=%s""",
-            tuple([today_start, tenant, *A, since, until]),
-        ).fetchone()
-        today_active = totals["today_active"] or 0
+        _perf.mark("connect")
+        # Buckets por (hora-UTC, usuário) com ativo (window) e AFK. Lê do agregado
+        # (agg_user_hour) quando pronto; senão varre events (fallback). Tudo o que
+        # o overview precisa de eventos sai disto, agregado em Python.
+        rows = _hour_rows(c, tenant, since, until, SC, A)
+        _perf.mark("scan")
 
-        online = c.execute(
-            f"SELECT COUNT(*) AS n FROM users WHERE tenant_id=%s{SC} AND last_seen>=%s",
-            tuple([tenant, *A, online_threshold]),
-        ).fetchone()["n"]
-
-        hourly = c.execute(
-            f"""SELECT CAST(substr(ts,12,2) AS INTEGER) AS hour, SUM(duration_sec) AS seconds
-               FROM events WHERE tenant_id=%s{SC} AND ts>=%s AND ts<=%s AND bucket='window'
-               GROUP BY hour ORDER BY hour""",
-            tuple([tenant, *A, since, until]),
+        # Tabela de usuários (pequena) — depto, nomes e status online.
+        urows = c.execute(
+            f"""SELECT user_id, display_name,
+                      COALESCE(department,'Sem departamento') AS dept, last_seen
+               FROM users u WHERE u.tenant_id=%s{SCU}""",
+            tuple([tenant, *A]),
         ).fetchall()
+        _perf.mark("users")
+    _perf.done()
 
-        # Agrupa por HORA UTC; o re-bucket para data LOCAL (BRT) é feito em Python
-        # (ver DASH_TZ_OFFSET_HOURS) para que cada dia local seja uma única barra.
-        # substr é portável (PostgreSQL + harness sqlite).
-        _hour_dur = c.execute(
-            f"""SELECT substr(ts,1,13) AS h,
-                      SUM(CASE WHEN bucket='window' THEN duration_sec ELSE 0 END) AS active,
-                      SUM(CASE WHEN bucket='afk' AND data_json->>'status'='afk'
-                               THEN duration_sec ELSE 0 END) AS afk
-               FROM events WHERE tenant_id=%s{SC} AND ts>=%s AND ts<=%s
-               GROUP BY h""",
-            tuple([tenant, *A, since, until]),
-        ).fetchall()
-        _hour_usr = c.execute(
-            f"""SELECT DISTINCT substr(ts,1,13) AS h, user_id
-               FROM events WHERE tenant_id=%s{SC} AND ts>=%s AND ts<=%s""",
-            tuple([tenant, *A, since, until]),
-        ).fetchall()
-
-        by_dept = c.execute(
-            f"""SELECT COALESCE(u.department, 'Sem departamento') AS dept,
-                      COUNT(DISTINCT u.user_id) AS users,
-                      COALESCE(SUM(CASE WHEN e.bucket='window' THEN e.duration_sec END), 0) AS active
-               FROM users u
-               LEFT JOIN events e ON e.tenant_id=u.tenant_id AND e.user_id=u.user_id
-                    AND e.ts>=%s AND e.ts<=%s
-               WHERE u.tenant_id=%s{SCU}
-               GROUP BY dept ORDER BY active DESC""",
-            tuple([since, until, tenant, *A]),
-        ).fetchall()
-
-        risk = c.execute(
-            f"""SELECT u.user_id, u.display_name,
-                      COALESCE(e.total_sec, 0) AS total_active
-               FROM users u
-               LEFT JOIN (
-                   SELECT user_id, SUM(duration_sec) AS total_sec
-                   FROM events WHERE tenant_id=%s AND ts>=%s AND ts<=%s AND bucket='window'
-                   GROUP BY user_id
-               ) e ON e.user_id = u.user_id
-               WHERE u.tenant_id=%s{SCU}""",
-            tuple([tenant, since, until, tenant, *A]),
-        ).fetchall()
-
-    overwork, underwork = [], []
-    for r in risk:
-        total_h = (r["total_active"] or 0) / 3600
-        avg_h   = total_h / max(days, 1)
-        if avg_h > 10:
-            overwork.append({"user_id": r["user_id"], "display_name": r["display_name"],
-                             "max_day_hours": round(avg_h, 1)})
-        if 0 < avg_h < 2:
-            underwork.append({"user_id": r["user_id"], "display_name": r["display_name"],
-                              "avg_day_hours": round(avg_h, 1)})
-
-    # Re-bucketiza horas UTC em datas LOCAIS (BRT, offset fixo). 1 barra por dia local.
-    _daily_map: dict[str, dict] = {}
-    for _r in _hour_dur:
-        _d = _utc_hour_to_local_day(_r["h"])
+    # ---- Agregações em memória (poucas centenas/milhares de linhas) ----
+    active_total = afk_total = today_active = 0.0
+    active_by_user: dict[str, float] = {}
+    users_seen: set[str] = set()
+    _hourly_local: dict[int, float] = {}     # heatmap por hora local (BRT)
+    _daily_map: dict[str, dict] = {}         # 1 barra por dia local (BRT)
+    for r in rows:
+        h    = r["h"]
+        uid  = r["user_id"]
+        act  = float(r["active"] or 0.0)
+        afkv = float(r["afk"] or 0.0)
+        active_total += act
+        afk_total    += afkv
+        if h >= today_h:
+            today_active += act
+        active_by_user[uid] = active_by_user.get(uid, 0.0) + act
+        users_seen.add(uid)
+        try:                                  # heatmap: hora UTC -> hora local
+            _lh = (int(h[11:13]) + DASH_TZ_OFFSET_HOURS) % 24
+            _hourly_local[_lh] = _hourly_local.get(_lh, 0.0) + act
+        except (ValueError, IndexError):
+            pass
+        _d = _utc_hour_to_local_day(h)        # barra diária: hora UTC -> dia local
         _e = _daily_map.setdefault(_d, {"day": _d, "active": 0.0, "afk": 0.0, "_users": set()})
-        _e["active"] += _r["active"] or 0.0
-        _e["afk"]    += _r["afk"] or 0.0
-    for _r in _hour_usr:
-        _d = _utc_hour_to_local_day(_r["h"])
-        _daily_map.setdefault(_d, {"day": _d, "active": 0.0, "afk": 0.0, "_users": set()})["_users"].add(_r["user_id"])
+        _e["active"] += act
+        _e["afk"]    += afkv
+        _e["_users"].add(uid)
+
     daily = [{"day": v["day"], "active": v["active"], "afk": v["afk"], "users": len(v["_users"])}
              for v in sorted(_daily_map.values(), key=lambda x: x["day"])]
 
-    # Re-bucketiza horas UTC -> hora LOCAL (BRT) para o heatmap "Quando a equipe trabalha".
-    _hourly_local: dict[int, float] = {}
-    for _hr in hourly:
-        _lh = (int(_hr["hour"]) + DASH_TZ_OFFSET_HOURS) % 24
-        _hourly_local[_lh] = _hourly_local.get(_lh, 0.0) + (_hr["seconds"] or 0.0)
+    # online + por departamento (lista completa de usuários, inclui os zerados)
+    online = 0
+    _dept_map: dict[str, dict] = {}
+    overwork, underwork = [], []
+    for u in urows:
+        uid = u["user_id"]
+        if u["last_seen"] and u["last_seen"] >= online_threshold:
+            online += 1
+        ua = active_by_user.get(uid, 0.0)
+        de = _dept_map.setdefault(u["dept"], {"dept": u["dept"], "users": 0, "active": 0.0})
+        de["users"]  += 1
+        de["active"] += ua
+        avg_h = (ua / 3600.0) / max(days, 1)
+        if avg_h > 10:
+            overwork.append({"user_id": uid, "display_name": u["display_name"],
+                             "max_day_hours": round(avg_h, 1)})
+        if 0 < avg_h < 2:
+            underwork.append({"user_id": uid, "display_name": u["display_name"],
+                              "avg_day_hours": round(avg_h, 1)})
+    by_dept = sorted(_dept_map.values(), key=lambda x: x["active"], reverse=True)
+    totals  = {"total_users": len(users_seen), "active": active_total, "afk": afk_total}
 
     result = {
         "tenant": tenant, "since": since, "days": days,
@@ -2036,19 +2453,41 @@ def admin_stats():
     h24 = (now - dt.timedelta(hours=24)).isoformat()
     d7  = (now - dt.timedelta(days=7)).isoformat()
     with db() as c:
+        # Tabelas pequenas: contagem exata, barata.
         tenants = c.execute("SELECT COUNT(*) AS n FROM tenants").fetchone()["n"]
         users   = c.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
         devices = c.execute("SELECT COUNT(*) AS n FROM devices").fetchone()["n"]
-        events  = c.execute("SELECT COUNT(*) AS n FROM events").fetchone()["n"]
         lic_act = c.execute("SELECT COUNT(*) AS n FROM licenses WHERE revoked=0").fetchone()["n"]
         lic_rev = c.execute("SELECT COUNT(*) AS n FROM licenses WHERE revoked=1").fetchone()["n"]
-        ev_24h  = c.execute("SELECT COUNT(*) AS n FROM events WHERE ts>=%s", (h24,)).fetchone()["n"]
-        ev_7d   = c.execute("SELECT COUNT(*) AS n FROM events WHERE ts>=%s", (d7,)).fetchone()["n"]
-        per_hour = c.execute(
-            """SELECT substr(ts,1,13) AS hour, COUNT(*) AS events
-               FROM events WHERE ts>=%s GROUP BY hour ORDER BY hour""",
-            (h24,),
-        ).fetchall()
+
+        # `events` é enorme: COUNT(*) cheio varre a tabela e travava o login do
+        # Platform Admin sob carga. Total = estimativa instantânea do planner; as
+        # contagens por janela ficam protegidas por statement_timeout (best-effort,
+        # nunca derrubam o /admin/stats).
+        try:
+            events = int(c.execute(
+                "SELECT reltuples::bigint AS n FROM pg_class WHERE relname='events'"
+            ).fetchone()["n"] or 0)
+        except Exception:
+            events = 0
+
+        ev_24h, ev_7d, per_hour = 0, 0, []
+        try:
+            c.execute("SET statement_timeout = '6s'")
+            ev_24h = c.execute("SELECT COUNT(*) AS n FROM events WHERE ts>=%s", (h24,)).fetchone()["n"]
+            ev_7d  = c.execute("SELECT COUNT(*) AS n FROM events WHERE ts>=%s", (d7,)).fetchone()["n"]
+            per_hour = c.execute(
+                """SELECT substr(ts,1,13) AS hour, COUNT(*) AS events
+                   FROM events WHERE ts>=%s GROUP BY hour ORDER BY hour""",
+                (h24,),
+            ).fetchall()
+        except Exception as exc:
+            print(f"[admin_stats] contagens de events puladas (lento/timeout): {exc}", flush=True)
+        finally:
+            try:
+                c.execute("SET statement_timeout = 0")
+            except Exception:
+                pass
         os_dist = c.execute(
             """SELECT COALESCE(os,'desconhecido') AS os, COUNT(*) AS n
                FROM devices GROUP BY os ORDER BY n DESC""",
@@ -2761,8 +3200,8 @@ PANEL_BASE_URL     = os.getenv("WORKPULSE_PANEL_URL", "https://workpulse.com.br/
 PLATFORM_NOTIFY    = os.getenv("WORKPULSE_NOTIFY_EMAIL", FROM_EMAIL)
 TOKEN_TTL_HOURS    = int(os.getenv("WORKPULSE_PWTOKEN_TTL_HOURS", "48"))
 
-CLIENT_ROLES   = ("admin_master", "supervisor", "lider")
-ALL_ROLES      = ("admin_master", "supervisor", "lider", "wp_admin")
+CLIENT_ROLES   = ("admin_master", "admin", "supervisor", "lider")
+ALL_ROLES      = ("admin_master", "admin", "supervisor", "lider", "wp_admin")
 
 # --- Tabelas novas (aditivas; init_db() as cria se não existirem) ----------
 _SCHEMA_STMTS.extend([
@@ -4516,14 +4955,14 @@ def _email_cfg_public(row) -> dict:
 
 
 @app.get("/v1/tenant-email-config")
-def tenant_email_config_get(tenant: str, ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+def tenant_email_config_get(tenant: str, ctx: Annotated[dict, Depends(require_role("admin_master", "admin"))]):
     tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
     return _email_cfg_public(_email_cfg_row(tid))
 
 
 @app.put("/v1/tenant-email-config")
 def tenant_email_config_set(body: EmailConfigIn, tenant: str, request: Request,
-                            ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+                            ctx: Annotated[dict, Depends(require_role("admin_master", "admin"))]):
     tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
     sec = (body.security or "tls").lower()
     if sec not in ("tls", "ssl", "none"):
@@ -4560,7 +4999,7 @@ def tenant_email_config_set(body: EmailConfigIn, tenant: str, request: Request,
 
 @app.post("/v1/tenant-email-config/test")
 def tenant_email_config_test(body: EmailTestIn, tenant: str,
-                             ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+                             ctx: Annotated[dict, Depends(require_role("admin_master", "admin"))]):
     tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
     row = _email_cfg_row(tid)
     if not row or not (row["host"] and row["username"] and row["password_enc"]):
@@ -4847,6 +5286,11 @@ def _compute_day_alerts(tenant: str, settings: dict, risky: list, allowed=None) 
                                "site": e["site"], "sample": e["sample"],
                                "minutes": round(e["sec"] / 60)})
 
+    # Ordena do maior para o menor (mais crítico no topo).
+    afk_list.sort(key=lambda x: x.get("afk_minutes", 0), reverse=True)
+    risky_list.sort(key=lambda x: x.get("minutes", 0), reverse=True)
+    absent_list.sort(key=lambda x: (x.get("display_name") or x.get("user_id") or "").lower())
+
     return {"afk_today": afk_list, "absent_today": absent_list, "risky_site": risky_list,
             "today_is_business": is_biz}
 
@@ -4993,7 +5437,7 @@ def alerts_today(tenant: str, request: Request, days: int = 7,
 
 
 @app.get("/v1/alerts/config")
-def alerts_config_get(tenant: str, ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+def alerts_config_get(tenant: str, ctx: Annotated[dict, Depends(require_role("admin_master", "admin"))]):
     tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
     s = _alert_settings(tid)
     return {
@@ -5009,7 +5453,7 @@ def alerts_config_get(tenant: str, ctx: Annotated[dict, Depends(require_role("ad
 
 @app.put("/v1/alerts/config")
 def alerts_config_set(body: AlertConfigIn, tenant: str, request: Request,
-                      ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+                      ctx: Annotated[dict, Depends(require_role("admin_master", "admin"))]):
     tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
     with db() as c:
         c.execute(
@@ -5049,7 +5493,7 @@ def alerts_config_set(body: AlertConfigIn, tenant: str, request: Request,
 
 @app.post("/v1/alerts/risky-sites")
 def alerts_risky_add(body: RiskySiteIn, tenant: str,
-                     ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+                     ctx: Annotated[dict, Depends(require_role("admin_master", "admin"))]):
     tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
     pat = (body.pattern or "").strip()
     if not pat:
@@ -5064,7 +5508,7 @@ def alerts_risky_add(body: RiskySiteIn, tenant: str,
 
 @app.delete("/v1/alerts/risky-sites/{rid}")
 def alerts_risky_del(rid: int, tenant: str,
-                     ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+                     ctx: Annotated[dict, Depends(require_role("admin_master", "admin"))]):
     tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
     with db() as c:
         c.execute("DELETE FROM risky_sites WHERE id=%s AND tenant_id=%s", (rid, tid))
@@ -5077,7 +5521,7 @@ class RiskyBulkIn(BaseModel):
 
 @app.post("/v1/alerts/risky-sites/bulk")
 def alerts_risky_bulk(body: RiskyBulkIn, tenant: str,
-                      ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+                      ctx: Annotated[dict, Depends(require_role("admin_master", "admin"))]):
     tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
     added, skipped = 0, 0
     with db() as c:
@@ -5181,6 +5625,812 @@ async def _alerts_worker() -> None:
         except Exception as exc:
             print(f"[alerts] worker erro: {exc}", flush=True)
         await asyncio.sleep(15 * 60)
+
+
+# ===========================================================================
+# Exclusão de coletas / colaboradores + lista de bloqueio de agentes.
+# Tudo restrito ao Admin Master (require_role("admin_master")).
+# ===========================================================================
+_SCHEMA_STMTS.extend([
+    """
+    CREATE TABLE IF NOT EXISTS blocked_devices (
+        tenant_id  TEXT NOT NULL,
+        user_id    TEXT NOT NULL,
+        reason     TEXT,
+        blocked_by TEXT,
+        blocked_at TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, user_id)
+    )
+    """,
+])
+
+
+def _purge_user_events(tenant: str, user_id: str) -> None:
+    """Apaga só as COLETAS de um colaborador (eventos + agregados + IPs), mantendo o cadastro."""
+    with db() as c:
+        c.execute("DELETE FROM events          WHERE tenant_id=%s AND user_id=%s", (tenant, user_id))
+        c.execute("DELETE FROM daily_summaries WHERE tenant_id=%s AND user_id=%s", (tenant, user_id))
+        c.execute("DELETE FROM client_ips      WHERE tenant_id=%s AND user_id=%s", (tenant, user_id))
+    _cache_bust(tenant)
+
+
+@app.post("/v1/users/{user_id}/purge-events")
+def purge_user_events_ep(user_id: str, tenant: str, request: Request,
+                         ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    """Limpar coletas: zera os dados coletados, mantém o colaborador na lista."""
+    tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
+    _purge_user_events(tid, user_id)
+    audit(ctx.get("email"), "user.purge_events", target=user_id, detail=f"tenant={tid}", ip=_client_ip(request))
+    return {"ok": True}
+
+
+@app.delete("/v1/users/{user_id}")
+def delete_user_full(user_id: str, tenant: str, request: Request,
+                     ctx: Annotated[dict, Depends(require_role("admin_master"))],
+                     block: bool = True):
+    """Excluir colaborador: remove cadastro + todas as coletas. Por padrão também
+    BLOQUEIA o agente (block=True) para não voltar a alimentar dados se ainda instalado."""
+    tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
+    _purge_user_events(tid, user_id)
+    with db() as c:
+        c.execute("DELETE FROM devices        WHERE tenant_id=%s AND user_id=%s", (tid, user_id))
+        c.execute("DELETE FROM dash_seat_alloc WHERE tenant_id=%s AND user_id=%s", (tid, user_id))
+        c.execute("DELETE FROM lider_scope    WHERE tenant_id=%s AND scope_type='user' AND scope_value=%s", (tid, user_id))
+        c.execute("DELETE FROM users          WHERE tenant_id=%s AND user_id=%s", (tid, user_id))
+        if block:
+            c.execute(
+                "INSERT INTO blocked_devices (tenant_id, user_id, reason, blocked_by, blocked_at) "
+                "VALUES (%s,%s,%s,%s,%s) ON CONFLICT (tenant_id, user_id) DO NOTHING",
+                (tid, user_id, "excluído pelo Admin Master", ctx.get("email"), _now_utc().isoformat()),
+            )
+    _cache_bust(tid)
+    audit(ctx.get("email"), "user.delete", target=user_id, detail=f"tenant={tid};block={block}", ip=_client_ip(request))
+    return {"ok": True, "blocked": bool(block)}
+
+
+@app.get("/v1/blocked-devices")
+def blocked_devices_list(tenant: str, ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
+    with db() as c:
+        rows = c.execute(
+            "SELECT user_id, reason, blocked_by, blocked_at FROM blocked_devices "
+            "WHERE tenant_id=%s ORDER BY blocked_at DESC", (tid,),
+        ).fetchall()
+    return {"blocked": [dict(r) for r in rows]}
+
+
+@app.delete("/v1/blocked-devices/{user_id}")
+def blocked_devices_unblock(user_id: str, tenant: str, request: Request,
+                            ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    """Desbloquear: o agente volta a poder enviar coletas (recria o usuário no próximo envio)."""
+    tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
+    with db() as c:
+        c.execute("DELETE FROM blocked_devices WHERE tenant_id=%s AND user_id=%s", (tid, user_id))
+    audit(ctx.get("email"), "device.unblock", target=user_id, detail=f"tenant={tid}", ip=_client_ip(request))
+    return {"ok": True}
+
+
+# ===========================================================================
+# Configuração CENTRAL do agente — global (Platform Admin) + override por tenant
+# (Admin Master). O agente busca em /v1/agent/config (autenticado pela licença) e
+# aplica sem precisar recompilar/reinstalar para mudanças de lista.
+# ===========================================================================
+_SCHEMA_STMTS.extend([
+    """
+    CREATE TABLE IF NOT EXISTS agent_config_global (
+        id                     INTEGER PRIMARY KEY,
+        afk_timeout_sec        INTEGER,
+        poll_interval_ms       INTEGER,
+        heartbeat_interval_sec INTEGER,
+        capture_titles         BOOLEAN,
+        meeting_patterns       TEXT,
+        updated_at             TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS agent_config_tenant (
+        tenant_id              TEXT PRIMARY KEY,
+        afk_timeout_sec        INTEGER,
+        poll_interval_ms       INTEGER,
+        heartbeat_interval_sec INTEGER,
+        capture_titles         BOOLEAN,
+        meeting_patterns       TEXT,
+        updated_at             TEXT
+    )
+    """,
+])
+
+# ---------------------------------------------------------------------------
+# Tabelas de ROLLUP (agregados pré-computados p/ os painéis).
+# O dashboard lê destas tabelas (centenas de linhas) em vez de varrer events
+# (centenas de milhares). Um worker as mantém atualizadas incrementalmente.
+# ---------------------------------------------------------------------------
+_SCHEMA_STMTS.extend([
+    # Ativo/AFK por (usuário, hora-UTC). 'hour' = 'YYYY-MM-DDTHH'.
+    """
+    CREATE TABLE IF NOT EXISTS agg_user_hour (
+        tenant_id  TEXT NOT NULL,
+        user_id    TEXT NOT NULL,
+        hour       TEXT NOT NULL,
+        active_sec DOUBLE PRECISION NOT NULL DEFAULT 0,
+        afk_sec    DOUBLE PRECISION NOT NULL DEFAULT 0,
+        UNIQUE (tenant_id, user_id, hour)
+    )
+    """,
+    # Jornada por (usuário, dia-LOCAL). 'day' = 'YYYY-MM-DD' no fuso REPORT_TZ.
+    """
+    CREATE TABLE IF NOT EXISTS agg_user_day (
+        tenant_id     TEXT NOT NULL,
+        user_id       TEXT NOT NULL,
+        day           TEXT NOT NULL,
+        focus_sec     DOUBLE PRECISION NOT NULL DEFAULT 0,
+        afk_in_sec    DOUBLE PRECISION NOT NULL DEFAULT 0,
+        afk_after_sec DOUBLE PRECISION NOT NULL DEFAULT 0,
+        start_sec     DOUBLE PRECISION NOT NULL DEFAULT 0,
+        end_sec       DOUBLE PRECISION NOT NULL DEFAULT 0,
+        UNIQUE (tenant_id, user_id, day)
+    )
+    """,
+    # Tempo ativo por (dia-LOCAL, app) — alimenta o "Top Aplicações".
+    # 'app' = representante (MIN) do grupo case-insensitive, igual à query ao vivo.
+    """
+    CREATE TABLE IF NOT EXISTS agg_app_day (
+        tenant_id  TEXT NOT NULL,
+        day        TEXT NOT NULL,
+        app        TEXT NOT NULL,
+        active_sec DOUBLE PRECISION NOT NULL DEFAULT 0,
+        UNIQUE (tenant_id, day, app)
+    )
+    """,
+    # Cursor de backfill por tenant. oldest_day = dia local mais antigo já agregado;
+    # [oldest_day .. hoje] é contíguo. done=TRUE quando alcançou a retenção.
+    """
+    CREATE TABLE IF NOT EXISTS rollup_state (
+        tenant_id  TEXT PRIMARY KEY,
+        oldest_day TEXT,
+        done       BOOLEAN NOT NULL DEFAULT FALSE,
+        ver        INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT
+    )
+    """,
+    # Migração p/ instalações que já tinham rollup_state sem a coluna 'ver'.
+    "ALTER TABLE rollup_state ADD COLUMN IF NOT EXISTS ver INTEGER NOT NULL DEFAULT 0",
+    "CREATE INDEX IF NOT EXISTS idx_agg_uh_tenant_hour ON agg_user_hour(tenant_id, hour)",
+    "CREATE INDEX IF NOT EXISTS idx_agg_ud_tenant_day  ON agg_user_day(tenant_id, day)",
+    "CREATE INDEX IF NOT EXISTS idx_agg_ad_tenant_day  ON agg_app_day(tenant_id, day)",
+])
+
+# ---------------------------------------------------------------------------
+# Releases do agente — histórico de instaladores (.msi/.deb) p/ download.
+# Arquivos ficam na bucket privada (WORKPULSE_RELEASES_BUCKET); aqui só o manifesto.
+# ---------------------------------------------------------------------------
+_SCHEMA_STMTS.extend([
+    """
+    CREATE TABLE IF NOT EXISTS agent_releases (
+        id          BIGSERIAL PRIMARY KEY,
+        channel     TEXT NOT NULL DEFAULT 'generic',   -- 'generic' ou 'tenant:<id>'
+        tenant_id   TEXT,
+        os          TEXT NOT NULL,                      -- 'windows' | 'linux'
+        arch        TEXT NOT NULL DEFAULT 'amd64',
+        version     TEXT NOT NULL,
+        filename    TEXT NOT NULL,
+        s3_key      TEXT NOT NULL,
+        sha256      TEXT NOT NULL,
+        size_bytes  BIGINT NOT NULL DEFAULT 0,
+        notes       TEXT,
+        is_latest   BOOLEAN NOT NULL DEFAULT FALSE,
+        uploaded_by TEXT,
+        created_at  TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_agent_releases_chan ON agent_releases(channel, os, created_at DESC)",
+])
+
+# ---------------------------------------------------------------------------
+# Enrollment — onboarding do agente genérico (código → licença do tenant).
+# ---------------------------------------------------------------------------
+_SCHEMA_STMTS.extend([
+    """
+    CREATE TABLE IF NOT EXISTS enrollment_codes (
+        code        TEXT PRIMARY KEY,
+        tenant_id   TEXT NOT NULL,
+        label       TEXT,
+        active      BOOLEAN NOT NULL DEFAULT TRUE,
+        expires_at  TEXT,                 -- null = permanente
+        created_by  TEXT,
+        created_at  TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS enrolled_devices (
+        id           BIGSERIAL PRIMARY KEY,
+        tenant_id    TEXT NOT NULL,
+        device_id    TEXT NOT NULL,
+        code         TEXT,
+        status       TEXT NOT NULL DEFAULT 'pending',  -- pending|approved|rejected
+        hostname     TEXT,
+        os           TEXT,
+        requested_at TEXT NOT NULL,
+        decided_at   TEXT,
+        decided_by   TEXT,
+        UNIQUE (tenant_id, device_id)
+    )
+    """,
+    # Flag por tenant: exigir aprovação manual de novos agentes (default: sim).
+    "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS enroll_approval BOOLEAN NOT NULL DEFAULT TRUE",
+    "CREATE INDEX IF NOT EXISTS idx_enroll_codes_tenant   ON enrollment_codes(tenant_id)",
+    "CREATE INDEX IF NOT EXISTS idx_enrolled_dev_tenant   ON enrolled_devices(tenant_id, status)",
+])
+
+# Fallback embutido (se não houver linha global ainda). Espelha os defaults do agente.
+_AGENT_CFG_DEFAULTS = {
+    "afk_timeout_sec": 180,
+    "poll_interval_ms": 1000,
+    "heartbeat_interval_sec": 5,
+    "capture_titles": True,
+    "meeting_patterns": [
+        "meet.google.com", "google meet", "meet -", "meet:",
+        "teams.microsoft.com", "microsoft teams",
+        "zoom meeting", "zoom.us",
+        "webex", "whereby.com", "gotomeeting", "goto meeting", "bluejeans",
+    ],
+}
+_AGENT_CFG_FIELDS = ("afk_timeout_sec", "poll_interval_ms", "heartbeat_interval_sec",
+                     "capture_titles", "meeting_patterns")
+
+
+def _agent_cfg_decode(row) -> dict:
+    """Linha (global ou tenant) → dict só com os campos NÃO nulos."""
+    out = {}
+    if not row:
+        return out
+    for f in _AGENT_CFG_FIELDS:
+        v = row[f]
+        if v is None:
+            continue
+        if f == "meeting_patterns":
+            try:
+                out[f] = json.loads(v) if isinstance(v, str) else v
+            except Exception:
+                continue
+        elif f == "capture_titles":
+            out[f] = bool(v)
+        else:
+            out[f] = int(v)
+    return out
+
+
+def _agent_cfg_global() -> dict:
+    with db() as c:
+        row = c.execute("SELECT * FROM agent_config_global WHERE id=1").fetchone()
+    eff = dict(_AGENT_CFG_DEFAULTS)
+    eff.update(_agent_cfg_decode(row))
+    return eff
+
+
+def _agent_cfg_effective(tenant: str) -> dict:
+    eff = _agent_cfg_global()
+    with db() as c:
+        row = c.execute("SELECT * FROM agent_config_tenant WHERE tenant_id=%s", (tenant,)).fetchone()
+    eff.update(_agent_cfg_decode(row))   # override por tenant vence o global
+    return eff
+
+
+def _agent_cfg_upsert(table: str, key_col: str, key_val, body: "AgentCfgIn", allow_null: bool):
+    """Grava global (allow_null=False: usa default quando vier vazio) ou override
+    por tenant (allow_null=True: vazio = herda global)."""
+    def col(field, default):
+        v = getattr(body, field)
+        if v is None:
+            return None if allow_null else default
+        return v
+    mp = getattr(body, "meeting_patterns")
+    mp_val = (None if (mp is None and allow_null)
+              else json.dumps(mp if mp is not None else _AGENT_CFG_DEFAULTS["meeting_patterns"]))
+    with db() as c:
+        c.execute(
+            f"""INSERT INTO {table}
+                  ({key_col}, afk_timeout_sec, poll_interval_ms, heartbeat_interval_sec,
+                   capture_titles, meeting_patterns, updated_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT ({key_col}) DO UPDATE SET
+                  afk_timeout_sec=EXCLUDED.afk_timeout_sec,
+                  poll_interval_ms=EXCLUDED.poll_interval_ms,
+                  heartbeat_interval_sec=EXCLUDED.heartbeat_interval_sec,
+                  capture_titles=EXCLUDED.capture_titles,
+                  meeting_patterns=EXCLUDED.meeting_patterns,
+                  updated_at=EXCLUDED.updated_at""",
+            (key_val,
+             col("afk_timeout_sec", _AGENT_CFG_DEFAULTS["afk_timeout_sec"]),
+             col("poll_interval_ms", _AGENT_CFG_DEFAULTS["poll_interval_ms"]),
+             col("heartbeat_interval_sec", _AGENT_CFG_DEFAULTS["heartbeat_interval_sec"]),
+             col("capture_titles", _AGENT_CFG_DEFAULTS["capture_titles"]),
+             mp_val, _now_utc().isoformat()),
+        )
+
+
+class AgentCfgIn(BaseModel):
+    afk_timeout_sec:        int | None = None
+    poll_interval_ms:       int | None = None
+    heartbeat_interval_sec: int | None = None
+    capture_titles:         bool | None = None
+    meeting_patterns:       list[str] | None = None
+
+
+# --- Agente: busca a config efetiva (autenticado pela licença) ---
+@app.get("/v1/agent/config")
+def agent_config_fetch(authorization: Annotated[str | None, Header()] = None,
+                       x_tenant: Annotated[str | None, Header()] = None):
+    if not x_tenant:
+        raise HTTPException(status_code=400, detail="X-Tenant header required")
+    token  = parse_bearer(authorization)
+    claims = validate_agent_token(token, x_tenant)
+    return _agent_cfg_effective(claims["tenant"])
+
+
+# --- Platform Admin: config GLOBAL (vale para todos os tenants) ---
+@app.get("/v1/admin/agent-config", dependencies=[Depends(require_admin)])
+def admin_agent_config_get():
+    return {"global": _agent_cfg_global(), "defaults": _AGENT_CFG_DEFAULTS}
+
+
+@app.put("/v1/admin/agent-config", dependencies=[Depends(require_admin)])
+def admin_agent_config_set(body: AgentCfgIn):
+    _agent_cfg_upsert("agent_config_global", "id", 1, body, allow_null=False)
+    return {"ok": True, "global": _agent_cfg_global()}
+
+
+# --- Tenant (Admin Master): override do tenant (vazio = herda global) ---
+@app.get("/v1/agent-config")
+def tenant_agent_config_get(tenant: str, ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
+    with db() as c:
+        row = c.execute("SELECT * FROM agent_config_tenant WHERE tenant_id=%s", (tid,)).fetchone()
+    return {
+        "global":    _agent_cfg_global(),
+        "override":  _agent_cfg_decode(row),    # só os campos sobrescritos
+        "effective": _agent_cfg_effective(tid),
+    }
+
+
+@app.put("/v1/agent-config")
+def tenant_agent_config_set(body: AgentCfgIn, tenant: str, request: Request,
+                            ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
+    _agent_cfg_upsert("agent_config_tenant", "tenant_id", tid, body, allow_null=True)
+    audit(ctx.get("email"), "agent_config.set", target=tid, ip=_client_ip(request))
+    return {"ok": True, "effective": _agent_cfg_effective(tid)}
+
+
+# ===========================================================================
+# Releases do agente (Platform Admin) — upload / histórico / download
+# ===========================================================================
+RELEASES_BUCKET = os.getenv("WORKPULSE_RELEASES_BUCKET", "")
+_RELEASES_MAX_MB = int(os.getenv("WORKPULSE_RELEASES_MAX_MB", "200"))
+
+
+def _s3():
+    import boto3
+    return boto3.client("s3", region_name=os.getenv("AWS_REGION", "us-east-1"))
+
+
+def _release_row(r: dict) -> dict:
+    d = dict(r)
+    d.pop("s3_key", None)   # caminho interno não vai pro cliente
+    return d
+
+
+@app.post("/v1/admin/releases", dependencies=[Depends(require_admin)])
+def releases_upload(
+    request: Request,
+    body:      Annotated[bytes, Body(media_type="application/octet-stream")],
+    os_:       Annotated[str, Query(alias="os", pattern="^(windows|linux)$")],
+    version:   str,
+    filename:  str,
+    arch:      str = "amd64",
+    channel:   str = "generic",
+    tenant_id: str | None = None,
+    notes:     str | None = None,
+):
+    if not RELEASES_BUCKET:
+        raise HTTPException(500, "bucket de releases não configurado")
+    if not body:
+        raise HTTPException(400, "arquivo vazio")
+    if len(body) > _RELEASES_MAX_MB * 1024 * 1024:
+        raise HTTPException(413, f"arquivo acima de {_RELEASES_MAX_MB} MB")
+    if not _re.match(r"^\d+\.\d+\.\d+$", version):
+        raise HTTPException(400, "versão inválida (use MAJOR.MINOR.PATCH)")
+
+    safe_name = os.path.basename(filename).replace("\\", "").strip() or f"agent-{version}"
+    chan = channel if channel == "generic" else f"tenant:{tenant_id or ''}"
+    s3_key = f"{chan}/{os_}/{version}/{safe_name}"
+    sha = _hashlib.sha256(body).hexdigest()
+
+    _s3().put_object(Bucket=RELEASES_BUCKET, Key=s3_key, Body=body,
+                     ContentType="application/octet-stream")
+
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
+    with db() as c:
+        row = c.execute(
+            """INSERT INTO agent_releases
+                   (channel, tenant_id, os, arch, version, filename, s3_key,
+                    sha256, size_bytes, notes, is_latest, uploaded_by, created_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,FALSE,%s,%s)
+               RETURNING *""",
+            (chan, tenant_id, os_, arch, version, safe_name, s3_key,
+             sha, len(body), notes, "platform-admin", now),
+        ).fetchone()
+    audit("platform-admin", "release.upload", target=f"{chan}/{os_}/{version}",
+          detail=f"sha256={sha[:12]} size={len(body)}", ip=_client_ip(request))
+    return {"ok": True, "release": _release_row(row)}
+
+
+@app.get("/v1/admin/releases", dependencies=[Depends(require_admin)])
+def releases_list(channel: str | None = None, os_: Annotated[str | None, Query(alias="os")] = None):
+    where, args = [], []
+    if channel:
+        where.append("channel=%s"); args.append(channel)
+    if os_:
+        where.append("os=%s"); args.append(os_)
+    sql = "SELECT * FROM agent_releases"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY created_at DESC"
+    with db() as c:
+        rows = c.execute(sql, tuple(args)).fetchall()
+    return {"releases": [_release_row(r) for r in rows]}
+
+
+@app.put("/v1/admin/releases/{rid}/promote", dependencies=[Depends(require_admin)])
+def releases_promote(rid: int, request: Request):
+    with db() as c:
+        r = c.execute("SELECT channel, os, version FROM agent_releases WHERE id=%s", (rid,)).fetchone()
+        if not r:
+            raise HTTPException(404, "release não encontrada")
+        # Só uma "última" por (canal, SO).
+        c.execute("UPDATE agent_releases SET is_latest=FALSE WHERE channel=%s AND os=%s",
+                  (r["channel"], r["os"]))
+        c.execute("UPDATE agent_releases SET is_latest=TRUE WHERE id=%s", (rid,))
+    audit("platform-admin", "release.promote",
+          target=f"{r['channel']}/{r['os']}/{r['version']}", ip=_client_ip(request))
+    return {"ok": True}
+
+
+@app.get("/v1/admin/releases/{rid}/download", dependencies=[Depends(require_admin)])
+def releases_download(rid: int, expires: int = 300):
+    if not RELEASES_BUCKET:
+        raise HTTPException(500, "bucket de releases não configurado")
+    # 1 min … 7 dias (limite do SigV4). 300s = download imediato; 24h = link p/ compartilhar.
+    expires = max(60, min(int(expires), 604800))
+    with db() as c:
+        r = c.execute("SELECT s3_key, filename FROM agent_releases WHERE id=%s", (rid,)).fetchone()
+    if not r:
+        raise HTTPException(404, "release não encontrada")
+    url = _s3().generate_presigned_url(
+        "get_object",
+        Params={
+            "Bucket": RELEASES_BUCKET, "Key": r["s3_key"],
+            "ResponseContentDisposition": f'attachment; filename="{r["filename"]}"',
+        },
+        ExpiresIn=expires,
+    )
+    return {"url": url, "expires_in": expires}
+
+
+@app.delete("/v1/admin/releases/{rid}", dependencies=[Depends(require_admin)])
+def releases_delete(rid: int, request: Request):
+    with db() as c:
+        r = c.execute("SELECT s3_key, channel, os, version FROM agent_releases WHERE id=%s", (rid,)).fetchone()
+        if not r:
+            raise HTTPException(404, "release não encontrada")
+        c.execute("DELETE FROM agent_releases WHERE id=%s", (rid,))
+    if RELEASES_BUCKET:
+        try:
+            _s3().delete_object(Bucket=RELEASES_BUCKET, Key=r["s3_key"])
+        except Exception as exc:
+            print(f"[releases] falha ao remover do S3: {exc}", flush=True)
+    audit("platform-admin", "release.delete",
+          target=f"{r['channel']}/{r['os']}/{r['version']}", ip=_client_ip(request))
+    return {"ok": True}
+
+
+# ===========================================================================
+# Enrollment — onboarding do agente genérico
+#   Público:      POST /v1/enroll        (o agente troca o código pela licença)
+#   Admin Master: gerar/listar/revogar códigos, ajustar aprovação, fila pendente
+# ===========================================================================
+class EnrollIn(BaseModel):
+    code:     str
+    device:   str
+    os:       str | None = None
+    hostname: str | None = None
+
+
+def _gen_enroll_code() -> str:
+    return "-".join(secrets.token_hex(2).upper() for _ in range(3))  # AAAA-BBBB-CCCC
+
+
+def _tenant_license_token(c, tenant: str) -> str | None:
+    r = c.execute(
+        "SELECT token FROM licenses WHERE tenant_id=%s AND revoked=0 ORDER BY issued DESC LIMIT 1",
+        (tenant,),
+    ).fetchone()
+    return r["token"] if r else None
+
+
+@app.post("/v1/enroll")
+def enroll(req: EnrollIn, request: Request):
+    """Troca um código de enrollment pela licença do tenant. Sem auth — o código
+    É a credencial. Se o tenant exige aprovação, o device entra como 'pendente'."""
+    code = (req.code or "").strip().upper()
+    if not code:
+        raise HTTPException(400, "código ausente")
+    if not (req.device or "").strip():
+        raise HTTPException(400, "device ausente")
+    now = dt.datetime.now(dt.timezone.utc)
+    with db() as c:
+        cr = c.execute(
+            "SELECT tenant_id, active, expires_at FROM enrollment_codes WHERE code=%s", (code,)
+        ).fetchone()
+        if not cr or not cr["active"]:
+            raise HTTPException(403, "código inválido")
+        if cr["expires_at"] and cr["expires_at"] < now.isoformat():
+            raise HTTPException(403, "código expirado")
+        tenant = cr["tenant_id"]
+
+        ap = c.execute("SELECT COALESCE(enroll_approval, TRUE) AS a FROM tenants WHERE id=%s",
+                       (tenant,)).fetchone()
+        need_approval = bool(ap["a"]) if ap else True
+
+        dev = c.execute(
+            "SELECT status FROM enrolled_devices WHERE tenant_id=%s AND device_id=%s",
+            (tenant, req.device),
+        ).fetchone()
+        if dev:
+            status = dev["status"]
+        else:
+            status = "pending" if need_approval else "approved"
+            c.execute(
+                """INSERT INTO enrolled_devices
+                       (tenant_id, device_id, code, status, hostname, os,
+                        requested_at, decided_at, decided_by)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (tenant, req.device, code, status, req.hostname, req.os, now.isoformat(),
+                 now.isoformat() if status == "approved" else None,
+                 "auto" if status == "approved" else None),
+            )
+
+        if status == "approved":
+            token = _tenant_license_token(c, tenant)
+            if not token:
+                raise HTTPException(409, "tenant sem licença ativa")
+            return {"status": "approved", "tenant": tenant, "license_key": token}
+        if status == "rejected":
+            return {"status": "rejected"}
+        return {"status": "pending"}
+
+
+# ----------------------- Admin Master: gestão -----------------------
+def _enroll_tid(ctx, tenant):
+    return ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
+
+
+@app.get("/v1/enroll-settings")
+def enroll_settings_get(tenant: str, ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    tid = _enroll_tid(ctx, tenant)
+    with db() as c:
+        r = c.execute("SELECT COALESCE(enroll_approval, TRUE) AS a FROM tenants WHERE id=%s", (tid,)).fetchone()
+    return {"approval_required": bool(r["a"]) if r else True}
+
+
+class EnrollSettingsIn(BaseModel):
+    approval_required: bool
+
+
+@app.put("/v1/enroll-settings")
+def enroll_settings_set(body: EnrollSettingsIn, tenant: str, request: Request,
+                        ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    tid = _enroll_tid(ctx, tenant)
+    with db() as c:
+        c.execute("UPDATE tenants SET enroll_approval=%s WHERE id=%s", (body.approval_required, tid))
+    audit(ctx.get("email"), "enroll.settings", target=tid,
+          detail=f"approval={body.approval_required}", ip=_client_ip(request))
+    return {"ok": True, "approval_required": body.approval_required}
+
+
+@app.get("/v1/enroll-codes")
+def enroll_codes_list(tenant: str, ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    tid = _enroll_tid(ctx, tenant)
+    with db() as c:
+        rows = c.execute(
+            "SELECT code, label, active, expires_at, created_at FROM enrollment_codes "
+            "WHERE tenant_id=%s ORDER BY created_at DESC", (tid,),
+        ).fetchall()
+    return {"codes": [dict(r) for r in rows]}
+
+
+class EnrollCodeIn(BaseModel):
+    label:      str | None = None
+    days_valid: int | None = None   # null = permanente
+
+
+@app.post("/v1/enroll-codes")
+def enroll_codes_create(body: EnrollCodeIn, tenant: str, request: Request,
+                        ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    tid = _enroll_tid(ctx, tenant)
+    now = dt.datetime.now(dt.timezone.utc)
+    expires = None
+    if body.days_valid and body.days_valid > 0:
+        expires = (now + dt.timedelta(days=int(body.days_valid))).isoformat()
+    code = _gen_enroll_code()
+    with db() as c:
+        c.execute(
+            "INSERT INTO enrollment_codes (code, tenant_id, label, active, expires_at, created_by, created_at) "
+            "VALUES (%s,%s,%s,TRUE,%s,%s,%s)",
+            (code, tid, (body.label or None), expires, ctx.get("email"), now.isoformat()),
+        )
+    audit(ctx.get("email"), "enroll.code.create", target=tid, detail=code, ip=_client_ip(request))
+    return {"ok": True, "code": code, "expires_at": expires}
+
+
+@app.delete("/v1/enroll-codes/{code}")
+def enroll_codes_revoke(code: str, tenant: str, request: Request,
+                        ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    tid = _enroll_tid(ctx, tenant)
+    with db() as c:
+        c.execute("UPDATE enrollment_codes SET active=FALSE WHERE code=%s AND tenant_id=%s",
+                  (code.upper(), tid))
+    audit(ctx.get("email"), "enroll.code.revoke", target=tid, detail=code, ip=_client_ip(request))
+    return {"ok": True}
+
+
+@app.get("/v1/enroll-devices")
+def enroll_devices_list(tenant: str, ctx: Annotated[dict, Depends(require_role("admin_master"))],
+                        status: str | None = None):
+    tid = _enroll_tid(ctx, tenant)
+    where, args = ["tenant_id=%s"], [tid]
+    if status:
+        where.append("status=%s"); args.append(status)
+    with db() as c:
+        rows = c.execute(
+            f"SELECT id, device_id, code, status, hostname, os, requested_at, decided_at, decided_by "
+            f"FROM enrolled_devices WHERE {' AND '.join(where)} ORDER BY requested_at DESC LIMIT 500",
+            tuple(args),
+        ).fetchall()
+    return {"devices": [dict(r) for r in rows]}
+
+
+class EnrollDecisionIn(BaseModel):
+    action: str   # 'approve' | 'reject'
+
+
+@app.post("/v1/enroll-devices/{did}/decide")
+def enroll_device_decide(did: int, body: EnrollDecisionIn, tenant: str, request: Request,
+                         ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    tid = _enroll_tid(ctx, tenant)
+    if body.action not in ("approve", "reject"):
+        raise HTTPException(400, "ação inválida")
+    new_status = "approved" if body.action == "approve" else "rejected"
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
+    with db() as c:
+        r = c.execute("SELECT device_id FROM enrolled_devices WHERE id=%s AND tenant_id=%s",
+                      (did, tid)).fetchone()
+        if not r:
+            raise HTTPException(404, "device não encontrado")
+        c.execute(
+            "UPDATE enrolled_devices SET status=%s, decided_at=%s, decided_by=%s WHERE id=%s",
+            (new_status, now, ctx.get("email"), did),
+        )
+    audit(ctx.get("email"), f"enroll.device.{body.action}", target=tid,
+          detail=r["device_id"], ip=_client_ip(request))
+    return {"ok": True, "status": new_status}
+
+
+@app.delete("/v1/enroll-devices/{did}")
+def enroll_device_delete(did: int, tenant: str, request: Request,
+                         ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    """Remove o registro de enrollment do device. Se ele re-enrollar depois,
+    passa pela fila de novo. Não revoga licença já entregue nem para coleta em
+    andamento (para isso, use 'Agentes bloqueados')."""
+    tid = _enroll_tid(ctx, tenant)
+    with db() as c:
+        r = c.execute("SELECT device_id FROM enrolled_devices WHERE id=%s AND tenant_id=%s",
+                      (did, tid)).fetchone()
+        if not r:
+            raise HTTPException(404, "device não encontrado")
+        c.execute("DELETE FROM enrolled_devices WHERE id=%s AND tenant_id=%s", (did, tid))
+    audit(ctx.get("email"), "enroll.device.delete", target=tid,
+          detail=r["device_id"], ip=_client_ip(request))
+    return {"ok": True}
+
+
+# ===========================================================================
+# Diagnóstico — dump dos eventos crus de um colaborador (Platform Admin)
+# Útil p/ investigar dados estranhos (ex.: AFK > tempo decorrido).
+# ===========================================================================
+@app.get("/v1/admin/events-dump", dependencies=[Depends(require_admin)])
+def admin_events_dump(tenant: str, match: str,
+                      since: str | None = None, until: str | None = None,
+                      bucket: str | None = None, limit: int = 200000):
+    now = dt.datetime.now(dt.timezone.utc)
+    if since is None:
+        since = (now - dt.timedelta(days=3)).isoformat()
+    if until is None:
+        until = now.isoformat()
+    m = f"%{(match or '').strip()}%"
+    with db() as c:
+        urows = c.execute(
+            """SELECT DISTINCT u.user_id, u.display_name
+               FROM users u
+               LEFT JOIN devices d ON d.tenant_id=u.tenant_id AND d.user_id=u.user_id
+               WHERE u.tenant_id=%s
+                 AND (u.user_id ILIKE %s OR u.display_name ILIKE %s OR d.hostname ILIKE %s)""",
+            (tenant, m, m, m),
+        ).fetchall()
+        uids = [r["user_id"] for r in urows]
+        events = []
+        if uids:
+            where = ["tenant_id=%s", "user_id = ANY(%s)", "ts>=%s", "ts<=%s"]
+            args: list = [tenant, uids, since, until]
+            if bucket:
+                where.append("bucket=%s"); args.append(bucket)
+            events = c.execute(
+                f"SELECT user_id, device_id, bucket, ts, duration_sec, data_json "
+                f"FROM events WHERE {' AND '.join(where)} ORDER BY ts LIMIT %s",
+                tuple(args + [int(limit)]),
+            ).fetchall()
+    return {
+        "tenant": tenant, "match": match, "since": since, "until": until,
+        "users":  [dict(r) for r in urows],
+        "count":  len(events),
+        "events": [dict(r) for r in events],
+    }
+
+
+@app.get("/v1/admin/dup-report", dependencies=[Depends(require_admin)])
+def admin_dup_report(tenant: str, since: str | None = None, until: str | None = None):
+    """Relatório por usuário (uma linha cada): total de eventos, estimativa de
+    DUPLICATAS (total - distintos por ts|bucket|duração) e o maior AFK. Serve p/
+    ver se a duplicação/AFK gigante é da frota ou de uma máquina só. Período
+    padrão = hoje (UTC) — passe since/until p/ ampliar a janela."""
+    now = dt.datetime.now(dt.timezone.utc)
+    if since is None:
+        since = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    if until is None:
+        until = now.isoformat()
+    with db() as c:
+        rows = c.execute(
+            """SELECT u.user_id,
+                      COALESCE(u.display_name, u.user_id) AS name,
+                      COUNT(*)                                              AS total,
+                      COUNT(*) FILTER (WHERE e.bucket='afk')               AS afk_events,
+                      COUNT(*) - COUNT(DISTINCT
+                          (e.ts || '|' || e.bucket || '|' || e.duration_sec::text)) AS dups,
+                      COALESCE(MAX(e.duration_sec) FILTER (WHERE e.bucket='afk'), 0) AS max_afk_sec,
+                      COUNT(*) FILTER (WHERE e.bucket='afk' AND e.duration_sec > 3600) AS afk_gt_1h
+               FROM users u
+               JOIN events e ON e.tenant_id=u.tenant_id AND e.user_id=u.user_id
+                    AND e.ts>=%s AND e.ts<=%s
+               WHERE u.tenant_id=%s
+               GROUP BY u.user_id, u.display_name
+               ORDER BY dups DESC""",
+            (since, until, tenant),
+        ).fetchall()
+    out = []
+    for r in rows:
+        total = r["total"] or 0
+        dups  = r["dups"] or 0
+        out.append({
+            "user_id":   r["user_id"],
+            "name":      r["name"],
+            "total":     total,
+            "afk_events": r["afk_events"],
+            "dups":      dups,
+            "dup_pct":   round(dups / total * 100, 1) if total else 0,
+            "max_afk_h": round((r["max_afk_sec"] or 0) / 3600, 2),
+            "afk_gt_1h": r["afk_gt_1h"],
+        })
+    return {"tenant": tenant, "since": since, "until": until, "users": out}
 
 
 # ---------------------------------------------------------------------------

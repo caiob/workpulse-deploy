@@ -3,11 +3,11 @@ $Tenant = "0292843554376"
 $Token  = Read-Host "Cole o X-Admin-Token (master)"
 $H = @{ "X-Admin-Token" = $Token }
 
-# 1) Descobrir o user_id do Leandro
+# 1) Descobrir o user_id do Usuário
 $users = Invoke-RestMethod -Uri "$Base/v1/users?tenant=$Tenant" -Headers $H
-$leo = $users.users | Where-Object { $_.display_name -like "*Leandro*" }
+$leo = $users.users | Where-Object { $_.display_name -like "*Caio*" }
 $uid = $leo.user_id
-"Leandro user_id: $uid"
+"Caio Batalha user_id: $uid"
 $uidEnc = [uri]::EscapeDataString($uid)
 
 # Janela ampla (UTC) cobrindo o dia 07/06 local

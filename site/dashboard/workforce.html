@@ -11,7 +11,7 @@
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
-<link rel="stylesheet" href="css/workforce.css?v=23">
+<link rel="stylesheet" href="css/workforce.css?v=26">
 <link rel="icon" type="image/jpeg" href="../assets/logo-workpulse.jpeg">
 </head>
 <body>
@@ -107,6 +107,7 @@
     <select id="duEditRole" onchange="duEditRoleChanged()">
       <option value="supervisor">Supervisor</option>
       <option value="lider">Líder</option>
+      <option value="admin">Admin</option>
       <option value="admin_master">Admin Master</option>
     </select>
 
@@ -153,6 +154,7 @@
         <button data-tab="departments">🏢 Departamentos</button>
         <button data-tab="events">⚡ Aplicativos</button>
         <button data-tab="internet">🌐 Internet</button>
+        <button data-tab="consolidado">🧾 Consolidado</button>
         <button data-tab="jornada">⏱ Jornada de Trabalho</button>
         <button data-tab="localizacao">📍 Localização</button>
       </div>
@@ -169,19 +171,20 @@
       </div>
     </div>
 
-    <!-- Dropdown: Administrativo (somente Admin Master) -->
-    <div class="nav-dropdown" data-group="administrativo" data-role="admin_master">
+    <!-- Dropdown: Administrativo (Admin Master e Admin). Itens restritos ao Admin Master
+         ficam com data-role="admin_master"; os demais aparecem para ambos. -->
+    <div class="nav-dropdown" data-group="administrativo" data-role="admin">
       <button class="nav-dd-trigger">
         Administrativo <span class="dd-arrow">▾</span>
       </button>
       <div class="nav-dropdown-menu">
-        <button data-tab="financeiro">💲 Financeiro</button>
-        <button data-tab="admusuarios">👤 Usuários</button>
+        <button data-tab="financeiro" data-role="admin_master">💲 Financeiro</button>
+        <button data-tab="admusuarios" data-role="admin_master">👤 Usuários</button>
         <button data-tab="categorizacao">🏷️ Categorização</button>
         <button data-tab="colaboradores">👥 Colaboradores</button>
         <button data-tab="relatorios">📧 Relatórios</button>
         <button data-tab="admalertas">🔔 Alertas</button>
-        <button data-tab="admlicenca">📄 Licenciamento</button>
+        <button data-tab="admlicenca" data-role="admin_master">📄 Licenciamento</button>
       </div>
     </div>
 
@@ -501,22 +504,22 @@
         <div id="evDays"></div>
       </div>
       <div><label>Usuário</label>
-        <select id="evUser" style="min-width:180px"><option value="">Todos os usuários</option></select>
+        <select id="evUser" style="min-width:180px" onchange="applyEvents()"><option value="">— Selecione um colaborador —</option></select>
       </div>
-      <div><label>Bucket</label>
+      <div><label> </label>
         <select id="evBucket">
           <option value="">window (padrão)</option>
           <option value="afk">afk</option>
         </select>
       </div>
-      <div><label>Agrupamento</label>
+      <div><label> </label>
         <select id="evGroupMode" onchange="loadEvents()">
           <option value="sequential" selected>Agrupar Sequencial</option>
           <option value="byapp">Agrupar por App</option>
           <option value="none">Sem agrupamento</option>
         </select>
       </div>
-      <div><label>Categoria</label>
+      <div><label> </label>
         <select id="evCategory" onchange="loadEvents()">
           <option value="">Todas</option>
           <option value="productive">Produtivo</option>
@@ -526,6 +529,8 @@
         </select>
       </div>
       <div class="spacer"></div>
+      <button class="ghost ev-page-btn ev-page-active" onclick="jumpUserTo('evUser','internet')" title="Ver a navegação na internet desta mesma pessoa">🌐 Internet</button>
+      <button class="ghost" onclick="loadEventsAll()">Ver todos</button>
       <button class="ghost" onclick="loadEvents()">↻ Buscar</button>
     </div>
 
@@ -588,7 +593,7 @@
         <div id="intDays"></div>
       </div>
       <div><label>Usuário</label>
-        <select id="intUser" style="min-width:200px"><option value="">Todos os usuários</option></select>
+        <select id="intUser" style="min-width:200px" onchange="applyInternet()"><option value="">— Selecione um colaborador —</option></select>
       </div>
       <div><label>Categoria</label>
         <select id="intCategory" onchange="filterInternet()">
@@ -600,7 +605,9 @@
         </select>
       </div>
       <div class="spacer"></div>
-      <button class="ghost" onclick="loadInternet()">↻ Atualizar</button>
+      <button class="ghost ev-page-btn ev-page-active" onclick="jumpUserTo('intUser','events')" title="Ver os aplicativos de desktop desta mesma pessoa">⚡ Aplicativos</button>
+      <button class="ghost" onclick="loadInternetAll()">Ver todos</button>
+      <button class="ghost" onclick="applyInternet()">↻ Atualizar</button>
     </div>
 
     <div class="kpi-row">
@@ -644,6 +651,79 @@
       <table id="intSitesTable">
         <thead>
           <tr><th>Quando</th><th>Site / Página</th><th>Tempo total</th><th>Categoria</th><th>Nº usuários</th><th>Usuários</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ── CONSOLIDADO (toda a coleta da pessoa: apps + internet + AFK) ── -->
+  <section id="tab-consolidado" class="hide">
+    <h1 class="page-title">Coleta <span class="em">consolidada</span>.</h1>
+    <p class="page-sub">Tudo o que a pessoa fez no período — aplicativos de desktop, navegação na internet e tempo ocioso (AFK), num lugar só.</p>
+
+    <div class="toolbar">
+      <div><label>Período</label><div id="consDays"></div></div>
+      <div><label>Usuário</label>
+        <select id="consUser" style="min-width:180px" onchange="applyConsolidado()"><option value="">— Selecione um colaborador —</option></select>
+      </div>
+      <div><label>Tipo</label>
+        <select id="consBucket" onchange="applyConsolidado()">
+          <option value="">Atividade (apps + internet)</option>
+          <option value="afk">AFK (ocioso)</option>
+          <option value="all">Todos (atividade + AFK)</option>
+        </select>
+      </div>
+      <div><label>Agrupamento</label>
+        <select id="consGroupMode" onchange="_renderConsItems()">
+          <option value="detail" selected>Detalhado (app + título/site)</option>
+          <option value="byapp">Por App / Site</option>
+        </select>
+      </div>
+      <div><label>Categoria</label>
+        <select id="consCategory" onchange="_renderConsItems()">
+          <option value="">Todas</option>
+          <option value="productive">Produtivo</option>
+          <option value="unproductive">Não-produtivo</option>
+          <option value="neutral">Neutro</option>
+          <option value="uncategorized">Não categorizado</option>
+        </select>
+      </div>
+      <div class="spacer"></div>
+      <button class="ghost" onclick="loadConsolidadoAll()">Ver todos</button>
+      <button class="ghost" onclick="applyConsolidado()">↻ Buscar</button>
+    </div>
+
+    <div class="kpi-row">
+      <div class="kpi-card" style="border-top:3px solid var(--primary)">
+        <div class="kpi-val" id="kpiConsTotal">—</div><div class="kpi-label">Tempo total no período</div>
+      </div>
+      <div class="kpi-card" style="border-top:3px solid #4ade80">
+        <div class="kpi-val" id="kpiConsProd">—</div><div class="kpi-label">Produtivo</div>
+      </div>
+      <div class="kpi-card" style="border-top:3px solid #f87171">
+        <div class="kpi-val" id="kpiConsUnprod">—</div><div class="kpi-label">Não-produtivo</div>
+      </div>
+      <div class="kpi-card" style="border-top:3px solid var(--warn)">
+        <div class="kpi-val" id="kpiConsUncat">—</div><div class="kpi-label" id="kpiConsUncatLabel">Não categorizado</div>
+      </div>
+    </div>
+
+    <div class="card no-bar" style="margin-bottom:18px">
+      <h3>Por categoria — por dia</h3>
+      <div style="height:240px"><canvas id="chartConsDaily"></canvas></div>
+    </div>
+
+    <div class="card no-bar">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:12px">
+        <div>
+          <h3 style="margin:0">Coletas <span id="consCountLabel" style="color:var(--text-muted);font-weight:400;font-size:11px;margin-left:6px"></span></h3>
+          <p style="font-size:12px;color:var(--text-dim);margin:4px 0 0">Agregado do período inteiro por app/site (e AFK), maior tempo primeiro.</p>
+        </div>
+      </div>
+      <table id="consTable">
+        <thead>
+          <tr><th>Quando</th><th>Duração</th><th>Aplicativo / Título / Site</th><th>Tipo</th><th>Categoria</th></tr>
         </thead>
         <tbody></tbody>
       </table>
@@ -943,6 +1023,62 @@
         </thead>
         <tbody></tbody>
       </table>
+      <p data-role="admin_master" style="font-size:11px;color:var(--text-dim);margin:10px 0 0">
+        <strong>Limpar coletas</strong> apaga os dados coletados e mantém o cadastro. <strong>Excluir</strong> remove o colaborador, apaga as coletas e <strong>bloqueia o agente</strong> (não volta a alimentar dados). Ações restritas ao Admin Master.
+      </p>
+    </div>
+
+    <!-- Agentes bloqueados (somente Admin Master) -->
+    <div class="card no-bar" style="margin-bottom:18px" data-role="admin_master">
+      <h3>Agentes bloqueados</h3>
+      <p style="font-size:12px;color:var(--text-dim);margin:4px 0 12px">Devices excluídos cujos envios são descartados pelo servidor. Desbloquear faz o agente voltar a enviar (o colaborador reaparece no próximo envio).</p>
+      <div id="blockedList"><p class="empty-state">Carregando…</p></div>
+    </div>
+
+    <!-- Config do agente deste cliente (override do global) — Admin Master -->
+    <div class="card no-bar" data-role="admin_master">
+      <h3>Config do agente (deste cliente) <span class="role-help" onclick="openAgentCfgHelp()" title="O que é cada campo?">?</span></h3>
+      <p style="font-size:12px;color:var(--text-dim);margin:4px 0 14px">Sobrescreve a config global da WorkPulse só para os agentes da sua empresa. <strong>Deixe um campo vazio (ou "Herdar") para usar o padrão global.</strong> O agente aplica no próximo refresh (~10 min) ou ao reiniciar.</p>
+      <div class="config-form" style="display:flex;flex-wrap:wrap;gap:14px">
+        <div><label title="Tempo sem mexer no mouse/teclado para o agente marcar a pessoa como inativa (AFK). Ex.: 180 = 3 minutos.">AFK após (s) <span style="color:var(--text-muted);cursor:help">ⓘ</span></label><input id="taAfk" type="number" min="10" placeholder="herdar"></div>
+        <div><label title="De quanto em quanto tempo o agente verifica a janela ativa e a atividade. Em milissegundos (1000 = 1 segundo). Menor = mais preciso, porém mais eventos.">Poll (ms) <span style="color:var(--text-muted);cursor:help">ⓘ</span></label><input id="taPoll" type="number" min="200" placeholder="herdar"></div>
+        <div><label title="A cada quantos segundos o agente registra presença mesmo sem trocar de janela (conta leitura/visualização passiva). 0 = modo legado: só registra ao trocar de janela.">Heartbeat (s) <span style="color:var(--text-muted);cursor:help">ⓘ</span></label><input id="taHb" type="number" min="0" placeholder="herdar"></div>
+        <div><label title="Se o agente captura o título da janela/aba (ex.: nome do documento ou site). Não = registra só o aplicativo, sem o título — mais privacidade.">Capturar títulos <span style="color:var(--text-muted);cursor:help">ⓘ</span></label>
+          <select id="taTitles" class="card-sel"><option value="">Herdar</option><option value="true">Sim</option><option value="false">Não</option></select></div>
+      </div>
+      <div style="margin-top:12px">
+        <label style="font-size:12px;color:var(--text-dim)" title="Quando a janela ativa bate com um destes termos (no app ou no título), o tempo conta como ATIVO mesmo sem mover mouse/teclado — evita marcar AFK durante reuniões. Um termo por linha.">Apps/sites de reunião — um por linha (vazio = herda do global) <span style="color:var(--text-muted);cursor:help">ⓘ</span></label>
+        <textarea id="taMeet" rows="4" style="width:100%;box-sizing:border-box;font-size:12px" placeholder="herdar do global"></textarea>
+      </div>
+      <div style="margin-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <button class="primary" onclick="saveAgentCfgTenant()">Salvar override</button>
+        <button class="cat-btn" onclick="clearAgentCfgTenant()">Herdar tudo do global</button>
+        <span id="taMsg" style="font-size:12px;color:var(--text-dim)"></span>
+      </div>
+    </div>
+
+    <!-- Onboarding de agentes (enrollment) — Admin Master -->
+    <div class="card no-bar" style="margin-top:18px" data-role="admin_master">
+      <h3>Onboarding de agentes (enrollment)</h3>
+      <p style="font-size:12px;color:var(--text-dim);margin:4px 0 14px">Gere um <strong>código de enrollment</strong> e passe-o na instalação do agente genérico (ex.: <code>msiexec /i agente.msi ENROLL=&lt;código&gt; /qn</code>). O agente troca o código pela licença da sua empresa. Se a aprovação estiver ligada, cada nova máquina entra na fila abaixo até você aprovar.</p>
+
+      <label style="display:inline-flex;align-items:center;gap:8px;font-size:13px;cursor:pointer">
+        <input type="checkbox" id="enrollApproval" onchange="saveEnrollSettings()">
+        Exigir aprovação manual de novos agentes
+      </label>
+
+      <div style="margin-top:14px;display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
+        <div><label style="font-size:12px;color:var(--text-dim)">Rótulo (opcional)</label><br><input id="enrollLabel" placeholder="ex.: POC Filial SP" style="min-width:180px"></div>
+        <div><label style="font-size:12px;color:var(--text-dim)">Validade (dias)</label><br><input id="enrollDays" type="number" min="1" placeholder="vazio = permanente" style="width:150px"></div>
+        <button class="primary" onclick="createEnrollCode()">Gerar código</button>
+        <span id="enrollMsg" style="font-size:12px;color:var(--text-dim)"></span>
+      </div>
+
+      <div id="enrollCodesList" style="margin-top:14px;overflow-x:auto"><p class="empty-state">Carregando…</p></div>
+
+      <h4 style="margin:18px 0 8px;font-size:14px">Agentes enrollados</h4>
+      <p style="font-size:11px;color:var(--text-dim);margin:0 0 8px">Máquinas que pegaram a licença via código. <strong>Pendente</strong> = aguardando sua aprovação; <strong>Aprovado</strong> = liberado (aparece em Colaboradores quando começar a coletar).</p>
+      <div id="enrollPendingList" style="overflow-x:auto"><p class="empty-state">Carregando…</p></div>
     </div>
   </section>
 
@@ -1075,10 +1211,11 @@
       <div class="config-form" style="margin-bottom:12px">
         <div><label>Nome</label><input id="duName" placeholder="Nome do usuário" style="min-width:180px"></div>
         <div><label>E-mail</label><input id="duEmail" type="email" placeholder="usuario@empresa.com" style="min-width:200px"></div>
-        <div><label>Perfil</label>
+        <div><label>Perfil <span class="role-help" onclick="openRoleHelp()" title="O que cada perfil vê?">?</span></label>
           <select id="duRole">
             <option value="supervisor">Supervisor</option>
             <option value="lider">Líder</option>
+            <option value="admin">Admin</option>
             <option value="admin_master">Admin Master</option>
           </select>
         </div>
@@ -1098,6 +1235,94 @@
       </table>
     </div>
   </section>
+
+  <!-- Modal: comparação de perfis -->
+  <div id="roleHelpModal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeRoleHelp()">
+    <div class="modal-box" style="max-width:720px">
+      <h3 class="modal-title">O que cada perfil pode ver e fazer</h3>
+      <p style="font-size:12px;color:var(--text-dim);margin:0 0 12px">Todos os perfis acessam o painel; a diferença está em <strong>quais áreas administrativas</strong> cada um gerencia e em <strong>quais colaboradores</strong> consegue ver.</p>
+      <div style="overflow-x:auto">
+        <table style="font-size:12.5px">
+          <thead>
+            <tr>
+              <th>Capacidade</th>
+              <th style="text-align:center">Admin&nbsp;Master</th>
+              <th style="text-align:center">Admin</th>
+              <th style="text-align:center">Supervisor</th>
+              <th style="text-align:center">Líder</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Ver painéis e atividade (Visão Geral, Coletas, Análises)</td>
+              <td style="text-align:center;color:#16a34a">✓</td>
+              <td style="text-align:center;color:#16a34a">✓</td>
+              <td style="text-align:center;color:#16a34a">✓</td>
+              <td style="text-align:center;color:#16a34a">✓</td>
+            </tr>
+            <tr>
+              <td>Abrangência dos dados (quais colaboradores)</td>
+              <td style="text-align:center">Todos</td>
+              <td style="text-align:center">Todos</td>
+              <td style="text-align:center">Todos</td>
+              <td style="text-align:center">Só os atribuídos</td>
+            </tr>
+            <tr>
+              <td>Gerenciar Categorização, Colaboradores, Relatórios e Alertas</td>
+              <td style="text-align:center;color:#16a34a">✓</td>
+              <td style="text-align:center;color:#16a34a">✓</td>
+              <td style="text-align:center;color:var(--text-muted)">—</td>
+              <td style="text-align:center;color:var(--text-muted)">—</td>
+            </tr>
+            <tr>
+              <td>Financeiro, Licenciamento e Usuários do painel</td>
+              <td style="text-align:center;color:#16a34a">✓</td>
+              <td style="text-align:center;color:var(--text-muted)">—</td>
+              <td style="text-align:center;color:var(--text-muted)">—</td>
+              <td style="text-align:center;color:var(--text-muted)">—</td>
+            </tr>
+            <tr>
+              <td>Excluir/limpar coletas e bloquear agentes</td>
+              <td style="text-align:center;color:#16a34a">✓</td>
+              <td style="text-align:center;color:var(--text-muted)">—</td>
+              <td style="text-align:center;color:var(--text-muted)">—</td>
+              <td style="text-align:center;color:var(--text-muted)">—</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p style="font-size:11.5px;color:var(--text-dim);margin:12px 0 0">
+        <strong>Admin Master</strong> tem acesso total. <strong>Admin</strong> administra o operacional, mas não vê Financeiro/Licenciamento/Usuários nem exclui colaboradores.
+        <strong>Supervisor</strong> acompanha os dados de toda a equipe (sem áreas administrativas). <strong>Líder</strong> é como o Supervisor, porém vê apenas os colaboradores atribuídos a ele pelo Admin Master.
+      </p>
+      <div class="modal-actions">
+        <button class="btn btn-primary" onclick="closeRoleHelp()">Entendi</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Ajuda: campos da Config do agente -->
+  <div id="agentCfgHelpModal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeAgentCfgHelp()">
+    <div class="modal-box" style="max-width:680px">
+      <h3 class="modal-title">Config do agente — o que é cada campo</h3>
+      <p style="font-size:12px;color:var(--text-dim);margin:0 0 14px">Estes parâmetros controlam como o agente instalado nas máquinas mede a atividade. O que você define aqui vale <strong>só para a sua empresa</strong> e sobrescreve o padrão global da WorkPulse. Campo vazio = herda o global. O agente passa a usar no próximo refresh (~10 min) ou ao reiniciar.</p>
+      <dl style="font-size:13px;line-height:1.5;margin:0">
+        <dt style="font-weight:600">AFK após (segundos)</dt>
+        <dd style="margin:0 0 12px;color:var(--text-dim)">Tempo sem mexer no mouse/teclado para a pessoa ser considerada inativa (AFK). Ex.: <strong>180</strong> = 3 minutos parado vira tempo ocioso. Valor maior tolera mais pausas curtas; menor marca ociosidade mais rápido.</dd>
+        <dt style="font-weight:600">Poll (milissegundos)</dt>
+        <dd style="margin:0 0 12px;color:var(--text-dim)">De quanto em quanto tempo o agente “olha” qual janela está ativa e se há atividade. <strong>1000</strong> = 1 segundo. Menor deixa a medição mais precisa, mas gera mais eventos; raramente precisa mudar.</dd>
+        <dt style="font-weight:600">Heartbeat (segundos)</dt>
+        <dd style="margin:0 0 12px;color:var(--text-dim)">A cada quantos segundos o agente confirma que a pessoa segue na mesma tela, mesmo sem trocar de janela. É o que faz contar tempo de <strong>leitura/visualização passiva</strong> (ex.: lendo um documento parado). <strong>0</strong> = modo legado: só conta quando troca de janela.</dd>
+        <dt style="font-weight:600">Capturar títulos</dt>
+        <dd style="margin:0 0 12px;color:var(--text-dim)"><strong>Sim</strong>: registra o título da janela/aba (nome do documento, site, e-mail). <strong>Não</strong>: registra apenas o aplicativo, sem o título — mais privacidade, menos detalhe nos relatórios.</dd>
+        <dt style="font-weight:600">Apps/sites de reunião</dt>
+        <dd style="margin:0;color:var(--text-dim)">Lista de termos (um por linha). Quando a janela ativa bate com algum deles — no nome do app ou no título —, o tempo conta como <strong>ativo mesmo sem mexer no mouse/teclado</strong>. Serve para não marcar AFK durante reuniões (Meet, Teams, Zoom etc.). Ex.: <code>meet.google.com</code>, <code>teams.microsoft.com</code>, <code>zoom</code>.</dd>
+      </dl>
+      <div class="modal-actions">
+        <button class="btn btn-primary" onclick="closeAgentCfgHelp()">Entendi</button>
+      </div>
+    </div>
+  </div>
 
   <!-- ── ADMINISTRATIVO: Licenciamento ── -->
   <section id="tab-admlicenca" class="hide">
@@ -1213,21 +1438,22 @@
 <div id="toast" class="toast hide"></div>
 
 <!-- ===== MÓDULOS JS (defer: executam após parse do DOM, em ordem) ===== -->
-<script src="js/wp-core.js?v=18" defer></script>
+<script src="js/wp-core.js?v=20" defer></script>
 <script src="js/wp-datepicker.js?v=17" defer></script>
-<script src="js/wp-overview.js?v=20" defer></script>
-<script src="js/wp-people.js?v=20" defer></script>
+<script src="js/wp-overview.js?v=21" defer></script>
+<script src="js/wp-people.js?v=21" defer></script>
 <script src="js/wp-departments.js?v=17" defer></script>
 <script src="js/wp-analytics.js?v=24" defer></script>
-<script src="js/wp-events.js?v=17" defer></script>
-<script src="js/wp-internet.js?v=18" defer></script>
-<script src="js/wp-jornada.js?v=19" defer></script>
-<script src="js/wp-locations.js?v=3" defer></script>
-<script src="js/wp-settings.js?v=19" defer></script>
-<script src="js/wp-users.js?v=24" defer></script>
+<script src="js/wp-events.js?v=19" defer></script>
+<script src="js/wp-internet.js?v=20" defer></script>
+<script src="js/wp-consolidado.js?v=2" defer></script>
+<script src="js/wp-jornada.js?v=20" defer></script>
+<script src="js/wp-locations.js?v=4" defer></script>
+<script src="js/wp-settings.js?v=25" defer></script>
+<script src="js/wp-users.js?v=26" defer></script>
 <script src="js/wp-reports.js?v=20" defer></script>
-<script src="js/wp-nav.js?v=25" defer></script>
-<script src="js/wp-auth.js?v=19" defer></script>
+<script src="js/wp-nav.js?v=31" defer></script>
+<script src="js/wp-auth.js?v=20" defer></script>
 
 </body>
 </html>

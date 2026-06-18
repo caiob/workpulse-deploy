@@ -128,7 +128,7 @@ function renderPeopleTable() {
     const safeUid  = (u.user_id || '').replace(/'/g, "\\'");
     const safeName = (name || '').replace(/'/g, "\\'");
     return `<tr>
-      <td>${avatar(name)} <strong>${name}</strong></td>
+      <td><span class="person-link" title="Atalhos desta pessoa" onclick="openPersonMenu(event,'${safeUid}','${safeName}')">${avatar(name)} <strong>${name}</strong></span></td>
       <td>${u.department || '<span style="color:var(--text-muted)">—</span>'}</td>
       <td>${fmtH(u.active)}<small style="color:var(--text-dim)"> h</small></td>
       <td>${fmtH(u.afk)}<small style="color:var(--text-dim)"> h</small></td>
@@ -146,6 +146,38 @@ function renderPeopleTable() {
     </tr>`;
   }).join('');
   _peopleRenderPager(totalRows, start, pageRows.length);
+}
+
+/* ── Menu de atalhos por pessoa (abre ao clicar no nome/avatar) ───────────── */
+function _closePersonMenu() { document.getElementById('personMenu')?.remove(); }
+
+function openPersonMenu(ev, uid, name) {
+  ev.stopPropagation();
+  _closePersonMenu();
+  const su = (uid || '').replace(/'/g, "\\'");
+  const sn = (name || '').replace(/'/g, "\\'");
+  const m = document.createElement('div');
+  m.id = 'personMenu';
+  m.className = 'person-menu';
+  m.innerHTML = `
+    <div class="pm-head">${escHtml(name)}</div>
+    <button onclick="goToUserPage('events','${su}','${sn}')">⚡ Aplicativos</button>
+    <button onclick="goToUserPage('internet','${su}','${sn}')">🌐 Internet</button>
+    <button onclick="goToUserPage('jornada','${su}','${sn}')">⏱ Jornada de Trabalho</button>
+    <button onclick="goToUserPage('localizacao','${su}','${sn}')">📍 Localização</button>
+    <button onclick="_closePersonMenu();drillUser('${su}','${sn}')">🔎 Desdobramento (aqui)</button>`;
+  document.body.appendChild(m);
+  const x = Math.min(ev.clientX, window.innerWidth  - 240);
+  const y = Math.min(ev.clientY, window.innerHeight - 260);
+  m.style.left = Math.max(8, x) + 'px';
+  m.style.top  = Math.max(8, y) + 'px';
+  setTimeout(() => document.addEventListener('click', _closePersonMenu, { once: true }), 0);
+}
+
+function goToUserPage(page, uid, name) {
+  _closePersonMenu();
+  _deepLinkUser = { uid, name };
+  if (typeof switchTab === 'function') switchTab(page);
 }
 
 /** Mapeia o valor do seletor para um rótulo legível */
