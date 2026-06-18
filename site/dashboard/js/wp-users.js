@@ -12,7 +12,7 @@ function _duShowErr(msg) {
 function openRoleHelp()  { const m = document.getElementById('roleHelpModal'); if (m) m.style.display = 'flex'; }
 function closeRoleHelp() { const m = document.getElementById('roleHelpModal'); if (m) m.style.display = 'none'; }
 
-const _DU_ROLE_LBL = { admin_master: 'Admin Master', admin: 'Admin', supervisor: 'Supervisor', lider: 'Líder', wp_admin: 'WorkPulse' };
+const _DU_ROLE_LBL = { admin_master: 'Admin Master', admin: 'Admin', supervisor: 'Supervisor', lider: 'Líder', suporte: 'Suporte', wp_admin: 'WorkPulse' };
 
 async function loadUsers() {
   const tb = document.querySelector('#duTable tbody');

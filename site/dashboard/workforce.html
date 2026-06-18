@@ -107,6 +107,7 @@
     <select id="duEditRole" onchange="duEditRoleChanged()">
       <option value="supervisor">Supervisor</option>
       <option value="lider">Líder</option>
+      <option value="suporte">Suporte</option>
       <option value="admin">Admin</option>
       <option value="admin_master">Admin Master</option>
     </select>
@@ -185,6 +186,7 @@
         <button data-tab="relatorios">📧 Relatórios</button>
         <button data-tab="admalertas">🔔 Alertas</button>
         <button data-tab="admlicenca" data-role="admin_master">📄 Licenciamento</button>
+        <button data-tab="suportetec" data-role="suporte_admin">🛠 Suporte Técnico</button>
       </div>
     </div>
 
@@ -663,24 +665,25 @@
     <p class="page-sub">Tudo o que a pessoa fez no período — aplicativos de desktop, navegação na internet e tempo ocioso (AFK), num lugar só.</p>
 
     <div class="toolbar">
-      <div><label>Período</label><div id="consDays"></div></div>
-      <div><label>Usuário</label>
+      <div><div id="consDays"></div></div>
+      <div>
         <select id="consUser" style="min-width:180px" onchange="applyConsolidado()"><option value="">— Selecione um colaborador —</option></select>
       </div>
-      <div><label>Tipo</label>
+      <div>
         <select id="consBucket" onchange="applyConsolidado()">
           <option value="">Atividade (apps + internet)</option>
           <option value="afk">AFK (ocioso)</option>
-          <option value="all">Todos (atividade + AFK)</option>
+          <option value="all" selected>Todos (atividade + AFK)</option>
         </select>
       </div>
-      <div><label>Agrupamento</label>
-        <select id="consGroupMode" onchange="_renderConsItems()">
-          <option value="detail" selected>Detalhado (app + título/site)</option>
+      <div>
+        <select id="consGroupMode" onchange="applyConsolidado()">
+          <option value="detail">Detalhado (app + título/site)</option>
           <option value="byapp">Por App / Site</option>
+          <option value="sequential" selected>Sequencial (linha do tempo)</option>
         </select>
       </div>
-      <div><label>Categoria</label>
+      <div>
         <select id="consCategory" onchange="_renderConsItems()">
           <option value="">Todas</option>
           <option value="productive">Produtivo</option>
@@ -718,7 +721,7 @@
       <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:12px">
         <div>
           <h3 style="margin:0">Coletas <span id="consCountLabel" style="color:var(--text-muted);font-weight:400;font-size:11px;margin-left:6px"></span></h3>
-          <p style="font-size:12px;color:var(--text-dim);margin:4px 0 0">Agregado do período inteiro por app/site (e AFK), maior tempo primeiro.</p>
+          <p style="font-size:12px;color:var(--text-dim);margin:4px 0 0">Tudo que a pessoa fez no período — do mais novo para o mais antigo.</p>
         </div>
       </div>
       <table id="consTable">
@@ -727,6 +730,42 @@
         </thead>
         <tbody></tbody>
       </table>
+      <div id="consPagination"></div>
+    </div>
+  </section>
+
+  <!-- ── ADMINISTRATIVO: Suporte Técnico (Admin Master + Suporte) ── -->
+  <section id="tab-suportetec" class="hide">
+    <h2 style="margin:0 0 2px">Suporte Técnico</h2>
+    <p style="font-size:13px;color:var(--text-dim);margin:0 0 16px">Apoio à instalação e diagnóstico dos agentes — selecione um colaborador para ver os detalhes da máquina e das coletas.</p>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start">
+
+      <!-- ESQUERDA (6 col): lista de colaboradores -->
+      <div class="card no-bar" style="margin:0">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px;flex-wrap:wrap">
+          <h3 style="margin:0">Colaboradores <span id="supCountLabel" style="color:var(--text-muted);font-weight:400;font-size:11px;margin-left:6px"></span></h3>
+          <input id="supFilter" oninput="_supRender()" placeholder="buscar colaborador..."
+            style="background:var(--bg-2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:12px;min-width:160px">
+        </div>
+        <table id="supTable">
+          <thead>
+            <tr><th>Colaborador</th><th>Status</th><th>Última atividade</th><th>Versão do agente</th></tr>
+          </thead>
+          <tbody><tr><td colspan="4" class="empty-state">Carregando...</td></tr></tbody>
+        </table>
+        <div id="supPagination"></div>
+      </div>
+
+      <!-- DIREITA (6 col): detalhes do selecionado -->
+      <div class="card no-bar" style="margin:0">
+        <div id="supDetail">
+          <div class="empty-state">
+            <h4>Selecione um colaborador</h4>
+            Clique em um nome à esquerda para ver máquina, versão e últimas coletas.
+          </div>
+        </div>
+      </div>
+
     </div>
   </section>
 
@@ -945,9 +984,12 @@
           <div id="appsPagination"></div>
         </div>
         <p style="font-size:12px;color:var(--text-dim);margin:0 0 8px">Últimos 30 dias. Clique para pré-preencher a regra acima.</p>
-        <div style="margin-bottom:8px">
+        <div style="margin-bottom:8px;display:flex;gap:8px;align-items:center">
           <input id="appsFilter" oninput="filterApps()" placeholder="buscar aplicativo..."
-            style="width:100%;box-sizing:border-box;background:var(--bg-2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:12px">
+            style="flex:1;box-sizing:border-box;background:var(--bg-2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:12px">
+          <label style="font-size:12px;color:var(--text-dim);white-space:nowrap;display:flex;align-items:center;gap:4px;cursor:pointer">
+            <input type="checkbox" id="appsUncat" checked onchange="loadAppsForConfig()"> só não categorizados
+          </label>
         </div>
         <div id="appsList"><p style="color:var(--text-muted);font-size:13px">Carregando...</p></div>
       </div>
@@ -960,10 +1002,13 @@
           </div>
           <div id="sitesPagination"></div>
         </div>
-        <p style="font-size:12px;color:var(--text-dim);margin:0 0 8px">Últimos 30 dias. Clique para pré-preencher a regra acima.</p>
-        <div style="margin-bottom:8px">
+        <p style="font-size:12px;color:var(--text-dim);margin:0 0 8px">Últimos 14 dias. Clique para pré-preencher a regra acima.</p>
+        <div style="margin-bottom:8px;display:flex;gap:8px;align-items:center">
           <input id="sitesFilter" oninput="filterSites()" placeholder="buscar site..."
-            style="width:100%;box-sizing:border-box;background:var(--bg-2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:12px">
+            style="flex:1;box-sizing:border-box;background:var(--bg-2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:12px">
+          <label style="font-size:12px;color:var(--text-dim);white-space:nowrap;display:flex;align-items:center;gap:4px;cursor:pointer">
+            <input type="checkbox" id="sitesUncat" checked onchange="loadSitesForConfig()"> só não categorizados
+          </label>
         </div>
         <div id="sitesList"><p style="color:var(--text-muted);font-size:13px">Carregando...</p></div>
       </div>
@@ -1215,6 +1260,7 @@
           <select id="duRole">
             <option value="supervisor">Supervisor</option>
             <option value="lider">Líder</option>
+            <option value="suporte">Suporte</option>
             <option value="admin">Admin</option>
             <option value="admin_master">Admin Master</option>
           </select>
@@ -1240,7 +1286,7 @@
   <div id="roleHelpModal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeRoleHelp()">
     <div class="modal-box" style="max-width:720px">
       <h3 class="modal-title">O que cada perfil pode ver e fazer</h3>
-      <p style="font-size:12px;color:var(--text-dim);margin:0 0 12px">Todos os perfis acessam o painel; a diferença está em <strong>quais áreas administrativas</strong> cada um gerencia e em <strong>quais colaboradores</strong> consegue ver.</p>
+      <p style="font-size:12px;color:var(--text-dim);margin:0 0 12px">Quase todos os perfis acessam o painel completo; a diferença está em <strong>quais áreas administrativas</strong> cada um gerencia e em <strong>quais colaboradores</strong> consegue ver. O <strong>Suporte</strong> é a exceção: enxerga apenas a tela de Suporte Técnico.</p>
       <div style="overflow-x:auto">
         <table style="font-size:12.5px">
           <thead>
@@ -1250,6 +1296,7 @@
               <th style="text-align:center">Admin</th>
               <th style="text-align:center">Supervisor</th>
               <th style="text-align:center">Líder</th>
+              <th style="text-align:center">Suporte</th>
             </tr>
           </thead>
           <tbody>
@@ -1259,6 +1306,7 @@
               <td style="text-align:center;color:#16a34a">✓</td>
               <td style="text-align:center;color:#16a34a">✓</td>
               <td style="text-align:center;color:#16a34a">✓</td>
+              <td style="text-align:center;color:var(--text-muted)">—</td>
             </tr>
             <tr>
               <td>Abrangência dos dados (quais colaboradores)</td>
@@ -1266,6 +1314,7 @@
               <td style="text-align:center">Todos</td>
               <td style="text-align:center">Todos</td>
               <td style="text-align:center">Só os atribuídos</td>
+              <td style="text-align:center">Todos</td>
             </tr>
             <tr>
               <td>Gerenciar Categorização, Colaboradores, Relatórios e Alertas</td>
@@ -1273,10 +1322,12 @@
               <td style="text-align:center;color:#16a34a">✓</td>
               <td style="text-align:center;color:var(--text-muted)">—</td>
               <td style="text-align:center;color:var(--text-muted)">—</td>
+              <td style="text-align:center;color:var(--text-muted)">—</td>
             </tr>
             <tr>
               <td>Financeiro, Licenciamento e Usuários do painel</td>
               <td style="text-align:center;color:#16a34a">✓</td>
+              <td style="text-align:center;color:var(--text-muted)">—</td>
               <td style="text-align:center;color:var(--text-muted)">—</td>
               <td style="text-align:center;color:var(--text-muted)">—</td>
               <td style="text-align:center;color:var(--text-muted)">—</td>
@@ -1287,6 +1338,15 @@
               <td style="text-align:center;color:var(--text-muted)">—</td>
               <td style="text-align:center;color:var(--text-muted)">—</td>
               <td style="text-align:center;color:var(--text-muted)">—</td>
+              <td style="text-align:center;color:var(--text-muted)">—</td>
+            </tr>
+            <tr>
+              <td>Tela Suporte Técnico (apoio à instalação e diagnóstico)</td>
+              <td style="text-align:center;color:#16a34a">✓</td>
+              <td style="text-align:center;color:#16a34a">✓</td>
+              <td style="text-align:center;color:var(--text-muted)">—</td>
+              <td style="text-align:center;color:var(--text-muted)">—</td>
+              <td style="text-align:center;color:#16a34a">✓</td>
             </tr>
           </tbody>
         </table>
@@ -1294,6 +1354,7 @@
       <p style="font-size:11.5px;color:var(--text-dim);margin:12px 0 0">
         <strong>Admin Master</strong> tem acesso total. <strong>Admin</strong> administra o operacional, mas não vê Financeiro/Licenciamento/Usuários nem exclui colaboradores.
         <strong>Supervisor</strong> acompanha os dados de toda a equipe (sem áreas administrativas). <strong>Líder</strong> é como o Supervisor, porém vê apenas os colaboradores atribuídos a ele pelo Admin Master.
+        <strong>Suporte</strong> enxerga apenas a tela de Suporte Técnico — apoio à instalação e diagnóstico dos agentes — de todos os colaboradores, sem acesso ao restante do painel.
       </p>
       <div class="modal-actions">
         <button class="btn btn-primary" onclick="closeRoleHelp()">Entendi</button>
@@ -1441,19 +1502,20 @@
 <script src="js/wp-core.js?v=20" defer></script>
 <script src="js/wp-datepicker.js?v=17" defer></script>
 <script src="js/wp-overview.js?v=21" defer></script>
-<script src="js/wp-people.js?v=21" defer></script>
+<script src="js/wp-people.js?v=22" defer></script>
 <script src="js/wp-departments.js?v=17" defer></script>
 <script src="js/wp-analytics.js?v=24" defer></script>
 <script src="js/wp-events.js?v=19" defer></script>
 <script src="js/wp-internet.js?v=20" defer></script>
-<script src="js/wp-consolidado.js?v=2" defer></script>
+<script src="js/wp-consolidado.js?v=5" defer></script>
 <script src="js/wp-jornada.js?v=20" defer></script>
 <script src="js/wp-locations.js?v=4" defer></script>
-<script src="js/wp-settings.js?v=25" defer></script>
-<script src="js/wp-users.js?v=26" defer></script>
+<script src="js/wp-settings.js?v=26" defer></script>
+<script src="js/wp-users.js?v=27" defer></script>
+<script src="js/wp-support.js?v=3" defer></script>
 <script src="js/wp-reports.js?v=20" defer></script>
-<script src="js/wp-nav.js?v=31" defer></script>
-<script src="js/wp-auth.js?v=20" defer></script>
+<script src="js/wp-nav.js?v=32" defer></script>
+<script src="js/wp-auth.js?v=22" defer></script>
 
 </body>
 </html>

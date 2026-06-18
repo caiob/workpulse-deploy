@@ -2,11 +2,16 @@
 // wp-people.js — Aba "Pessoas" (ranking + drill-down individual)
 // =====================================================================
 
-/** True se o agente reportou dentro da janela de "online". */
+/** True se o agente reportou dentro da janela de "online".
+    Tolera o relógio do servidor ADIANTADO em relação ao do navegador: um agente que
+    acabou de reportar pode ter last_seen alguns segundos "no futuro" (skew). Sem isso,
+    ms<0 marcava Offline mesmo com a última coleta "agora". A janela vale nos dois
+    sentidos (±WP_ONLINE_MINUTES). */
 function _isOnline(lastSeen) {
   if (!lastSeen) return false;
-  const ms = Date.now() - new Date(lastSeen).getTime();
-  return ms >= 0 && ms < (WP_ONLINE_MINUTES * 60000);
+  const ms  = Date.now() - new Date(lastSeen).getTime();
+  const win = WP_ONLINE_MINUTES * 60000;
+  return ms < win && ms > -win;
 }
 
 /** Vem do clique no card "Online agora": abre Pessoas já filtrado por online. */

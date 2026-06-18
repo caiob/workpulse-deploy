@@ -333,6 +333,11 @@ function _enterApp() {
   _acctSetUser();
   _acctSyncTheme();
   _applyRoleUI();
+  if (state.role === 'suporte') {
+    // Suporte só vê a tela Suporte Técnico (já ativada por _applyRoleUI).
+    _wpStartIdleWatch();
+    return;
+  }
   _loadLicenseInfo();
   loadOverview();
   _wpStartIdleWatch();
@@ -347,7 +352,7 @@ function _acctSetUser() {
   }
   const rl = document.getElementById('acctRole');
   if (rl) {
-    const map = { admin_master: 'Admin Master', admin: 'Admin', supervisor: 'Supervisor', lider: 'Líder', wp_admin: 'WorkPulse' };
+    const map = { admin_master: 'Admin Master', admin: 'Admin', supervisor: 'Supervisor', lider: 'Líder', suporte: 'Suporte', wp_admin: 'WorkPulse' };
     rl.textContent = map[state.role] || state.role || '—';
   }
 }
@@ -358,14 +363,33 @@ function _acctSetUser() {
    data-role="admin"        → Admin Master OU Admin: demais áreas administrativas
      (Categorização, Colaboradores, Relatórios, Alertas). */
 function _applyRoleUI() {
-  const isMaster = state.role === 'admin_master' || state.role === 'wp_admin';
-  const isAdmin  = isMaster || state.role === 'admin';
+  const isMaster  = state.role === 'admin_master' || state.role === 'wp_admin';
+  const isAdmin   = isMaster || state.role === 'admin';
+  const isSuporte = state.role === 'suporte';
   document.querySelectorAll('[data-role="admin_master"]').forEach(el => {
     el.style.display = isMaster ? '' : 'none';
   });
   document.querySelectorAll('[data-role="admin"]').forEach(el => {
     el.style.display = isAdmin ? '' : 'none';
   });
+  // Suporte Técnico: visível para Admin Master, Admin OU Suporte.
+  document.querySelectorAll('[data-role="suporte_admin"]').forEach(el => {
+    el.style.display = (isAdmin || isSuporte) ? '' : 'none';
+  });
+
+  // O perfil Suporte só enxerga a tela Suporte Técnico.
+  if (isSuporte) {
+    document.querySelectorAll('nav.tabs > button[data-tab="overview"]').forEach(el => { el.style.display = 'none'; });
+    document.querySelectorAll('.nav-dropdown[data-group="coletas"], .nav-dropdown[data-group="analises"]').forEach(el => { el.style.display = 'none'; });
+    const adm = document.querySelector('.nav-dropdown[data-group="administrativo"]');
+    if (adm) {
+      adm.style.display = '';   // sobrepõe o data-role="admin" (escondido para suporte)
+      adm.querySelectorAll('.nav-dropdown-menu button[data-tab]').forEach(b => {
+        b.style.display = (b.dataset.tab === 'suportetec') ? '' : 'none';
+      });
+    }
+    if (typeof switchTab === 'function') switchTab('suportetec');
+  }
 }
 
 /* ── Política de senha (espelha o backend: 10+ chars, 3 de 4 classes) ── */

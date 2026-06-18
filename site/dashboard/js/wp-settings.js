@@ -180,7 +180,8 @@ function quickRule(pattern, field) {
    ────────────────────────────────────────────────────────────────── */
 async function loadAppsForConfig() {
   try {
-    const data = await api('/v1/productivity/apps?tenant=' + encodeURIComponent(state.tenant) + '&days=30');
+    const uncat = document.getElementById('appsUncat')?.checked ? '&uncat=1' : '';
+    const data = await api('/v1/productivity/apps?tenant=' + encodeURIComponent(state.tenant) + '&days=30' + uncat);
     _allApps      = (data.apps || []).filter(a => !a.is_browser);
     _appsFiltered = _allApps;
     _appsPage     = 0;
@@ -240,7 +241,8 @@ function renderAppsList(apps) {
    ────────────────────────────────────────────────────────────────── */
 async function loadSitesForConfig() {
   try {
-    const data = await api('/v1/productivity/internet?tenant=' + encodeURIComponent(state.tenant) + '&days=30');
+    const uncat = document.getElementById('sitesUncat')?.checked ? '&uncat=1' : '';
+    const data = await api('/v1/productivity/internet?tenant=' + encodeURIComponent(state.tenant) + '&days=14&detail=0' + uncat);
     _allSites      = data.sites || [];
     _sitesFiltered = _allSites;
     _sitesPage     = 0;

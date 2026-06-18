@@ -10,7 +10,7 @@
 //   status • tenant • [⚙ ▾ → Configurações / Sair]
 // =====================================================================
 
-const TABS = ['overview', 'people', 'departments', 'alerts', 'trends', 'events', 'internet', 'consolidado', 'jornada', 'localizacao', 'financeiro', 'admusuarios', 'admlicenca', 'admalertas', 'categorizacao', 'colaboradores', 'relatorios', 'config'];
+const TABS = ['overview', 'people', 'departments', 'alerts', 'trends', 'events', 'internet', 'consolidado', 'jornada', 'localizacao', 'financeiro', 'admusuarios', 'admlicenca', 'admalertas', 'categorizacao', 'colaboradores', 'relatorios', 'suportetec', 'config'];
 
 // Mapeamento tab → grupo de dropdown (null = standalone)
 const TAB_GROUP = {
@@ -28,6 +28,7 @@ const TAB_GROUP = {
   categorizacao:'administrativo',
   colaboradores:'administrativo',
   relatorios:  'administrativo',
+  suportetec:  'administrativo',
   alerts:      'analises',
   trends:      'analises',
 };
@@ -83,6 +84,7 @@ function switchTab(name) {
     categorizacao: () => { if (typeof loadRules === 'function') loadRules(); if (typeof loadAppsForConfig === 'function') loadAppsForConfig(); if (typeof loadSitesForConfig === 'function') loadSitesForConfig(); },
     colaboradores: () => { if (typeof loadDepts === 'function') loadDepts(); if (typeof loadCollabs === 'function') loadCollabs(); if (typeof loadBlocked === 'function') loadBlocked(); if (typeof loadAgentCfgTenant === 'function') loadAgentCfgTenant(); if (typeof loadEnrollment === 'function') loadEnrollment(); },
     relatorios:  () => { if (typeof loadReports === 'function') loadReports(); if (typeof loadEmailConfig === 'function') loadEmailConfig(); },
+    suportetec:  () => { if (typeof loadSupport === 'function') loadSupport(); },
     config:      loadConfig,
   };
   if (loaders[name]) loaders[name]();

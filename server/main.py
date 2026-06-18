@@ -642,6 +642,19 @@ def _no_browser_where() -> tuple[str, list]:
     return sql, args
 
 
+def _only_browser_where() -> tuple[str, list]:
+    """SQL fragment + args para manter SÓ apps de navegador (inverso de
+    _no_browser_where). Pré-filtra a varredura para uma fração das linhas."""
+    in_ph   = ", ".join(["%s"] * len(_BROWSER_APPS))
+    like_or = " OR ".join(
+        "LOWER(data_json->>'app') LIKE %s"
+        for _ in _BROWSER_KEYWORDS
+    )
+    sql  = f" AND (LOWER(data_json->>'app') IN ({in_ph}) OR ({like_or}))"
+    args: list = list(_BROWSER_APPS) + [f"%{kw}%" for kw in _BROWSER_KEYWORDS]
+    return sql, args
+
+
 def _clean_title(title: str) -> str:
     if not title or not title.strip():
         return "(sem título)"
@@ -1936,6 +1949,98 @@ def productivity_consolidado(
     return result
 
 
+@app.get("/v1/productivity/timeline", dependencies=[Depends(require_tenant_scope)])
+def productivity_timeline(
+    tenant:  str,
+    request: Request,
+    user_id: str,
+    bucket:  str | None = None,   # ''/'window' | 'afk' | 'all' (recomendado p/ ver tudo)
+    since:   str | None = None,
+    until:   str | None = None,
+    days:    int = Query(1, le=90),
+):
+    """TIMELINE de uma pessoa: tudo que ela fez na ORDEM cronológica, colapsando
+    eventos consecutivos iguais em uma linha (ex.: 45 min num app = 1 linha).
+    Processado NO SERVIDOR → cobre o dia todo, sem o limite de eventos."""
+    if not (user_id or "").strip():
+        raise HTTPException(status_code=400, detail="informe user_id")
+    if since is None:
+        since = _since_for_days(days)
+    if until is None:
+        until = dt.datetime.now(dt.timezone.utc).isoformat()
+    allowed = _lider_allowed_ids(request, tenant)
+    if allowed is not None and user_id not in set(allowed):
+        raise HTTPException(status_code=403, detail="colaborador fora do seu escopo")
+
+    all_b = (bucket == "all")
+    one_b = None if all_b else (bucket or "window")
+    cache_key = f"{tenant}:timeline:{user_id}:{since}:{until}:{bucket or 'window'}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    where = ["tenant_id=%s", "user_id=%s", "ts>=%s", "ts<=%s"]
+    args: list = [tenant, user_id, since, until]
+    if not all_b:
+        where.append("bucket=%s"); args.append(one_b)
+    wc = " AND ".join(where)
+
+    with db() as c:
+        rules = [dict(r) for r in c.execute(
+            "SELECT * FROM productivity_rules WHERE tenant_id=%s ORDER BY created_at", (tenant,),
+        ).fetchall()]
+        rows = c.execute(
+            f"""SELECT data_json->>'app' AS app, data_json->>'title' AS title,
+                       bucket, ts, duration_sec
+                FROM events WHERE {wc}
+                ORDER BY ts LIMIT 300000""",
+            tuple(args),
+        ).fetchall()
+
+    runs: list = []
+    for r in rows:
+        b     = r["bucket"]
+        app   = r["app"] or "—"
+        title = _clean_title(r["title"] or "")
+        dur   = r["duration_sec"] or 0.0
+        ts    = r["ts"]
+        key   = ("afk",) if b == "afk" else (app.lower(), title.lower())
+        if runs and runs[-1]["_k"] == key:
+            runs[-1]["total_sec"] += dur
+            runs[-1]["end_ts"]     = ts
+            runs[-1]["count"]     += 1
+        else:
+            cat  = "afk" if b == "afk" else _apply_rules(title, app, rules)
+            tipo = "AFK" if b == "afk" else ("Internet" if _is_browser(app) else "App")
+            runs.append({"_k": key, "app": app, "title": title, "type": tipo,
+                         "category": cat, "start_ts": ts, "end_ts": ts,
+                         "total_sec": dur, "count": 1})
+
+    totals = {"productive": 0.0, "unproductive": 0.0, "neutral": 0.0, "uncategorized": 0.0, "afk": 0.0, "total": 0.0}
+    dagg: dict[str, dict] = {}
+    for run in runs:
+        cat = run["category"]; sec = run["total_sec"]
+        totals[cat]    = totals.get(cat, 0.0) + sec
+        totals["total"] += sec
+        day = _utc_hour_to_local_day(run["start_ts"][:13])
+        d   = dagg.setdefault(day, {"productive": 0.0, "unproductive": 0.0, "neutral": 0.0, "uncategorized": 0.0, "afk": 0.0})
+        d[cat] = d.get(cat, 0.0) + sec
+        run["total_sec"]   = round(sec, 1)
+        run["last_access"] = run["end_ts"]
+        run.pop("_k", None)
+
+    daily = [{"day": k, **{kk: round(vv, 1) for kk, vv in v.items()}} for k, v in sorted(dagg.items())]
+
+    result = {
+        "tenant": tenant, "since": since, "until": until, "timeline": True,
+        "totals": {k: round(v, 1) for k, v in totals.items()},
+        "items":  runs[:8000],
+        "daily":  daily,
+    }
+    _cache_set(cache_key, result)
+    return result
+
+
 # ===========================================================================
 # Workforce dashboard
 # ===========================================================================
@@ -2172,11 +2277,23 @@ def productivity_internet(
     user_id: str | None = None,
     since:   str | None = None,
     until:   str | None = None,
+    detail:  int = Query(1),   # 0 = só a lista de sites (sem o gráfico diário) — p/ Categorização
+    uncat:   int = Query(0),   # 1 = retorna só sites NÃO categorizados (lista de trabalho)
 ):
     if since is None:
         since = _since_for_days(days)
     if until is None:
         until = dt.datetime.now(dt.timezone.utc).isoformat()
+
+    _allowed = _lider_allowed_ids(request, tenant)
+    ck = (f"{tenant}:internet:{since}:{until}:{user_id or '-'}:"
+          f"{detail}:u{uncat}:{'sc' if _allowed is not None else 'all'}")
+    cached = _cache_get(ck)
+    if cached is not None:
+        return cached
+
+    # Pré-filtra a varredura para SÓ apps de navegador (fração das linhas).
+    bsql, bargs = _only_browser_where()
 
     with db() as c:
         rules = [dict(r) for r in c.execute(
@@ -2191,22 +2308,25 @@ def productivity_internet(
         args: list = [tenant, since, until]
         if user_id:
             sql += " AND user_id=%s"; args.append(user_id)
-        _allowed = _lider_allowed_ids(request, tenant)
         if _allowed is not None:
             sql += " AND user_id = ANY(%s)"; args.append(_allowed)
+        sql += bsql; args += bargs
         sql += " GROUP BY user_id, app, title ORDER BY total_sec DESC"
         raw_rows = c.execute(sql, args).fetchall()
 
-        dsql  = ("SELECT substr(ts,1,13) AS h, data_json->>'app' AS app,"
-                 " data_json->>'title' AS title, SUM(duration_sec) AS total_sec"
-                 " FROM events WHERE tenant_id=%s AND bucket='window' AND ts>=%s AND ts<=%s")
-        dargs: list = [tenant, since, until]
-        if user_id:
-            dsql += " AND user_id=%s"; dargs.append(user_id)
-        if _allowed is not None:
-            dsql += " AND user_id = ANY(%s)"; dargs.append(_allowed)
-        dsql += " GROUP BY h, app, title ORDER BY h"
-        daily_raw = c.execute(dsql, dargs).fetchall()
+        daily_raw = []
+        if detail:
+            dsql  = ("SELECT substr(ts,1,13) AS h, data_json->>'app' AS app,"
+                     " data_json->>'title' AS title, SUM(duration_sec) AS total_sec"
+                     " FROM events WHERE tenant_id=%s AND bucket='window' AND ts>=%s AND ts<=%s")
+            dargs: list = [tenant, since, until]
+            if user_id:
+                dsql += " AND user_id=%s"; dargs.append(user_id)
+            if _allowed is not None:
+                dsql += " AND user_id = ANY(%s)"; dargs.append(_allowed)
+            dsql += bsql; dargs += bargs
+            dsql += " GROUP BY h, app, title ORDER BY h"
+            daily_raw = c.execute(dsql, dargs).fetchall()
 
     site_agg: dict[str, dict] = {}
     for row in raw_rows:
@@ -2238,6 +2358,8 @@ def productivity_internet(
         cat = entry["category"]
         totals[cat]     = totals.get(cat, 0.0) + entry["total_sec"]
         totals["total"] += entry["total_sec"]
+        if uncat and cat != "uncategorized":   # lista de trabalho: só o que falta
+            continue
         sites.append({
             "site_name":   entry["site_name"],
             "category":    cat,
@@ -2270,38 +2392,67 @@ def productivity_internet(
         for day, v in sorted(daily_agg.items())
     ]
 
-    return {
+    result = {
         "tenant": tenant, "since": since, "days": days,
         "totals": {k: round(v, 1) for k, v in totals.items()},
         "sites":  sites[:300],
         "daily":  daily,
     }
+    _cache_set(ck, result)
+    return result
 
 
 @app.get("/v1/productivity/apps", dependencies=[Depends(require_tenant_scope)])
-def productivity_apps(tenant: str, request: Request, days: int = Query(30, le=90)):
-    since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).isoformat()
+def productivity_apps(tenant: str, request: Request, days: int = Query(30, le=90),
+                      uncat: int = Query(0)):
+    now     = dt.datetime.now(dt.timezone.utc)
+    since   = (now - dt.timedelta(days=days)).isoformat()
+    until   = now.isoformat()
     allowed = _lider_allowed_ids(request, tenant)
-    SC = " AND user_id = ANY(%s)" if allowed is not None else ""
-    A  = [allowed] if allowed is not None else []
+    scoped  = allowed is not None
+    lim     = 500 if uncat else 150   # uncat puxa a cauda longa (depois filtra)
+
+    ck = f"{tenant}:cfg_apps:{days}:{'sc' if scoped else 'all'}:u{uncat}"
+    cached = _cache_get(ck)
+    if cached is not None:
+        return cached
+
+    SC = " AND user_id = ANY(%s)" if scoped else ""
+    A  = [allowed] if scoped else []
     with db() as c:
         rules = [dict(r) for r in c.execute(
             "SELECT * FROM productivity_rules WHERE tenant_id=%s ORDER BY created_at",
             (tenant,),
         ).fetchall()]
-        rows = c.execute(
-            f"""SELECT data_json->>'app' AS app,
-                      SUM(duration_sec) AS total_sec,
-                      COUNT(DISTINCT user_id) AS user_count
-               FROM events WHERE tenant_id=%s{SC} AND bucket='window' AND ts>=%s
-               GROUP BY app ORDER BY total_sec DESC LIMIT 150""",
-            tuple([tenant, *A, since]),
-        ).fetchall()
+        # Caminho rápido: lê do rollup agg_app_day (não cresce com eventos crus).
+        # Só quando o agregado cobre o período E não há escopo de líder (o
+        # agregado não guarda user_id). Senão varre eventos como antes.
+        if (not scoped) and _agg_ready(c, tenant, since):
+            d0 = _utc_hour_to_local_day(since[:13])
+            d1 = _utc_hour_to_local_day(until[:13])
+            rows = c.execute(
+                """SELECT MIN(app) AS app, SUM(active_sec) AS total_sec, NULL::int AS user_count
+                   FROM agg_app_day
+                   WHERE tenant_id=%s AND day>=%s AND day<=%s
+                   GROUP BY LOWER(app) ORDER BY total_sec DESC LIMIT %s""",
+                (tenant, d0, d1, lim),
+            ).fetchall()
+        else:
+            rows = c.execute(
+                f"""SELECT data_json->>'app' AS app,
+                          SUM(duration_sec) AS total_sec,
+                          COUNT(DISTINCT user_id) AS user_count
+                   FROM events WHERE tenant_id=%s{SC} AND bucket='window' AND ts>=%s
+                   GROUP BY app ORDER BY total_sec DESC LIMIT %s""",
+                tuple([tenant, *A, since, lim]),
+            ).fetchall()
 
     apps = []
     for row in rows:
         app      = row["app"] or "(desconhecido)"
         category = _apply_rules("", app, rules)
+        if uncat and category != "uncategorized":
+            continue
         apps.append({
             "app":        app,
             "is_browser": _is_browser(app),
@@ -2309,7 +2460,9 @@ def productivity_apps(tenant: str, request: Request, days: int = Query(30, le=90
             "total_sec":  round(row["total_sec"] or 0.0, 1),
             "user_count": row["user_count"] or 0,
         })
-    return {"tenant": tenant, "since": since, "apps": apps}
+    result = {"tenant": tenant, "since": since, "apps": apps}
+    _cache_set(ck, result)
+    return result
 
 
 # ===========================================================================
@@ -3200,8 +3353,8 @@ PANEL_BASE_URL     = os.getenv("WORKPULSE_PANEL_URL", "https://workpulse.com.br/
 PLATFORM_NOTIFY    = os.getenv("WORKPULSE_NOTIFY_EMAIL", FROM_EMAIL)
 TOKEN_TTL_HOURS    = int(os.getenv("WORKPULSE_PWTOKEN_TTL_HOURS", "48"))
 
-CLIENT_ROLES   = ("admin_master", "admin", "supervisor", "lider")
-ALL_ROLES      = ("admin_master", "admin", "supervisor", "lider", "wp_admin")
+CLIENT_ROLES   = ("admin_master", "admin", "supervisor", "lider", "suporte")
+ALL_ROLES      = ("admin_master", "admin", "supervisor", "lider", "suporte", "wp_admin")
 
 # --- Tabelas novas (aditivas; init_db() as cria se não existirem) ----------
 _SCHEMA_STMTS.extend([
@@ -3455,6 +3608,108 @@ def require_role(*roles: str):
             return ctx
         raise HTTPException(403, "permissão insuficiente para esta ação")
     return _dep
+
+
+# ===========================================================================
+# Suporte Técnico (perfil "suporte" + Admin Master)
+# (definido aqui, após require_role, pois o decorator o resolve no import)
+# ===========================================================================
+
+@app.get("/v1/support/people",
+         dependencies=[Depends(require_role("admin_master", "admin", "suporte"))])
+def support_people(tenant: str, request: Request):
+    """Lista enxuta para a tela de Suporte Técnico: colaborador, última atividade,
+    versão do agente e a máquina mais recente. Sem agregação pesada."""
+    with db() as c:
+        rows = c.execute(
+            """SELECT u.user_id, u.display_name, u.department, u.last_seen,
+                      d.agent_version, d.hostname
+               FROM users u
+               LEFT JOIN LATERAL (
+                   SELECT agent_version, hostname FROM devices dd
+                   WHERE dd.tenant_id = u.tenant_id AND dd.user_id = u.user_id
+                   ORDER BY dd.last_seen DESC LIMIT 1
+               ) d ON TRUE
+               WHERE u.tenant_id = %s
+               ORDER BY u.last_seen DESC NULLS LAST""",
+            (tenant,),
+        ).fetchall()
+    return {"tenant": tenant, "users": [dict(r) for r in rows]}
+
+
+@app.get("/v1/support/person",
+         dependencies=[Depends(require_role("admin_master", "admin", "suporte"))])
+def support_person(tenant: str, user_id: str, request: Request):
+    """Detalhe de um colaborador para o Suporte: máquina, versão, status e a
+    última coleta de cada tipo (AFK / app / web) + início da jornada de hoje."""
+    nbsql, nbargs = _no_browser_where()    # app = window NÃO navegador
+    bsql,  bargs  = _only_browser_where()  # web = window navegador
+    floor   = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=2)).isoformat()
+    floor30 = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=30)).isoformat()
+
+    with db() as c:
+        u = c.execute(
+            "SELECT display_name, department, last_seen FROM users WHERE tenant_id=%s AND user_id=%s",
+            (tenant, user_id),
+        ).fetchone()
+        if not u:
+            raise HTTPException(404, "colaborador não encontrado")
+        dev = c.execute(
+            """SELECT hostname, agent_version, os, os_version, last_seen
+               FROM devices WHERE tenant_id=%s AND user_id=%s
+               ORDER BY last_seen DESC LIMIT 1""",
+            (tenant, user_id),
+        ).fetchone()
+
+        # Última coleta por tipo: varredura do índice (tenant,user,ts) de trás p/
+        # frente, parando no 1º match. Piso de 30 dias limita o pior caso (sem
+        # match → para no piso em vez de varrer o histórico inteiro). Antes era
+        # MAX(ts) sem piso → varria tudo e levava ~1min.
+        r = c.execute(
+            """SELECT ts FROM events
+               WHERE tenant_id=%s AND user_id=%s AND ts>=%s AND bucket='afk'
+               ORDER BY ts DESC LIMIT 1""",
+            (tenant, user_id, floor30),
+        ).fetchone()
+        last_afk = r["ts"] if r else None
+        r = c.execute(
+            f"""SELECT ts FROM events
+                WHERE tenant_id=%s AND user_id=%s AND ts>=%s AND bucket='window'{nbsql}
+                ORDER BY ts DESC LIMIT 1""",
+            tuple([tenant, user_id, floor30, *nbargs]),
+        ).fetchone()
+        last_app = r["ts"] if r else None
+        r = c.execute(
+            f"""SELECT ts FROM events
+                WHERE tenant_id=%s AND user_id=%s AND ts>=%s AND bucket='window'{bsql}
+                ORDER BY ts DESC LIMIT 1""",
+            tuple([tenant, user_id, floor30, *bargs]),
+        ).fetchone()
+        last_web = r["ts"] if r else None
+        # Início da jornada = primeira coleta de janela do DIA LOCAL de hoje.
+        jstart = c.execute(
+            """SELECT MIN(ts) AS m FROM events
+               WHERE tenant_id=%s AND user_id=%s AND bucket='window' AND ts>=%s
+                 AND (ts::timestamptz AT TIME ZONE %s)::date
+                   = (now() AT TIME ZONE %s)::date""",
+            (tenant, user_id, floor, REPORT_TZ, REPORT_TZ),
+        ).fetchone()["m"]
+
+    return {
+        "tenant": tenant, "user_id": user_id,
+        "display_name":  u["display_name"],
+        "department":    u["department"],
+        "last_seen":     u["last_seen"],
+        "hostname":      dev["hostname"]      if dev else None,
+        "agent_version": dev["agent_version"] if dev else None,
+        "os":            dev["os"]            if dev else None,
+        "os_version":    dev["os_version"]    if dev else None,
+        "last_afk":      last_afk,
+        "last_app":      last_app,
+        "last_web":      last_web,
+        "jornada_start": jstart,
+    }
+
 
 def _client_ip(request: Request) -> str | None:
     fwd = request.headers.get("x-forwarded-for")

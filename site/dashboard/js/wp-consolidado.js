@@ -4,8 +4,18 @@
 // sem limite de eventos). Abre vazio; carrega ao escolher a pessoa.
 // =====================================================================
 
-let _consShowAll = false;
-let _consItems   = [];   // itens agregados vindos do servidor (cache p/ filtros)
+let _consShowAll  = false;
+let _consItems    = [];      // itens vindos do servidor (cache p/ filtros client-side)
+let _consTimeline = false;   // true quando os itens são blocos cronológicos (Sequencial)
+let _consView     = [];      // lista final (filtrada+ordenada+agrupada) a paginar
+let _consPage     = 0;
+let _CONS_PAGE_SIZE = 50;
+
+// HH:MM local (mesma convenção do ptDateTime do resto do dashboard)
+function _consTime(iso) {
+  if (!iso) return '—';
+  return new Date(iso).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+}
 
 function openConsolidado()    { _consShowAll = false; loadConsolidado(); }
 function applyConsolidado()   { _consShowAll = false; loadConsolidado(); }
@@ -17,7 +27,8 @@ function _renderConsPrompt() {
   });
   if (state.charts.consDaily) { state.charts.consDaily.destroy(); state.charts.consDaily = null; }
   const lbl = document.getElementById('consCountLabel'); if (lbl) lbl.textContent = '';
-  _consItems = [];
+  const pag = document.getElementById('consPagination'); if (pag) pag.innerHTML = '';
+  _consItems = []; _consView = []; _consPage = 0;
   const tbody = document.querySelector('#consTable tbody');
   if (tbody) tbody.innerHTML = `<tr><td colspan="5" class="empty-state">
       <h4>Selecione um colaborador</h4>
@@ -30,7 +41,20 @@ async function loadConsolidado() {
   await _populateUserDropdown('consUser');
   if (typeof _applyDeepLinkUser === 'function') _applyDeepLinkUser('consUser');
   const user = document.getElementById('consUser').value.trim();
+  const mode = document.getElementById('consGroupMode')?.value || 'detail';
+  const seq  = (mode === 'sequential');   // timeline cronológica
+
   if (!user && !_consShowAll) { _renderConsPrompt(); return; }
+  if (seq && !user) {  // a visão sequencial é por pessoa
+    const pag = document.getElementById('consPagination'); if (pag) pag.innerHTML = '';
+    const lbl = document.getElementById('consCountLabel'); if (lbl) lbl.textContent = '';
+    const tbody = document.querySelector('#consTable tbody');
+    if (tbody) tbody.innerHTML = `<tr><td colspan="5" class="empty-state">
+        <h4>Sequencial é por colaborador</h4>
+        A linha do tempo mostra o que <strong>uma pessoa</strong> fez na ordem do dia.
+        Selecione alguém no filtro <strong>Usuário</strong>.</td></tr>`;
+    return;
+  }
 
   const { since, until } = wpDP.getRange('consDays');
   const bucket = document.getElementById('consBucket').value;   // '' | 'afk' | 'all'
@@ -38,8 +62,10 @@ async function loadConsolidado() {
   if (user)   params.set('user_id', user);
   if (bucket) params.set('bucket', bucket);
 
+  const path = seq ? '/v1/productivity/timeline' : '/v1/productivity/consolidado';
   try {
-    const d = await api('/v1/productivity/consolidado?' + params.toString());
+    const d = await api(path + '?' + params.toString());
+    _consTimeline = seq;
     const t = d.totals || {};
     const total = t.total || 0;
     const pctOf = v => total > 0 ? ` <small>${(v / total * 100).toFixed(0)}%</small>` : '';
@@ -63,15 +89,18 @@ async function loadConsolidado() {
   } catch (e) { toast('Falha ao carregar consolidado: ' + e.message); }
 }
 
+// Monta a lista final (filtro de categoria + ordenação + agrupamento) e pagina.
 function _renderConsItems() {
-  const tbody = document.querySelector('#consTable tbody');
-  if (!tbody) return;
   const cat  = document.getElementById('consCategory')?.value || '';
   const mode = document.getElementById('consGroupMode')?.value || 'detail';
 
   let items = cat ? _consItems.filter(i => i.category === cat) : _consItems.slice();
 
-  if (mode === 'byapp') {
+  if (_consTimeline) {
+    // Linha do tempo: do mais novo para o mais antigo.
+    items.sort((a, b) => (b.start_ts || '').localeCompare(a.start_ts || ''));
+  } else if (mode === 'byapp') {
+    // Colapsa por app/site; maior tempo primeiro.
     const m = {};
     items.forEach(i => {
       const k = (i.app || '') + '|' + i.type;
@@ -81,32 +110,58 @@ function _renderConsItems() {
     });
     items = Object.values(m).sort((a, b) => b.total_sec - a.total_sec);
   }
+  // 'detail' = como veio do servidor (por tempo, maior primeiro).
 
-  const lbl = document.getElementById('consCountLabel');
-  if (lbl) lbl.textContent = `— ${items.length} ${mode === 'byapp' ? 'apps/sites' : 'itens'}`;
+  _consView = items;
+  _consPage = 0;
+  _renderConsPage();
+}
 
-  if (!items.length) {
+function _renderConsPage() {
+  const tbody = document.querySelector('#consTable tbody');
+  if (!tbody) return;
+  const total = _consView.length;
+  const label = _consTimeline ? 'blocos' : (document.getElementById('consGroupMode')?.value === 'byapp' ? 'apps/sites' : 'itens');
+
+  if (!total) {
     tbody.innerHTML = '<tr><td colspan="5" class="empty-state">Nenhuma coleta neste período/filtro.</td></tr>';
+    _renderCfgPagination('consPagination', 'consCountLabel', 0, 0, _CONS_PAGE_SIZE, '_consGoTo', label);
     return;
   }
 
-  tbody.innerHTML = items.map(i => {
-    const when     = i.last_access ? ptDateTime(i.last_access) : '—';
-    const dur      = fmtSec(i.total_sec || 0);
-    const app      = escHtml(i.app || '—');
-    const title    = (mode === 'byapp') ? '' : escHtml(i.title || '');
-    const tipoColor = i.type === 'AFK' ? 'var(--warn)' : (i.type === 'Internet' ? '#6c8cff' : 'var(--text)');
-    const catCell  = i.category === 'afk'
-      ? '<span style="color:var(--text-dim);font-size:11px">—</span>'
-      : (CAT_PILLS[i.category] || CAT_PILLS.uncategorized);
-    return `<tr>
-      <td style="font-size:12px;white-space:nowrap">${when}</td>
-      <td style="white-space:nowrap">${dur}</td>
-      <td><strong style="font-size:12px">${app}</strong>${title ? `<br><span style="color:var(--text-dim);font-size:11px">${title}</span>` : ''}</td>
-      <td style="font-size:12px;color:${tipoColor};font-weight:600">${i.type}</td>
-      <td>${catCell}</td>
-    </tr>`;
-  }).join('');
+  const start = _consPage * _CONS_PAGE_SIZE;
+  const slice = _consView.slice(start, start + _CONS_PAGE_SIZE);
+  tbody.innerHTML = slice.map(_consRow).join('');
+  _renderCfgPagination('consPagination', 'consCountLabel', _consPage, total, _CONS_PAGE_SIZE, '_consGoTo', label);
+}
+
+function _consGoTo(p)   { _consPage = p; _renderConsPage(); document.getElementById('consTable')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+function _consSetSize(v) { _CONS_PAGE_SIZE = Math.max(1, parseInt(v, 10) || 50); _consPage = 0; _renderConsPage(); }
+
+function _consRow(i) {
+  const tipoColor = i.type === 'AFK' ? 'var(--warn)' : (i.type === 'Internet' ? '#6c8cff' : 'var(--text)');
+  const catCell   = i.category === 'afk'
+    ? '<span style="color:var(--text-dim);font-size:11px">—</span>'
+    : (CAT_PILLS[i.category] || CAT_PILLS.uncategorized);
+  const app = escHtml(i.app || '—');
+
+  let when, title;
+  if (_consTimeline) {
+    const ini = _consTime(i.start_ts), fim = _consTime(i.end_ts);
+    when  = (ini === fim) ? ini : `${ini}–${fim}`;
+    title = escHtml(i.title || '');
+  } else {
+    when  = i.last_access ? ptDateTime(i.last_access) : '—';
+    title = (document.getElementById('consGroupMode')?.value === 'byapp') ? '' : escHtml(i.title || '');
+  }
+
+  return `<tr>
+    <td style="font-size:12px;white-space:nowrap">${when}</td>
+    <td style="white-space:nowrap">${fmtSec(i.total_sec || 0)}</td>
+    <td><strong style="font-size:12px">${app}</strong>${title ? `<br><span style="color:var(--text-dim);font-size:11px">${title}</span>` : ''}</td>
+    <td style="font-size:12px;color:${tipoColor};font-weight:600">${i.type}</td>
+    <td>${catCell}</td>
+  </tr>`;
 }
 
 function drawConsDailyChart(daily) {
