@@ -119,6 +119,11 @@ FROM_EMAIL   = os.getenv("WORKPULSE_FROM_EMAIL", "noreply@workpulse.com.br")  # 
 REPORT_TZ    = os.getenv("WORKPULSE_TZ", "America/Sao_Paulo")
 # Janela para considerar uma pessoa "online" (agente reportou neste intervalo).
 ONLINE_THRESHOLD_MINUTES = int(os.getenv("WORKPULSE_ONLINE_MINUTES", "30"))
+# Teto de um evento de AFK legítimo (segundos). Acima disso é quase certo artefato
+# de sono/suspensão (a máquina dorme e ao acordar emite UM AFK de horas). Esses
+# eventos são DESCARTADOS nas somas de AFK (leituras + rollup). Default 3h.
+# Bug 2 do BUGS_COLETA.md — Fase A. Ajustável por env.
+AFK_MAX_SEC = int(os.getenv("WORKPULSE_AFK_MAX_SEC", "10800"))
 
 if not ADMIN_TOKEN or len(ADMIN_TOKEN) < 32:
     raise RuntimeError(
@@ -299,6 +304,9 @@ _SCHEMA_STMTS = [
     "CREATE INDEX IF NOT EXISTS idx_events_bucket_ts    ON events(tenant_id, bucket, ts)",
     "CREATE INDEX IF NOT EXISTS idx_events_app          ON events((data_json->>'app'))",
     "CREATE INDEX IF NOT EXISTS idx_events_title        ON events((data_json->>'title'))",
+    # Idempotência (Bug 1 / Fase B): UUID por evento enviado pelo agente novo. O
+    # índice único parcial é criado CONCURRENTLY em init_db (não trava o ingest).
+    "ALTER TABLE events ADD COLUMN IF NOT EXISTS event_id TEXT",
     "CREATE INDEX IF NOT EXISTS idx_daily_tenant_day    ON daily_summaries(tenant_id, day)",
     "CREATE INDEX IF NOT EXISTS idx_licenses_tenant     ON licenses(tenant_id)",
     "CREATE INDEX IF NOT EXISTS idx_audit_ts            ON audit_log(ts)",
@@ -336,10 +344,79 @@ _SCHEMA_STMTS = [
 ]
 
 
+# Dedup por event_id (Fase B): só ativa quando o índice único parcial existe e
+# está VÁLIDO. Enquanto não estiver, o ingest grava sem ON CONFLICT (inofensivo —
+# agente antigo nem manda event_id).
+_EVENT_ID_DEDUP    = False
+_EVENT_ID_IDX_LOCK = 0x45564944   # "EVID" — advisory lock p/ serializar o build entre tasks
+
+
+def _event_id_index_valid(c) -> bool:
+    r = c.execute(
+        """SELECT i.indisvalid AS ok
+           FROM pg_class ci JOIN pg_index i ON i.indexrelid = ci.oid
+           WHERE ci.relname = 'idx_events_eid'""",
+    ).fetchone()
+    return bool(r and r["ok"])
+
+
+def _ensure_event_id_index() -> None:
+    """Garante o índice único parcial de event_id VÁLIDO, sem travar o ingest:
+      - já válido → nada a fazer;
+      - serializa entre tasks com advisory lock (só UMA constrói; as outras seguem
+        e o watcher liga o dedup quando ficar válido);
+      - derruba índice INVÁLIDO de um build interrompido antes de refazer;
+      - constrói CONCURRENTLY (não trava a tabela events)."""
+    try:
+        with db() as c:
+            if _event_id_index_valid(c):
+                return
+            got = c.execute("SELECT pg_try_advisory_lock(%s) AS g", (_EVENT_ID_IDX_LOCK,)).fetchone()["g"]
+            if not got:
+                return   # outra task está construindo; o watcher pega quando validar
+            try:
+                exists = c.execute("SELECT 1 FROM pg_class WHERE relname='idx_events_eid'").fetchone()
+                if exists and not _event_id_index_valid(c):
+                    c.execute("DROP INDEX IF EXISTS idx_events_eid")   # build anterior interrompido
+                c.execute(
+                    "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS idx_events_eid "
+                    "ON events(event_id) WHERE event_id IS NOT NULL"
+                )
+            finally:
+                c.execute("SELECT pg_advisory_unlock(%s)", (_EVENT_ID_IDX_LOCK,))
+    except Exception as exc:
+        print(f"[init_db] idx_events_eid adiado: {exc}", flush=True)
+
+
+def _refresh_event_id_dedup() -> bool:
+    global _EVENT_ID_DEDUP
+    try:
+        with db() as c:
+            _EVENT_ID_DEDUP = _event_id_index_valid(c)
+    except Exception:
+        _EVENT_ID_DEDUP = False
+    return _EVENT_ID_DEDUP
+
+
+async def _event_id_dedup_watcher() -> None:
+    """Liga o dedup nesta task assim que o índice ficar VÁLIDO (talvez construído
+    por outra task), sem precisar de redeploy. Re-checa por ~15 min e para."""
+    loop = asyncio.get_event_loop()
+    for _ in range(30):
+        if await loop.run_in_executor(None, _refresh_event_id_dedup):
+            print("[startup] dedup por event_id: ATIVO", flush=True)
+            return
+        await asyncio.sleep(30)
+    print("[startup] dedup por event_id: ainda inativo apos 15min", flush=True)
+
+
 def init_db() -> None:
     with db() as c:
         for stmt in _SCHEMA_STMTS:
             c.execute(stmt)
+    _ensure_event_id_index()    # CONCURRENTLY, fora do loop (não pode em transação)
+    _refresh_event_id_dedup()   # liga o dedup se o índice já ficou válido
+    print(f"[init_db] dedup por event_id: {'ATIVO' if _EVENT_ID_DEDUP else 'inativo (watcher segue tentando)'}", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -530,6 +607,7 @@ class IngestEvent(BaseModel):
     timestamp: dt.datetime
     duration:  float = 0.0
     data:      dict[str, Any] = Field(default_factory=dict)
+    event_id:  str | None = None   # UUID por evento (agente novo) → idempotência
 
 
 class IngestPayload(BaseModel):
@@ -770,10 +848,11 @@ def _do_retention() -> None:
 
             with db() as c:
                 old_rows = c.execute(
-                    """SELECT user_id,
+                    f"""SELECT user_id,
                               substr(ts, 1, 10) AS day,
                               SUM(CASE WHEN bucket='window' THEN duration_sec ELSE 0 END) AS active_sec,
                               SUM(CASE WHEN bucket='afk' AND data_json->>'status'='afk'
+                                        AND duration_sec <= {AFK_MAX_SEC}
                                        THEN duration_sec ELSE 0 END) AS afk_sec
                        FROM events
                        WHERE tenant_id=%s AND ts < %s
@@ -814,7 +893,9 @@ ROLLUP_INTERVAL_SEC  = int(os.getenv("WORKPULSE_ROLLUP_SEC", "300"))          # 
 ROLLUP_BACKFILL_DAYS = int(os.getenv("WORKPULSE_ROLLUP_BACKFILL_DAYS", "3"))  # dias antigos por ciclo (suave)
 # Versão do esquema de rollup. Ao subir (ex.: nova tabela agg_app_day), o worker
 # reabre o backfill UMA vez por tenant p/ repreencher os agregados antigos.
-ROLLUP_SCHEMA_VER    = 2
+# v3: Fase A do BUGS_COLETA.md — cap de AFK gigante (sono) nas agregações. Subir a
+# versão re-rola o histórico (suave, 3 dias/ciclo) já com o teto aplicado.
+ROLLUP_SCHEMA_VER    = 3
 
 
 def _local_day_utc_bounds(local_day: dt.date) -> tuple[str, str]:
@@ -833,10 +914,11 @@ def _rollup_hours(c, tenant: str, since: str, until: str) -> None:
     """(Re)agrega ativo/AFK por (usuário, hora-UTC) na faixa [since, until).
     Seguro p/ qualquer faixa: cada bucket de hora é independente."""
     c.execute(
-        """INSERT INTO agg_user_hour (tenant_id, user_id, hour, active_sec, afk_sec)
+        f"""INSERT INTO agg_user_hour (tenant_id, user_id, hour, active_sec, afk_sec)
            SELECT %s, user_id, substr(ts,1,13) AS hour,
                   SUM(CASE WHEN bucket='window' THEN duration_sec ELSE 0 END),
                   SUM(CASE WHEN bucket='afk' AND data_json->>'status'='afk'
+                            AND duration_sec <= {AFK_MAX_SEC}
                            THEN duration_sec ELSE 0 END)
            FROM events
            WHERE tenant_id=%s AND ts>=%s AND ts<%s
@@ -852,7 +934,7 @@ def _rollup_days(c, tenant: str, since: str, until: str) -> None:
     """(Re)agrega a JORNADA por (usuário, dia-LOCAL). A faixa DEVE cobrir dias
     locais inteiros (senão start/end/afk_in saem parciais)."""
     c.execute(
-        """INSERT INTO agg_user_day
+        f"""INSERT INTO agg_user_day
                (tenant_id, user_id, day, focus_sec, afk_in_sec, afk_after_sec, start_sec, end_sec)
            WITH w AS (
                SELECT user_id,
@@ -877,6 +959,7 @@ def _rollup_days(c, tenant: str, since: str, until: str) -> None:
                FROM events
                WHERE tenant_id=%(tenant)s AND bucket='afk'
                  AND data_json->>'status'='afk'
+                 AND duration_sec <= {AFK_MAX_SEC}
                  AND ts>=%(since)s AND ts<%(until)s
            ),
            afk AS (
@@ -1065,6 +1148,7 @@ def _hour_rows(c, tenant, since, until, SC, A):
         f"""SELECT substr(ts,1,13) AS h, user_id,
                    SUM(CASE WHEN bucket='window' THEN duration_sec ELSE 0 END) AS active,
                    SUM(CASE WHEN bucket='afk' AND data_json->>'status'='afk'
+                             AND duration_sec <= {AFK_MAX_SEC}
                             THEN duration_sec ELSE 0 END) AS afk
             FROM events WHERE tenant_id=%s{SC} AND ts>=%s AND ts<=%s
             GROUP BY h, user_id""",
@@ -1107,7 +1191,7 @@ def _afk_in_by_user(c, tenant, since, until):
             (tenant, d0, d1),
         ).fetchall()
     return c.execute(
-        """
+        f"""
         WITH w AS (
             SELECT user_id,
                    (ts::timestamptz AT TIME ZONE %(tz)s)                 AS lts,
@@ -1129,6 +1213,7 @@ def _afk_in_by_user(c, tenant, since, until):
             FROM events
             WHERE tenant_id = %(tenant)s AND bucket = 'afk'
               AND data_json->>'status' = 'afk'
+              AND duration_sec <= {AFK_MAX_SEC}
               AND ts >= %(since)s AND ts < %(until)s
         )
         SELECT a.user_id,
@@ -1153,12 +1238,14 @@ async def lifespan(app: FastAPI):
     task_reports   = asyncio.create_task(_reports_worker())
     task_alerts    = asyncio.create_task(_alerts_worker())
     task_rollup    = asyncio.create_task(_rollup_worker())
+    task_dedup     = asyncio.create_task(_event_id_dedup_watcher())
     yield
     task_retention.cancel()
     task_reports.cancel()
     task_alerts.cancel()
     task_rollup.cancel()
-    for t in (task_retention, task_reports, task_alerts, task_rollup):
+    task_dedup.cancel()
+    for t in (task_retention, task_reports, task_alerts, task_rollup, task_dedup):
         try:
             await t
         except asyncio.CancelledError:
@@ -1283,13 +1370,18 @@ def ingest(
                 claims["tenant"], user_id, device_id,
                 e.bucket, e.timestamp.isoformat(), e.duration,
                 psycopg2.extras.Json(e.data),
+                (e.event_id or None),
             )
             for e in payload.events
         ]
+        # Com o índice único válido, reenvios do mesmo evento (mesmo event_id) são
+        # ignorados — idempotência. Sem o índice (ou agente antigo sem event_id),
+        # grava normal. NULL nunca conflita, então o antigo segue funcionando.
+        _conflict = " ON CONFLICT (event_id) WHERE event_id IS NOT NULL DO NOTHING" if _EVENT_ID_DEDUP else ""
         c.executemany(
-            """INSERT INTO events
-                   (tenant_id, user_id, device_id, bucket, ts, duration_sec, data_json)
-               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+            f"""INSERT INTO events
+                   (tenant_id, user_id, device_id, bucket, ts, duration_sec, data_json, event_id)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s){_conflict}""",
             rows,
         )
 
@@ -1427,9 +1519,10 @@ def user_summary(user_id: str, tenant: str, request: Request, days: int = 7,
             raise HTTPException(status_code=403, detail="colaborador fora do seu escopo")
 
         totals = c.execute(
-            """SELECT
+            f"""SELECT
                    SUM(CASE WHEN bucket='window' THEN duration_sec END) AS active,
                    SUM(CASE WHEN bucket='afk' AND data_json->>'status'='afk'
+                             AND duration_sec <= {AFK_MAX_SEC}
                             THEN duration_sec END) AS afk
                FROM events WHERE tenant_id=%s AND user_id=%s AND ts>=%s AND ts<=%s""",
             (tenant, user_id, since, until),
@@ -1444,9 +1537,10 @@ def user_summary(user_id: str, tenant: str, request: Request, days: int = 7,
         ).fetchall()
 
         daily = c.execute(
-            """SELECT substr(ts, 1, 10) AS day,
+            f"""SELECT substr(ts, 1, 10) AS day,
                       SUM(CASE WHEN bucket='window' THEN duration_sec ELSE 0 END) AS active,
                       SUM(CASE WHEN bucket='afk' AND data_json->>'status'='afk'
+                                AND duration_sec <= {AFK_MAX_SEC}
                                THEN duration_sec ELSE 0 END) AS afk
                FROM events WHERE tenant_id=%s AND user_id=%s AND ts>=%s AND ts<=%s
                GROUP BY day ORDER BY day""",
@@ -1676,7 +1770,7 @@ def jornada(
 
     # %(tz)s parametriza o fuso; ts::timestamptz garante ordenação cronológica
     # mesmo com formatos mistos ('+00:00', 'Z', com/sem milissegundos).
-    sql = """
+    sql = f"""
         WITH w AS (
             SELECT (ts::timestamptz AT TIME ZONE %(tz)s)                       AS lts,
                    (ts::timestamptz AT TIME ZONE %(tz)s)
@@ -1701,6 +1795,7 @@ def jornada(
             FROM events
             WHERE tenant_id = %(tenant)s AND user_id = %(uid)s AND bucket = 'afk'
               AND data_json->>'status' = 'afk'
+              AND duration_sec <= {AFK_MAX_SEC}
               AND ts::timestamptz >= %(since)s::timestamptz
               AND ts::timestamptz <  %(until)s::timestamptz
         ),
@@ -2204,6 +2299,7 @@ def workforce_timeseries(tenant: str, request: Request, days: int = 30, bucket: 
         rows = c.execute(
             f"""SELECT substr(ts,1,10) AS day, SUM(duration_sec) AS seconds
                FROM events WHERE tenant_id=%s{SC} AND ts>=%s AND ts<=%s AND bucket=%s
+                 AND (bucket <> 'afk' OR duration_sec <= {AFK_MAX_SEC})
                GROUP BY day ORDER BY day""",
             tuple([tenant, *A, since, until, bucket]),
         ).fetchall()
@@ -2857,9 +2953,10 @@ def _build_report_pdf(
             uid_filter = user_filter or []
             if uid_filter:
                 rows = c.execute(
-                    """SELECT u.display_name, u.email, u.department,
+                    f"""SELECT u.display_name, u.email, u.department,
                               COALESCE(SUM(CASE WHEN e.bucket='window' THEN e.duration_sec END),0) AS active,
                               COALESCE(SUM(CASE WHEN e.bucket='afk' AND e.data_json->>'status'='afk'
+                                                AND e.duration_sec <= {AFK_MAX_SEC}
                                                THEN e.duration_sec END),0) AS afk
                        FROM users u LEFT JOIN events e
                             ON e.tenant_id=u.tenant_id AND e.user_id=u.user_id
@@ -2872,9 +2969,10 @@ def _build_report_pdf(
                 ).fetchall()
             else:
                 rows = c.execute(
-                    """SELECT u.display_name, u.email, u.department,
+                    f"""SELECT u.display_name, u.email, u.department,
                               COALESCE(SUM(CASE WHEN e.bucket='window' THEN e.duration_sec END),0) AS active,
                               COALESCE(SUM(CASE WHEN e.bucket='afk' AND e.data_json->>'status'='afk'
+                                                AND e.duration_sec <= {AFK_MAX_SEC}
                                                THEN e.duration_sec END),0) AS afk
                        FROM users u LEFT JOIN events e
                             ON e.tenant_id=u.tenant_id AND e.user_id=u.user_id
@@ -2942,6 +3040,7 @@ def _build_report_pdf(
                     FROM events
                     WHERE tenant_id = %(tenant)s AND bucket = 'afk'
                       AND data_json->>'status' = 'afk'
+                      AND duration_sec <= {AFK_MAX_SEC}
                       AND ts::timestamptz >= %(since)s::timestamptz
                       AND ts::timestamptz <= %(until)s::timestamptz{_uf}
                 ),
@@ -3020,9 +3119,10 @@ def _build_report_pdf(
         if "tendencias" in sections:
             story.append(Paragraph("Tendências (dia a dia no período)", h2_style))
             rows = c.execute(
-                """SELECT substr(ts,1,10) AS day,
+                f"""SELECT substr(ts,1,10) AS day,
                           SUM(CASE WHEN bucket='window' THEN duration_sec ELSE 0 END) AS active,
                           SUM(CASE WHEN bucket='afk' AND data_json->>'status'='afk'
+                                    AND duration_sec <= {AFK_MAX_SEC}
                                    THEN duration_sec ELSE 0 END) AS afk,
                           COUNT(DISTINCT user_id) AS users
                    FROM events
@@ -5977,6 +6077,7 @@ _SCHEMA_STMTS.extend([
         afk_timeout_sec        INTEGER,
         poll_interval_ms       INTEGER,
         heartbeat_interval_sec INTEGER,
+        sync_interval_sec      INTEGER,
         capture_titles         BOOLEAN,
         meeting_patterns       TEXT,
         updated_at             TEXT
@@ -5988,11 +6089,18 @@ _SCHEMA_STMTS.extend([
         afk_timeout_sec        INTEGER,
         poll_interval_ms       INTEGER,
         heartbeat_interval_sec INTEGER,
+        sync_interval_sec      INTEGER,
         capture_titles         BOOLEAN,
         meeting_patterns       TEXT,
         updated_at             TEXT
     )
     """,
+])
+
+# Migração: bancos que já tinham as tabelas de config sem a coluna sync_interval_sec.
+_SCHEMA_STMTS.extend([
+    "ALTER TABLE agent_config_global ADD COLUMN IF NOT EXISTS sync_interval_sec INTEGER",
+    "ALTER TABLE agent_config_tenant ADD COLUMN IF NOT EXISTS sync_interval_sec INTEGER",
 ])
 
 # ---------------------------------------------------------------------------
@@ -6122,6 +6230,7 @@ _AGENT_CFG_DEFAULTS = {
     "afk_timeout_sec": 180,
     "poll_interval_ms": 1000,
     "heartbeat_interval_sec": 5,
+    "sync_interval_sec": 30,
     "capture_titles": True,
     "meeting_patterns": [
         "meet.google.com", "google meet", "meet -", "meet:",
@@ -6131,7 +6240,7 @@ _AGENT_CFG_DEFAULTS = {
     ],
 }
 _AGENT_CFG_FIELDS = ("afk_timeout_sec", "poll_interval_ms", "heartbeat_interval_sec",
-                     "capture_titles", "meeting_patterns")
+                     "sync_interval_sec", "capture_titles", "meeting_patterns")
 
 
 def _agent_cfg_decode(row) -> dict:
@@ -6186,12 +6295,13 @@ def _agent_cfg_upsert(table: str, key_col: str, key_val, body: "AgentCfgIn", all
         c.execute(
             f"""INSERT INTO {table}
                   ({key_col}, afk_timeout_sec, poll_interval_ms, heartbeat_interval_sec,
-                   capture_titles, meeting_patterns, updated_at)
-                VALUES (%s,%s,%s,%s,%s,%s,%s)
+                   sync_interval_sec, capture_titles, meeting_patterns, updated_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT ({key_col}) DO UPDATE SET
                   afk_timeout_sec=EXCLUDED.afk_timeout_sec,
                   poll_interval_ms=EXCLUDED.poll_interval_ms,
                   heartbeat_interval_sec=EXCLUDED.heartbeat_interval_sec,
+                  sync_interval_sec=EXCLUDED.sync_interval_sec,
                   capture_titles=EXCLUDED.capture_titles,
                   meeting_patterns=EXCLUDED.meeting_patterns,
                   updated_at=EXCLUDED.updated_at""",
@@ -6199,6 +6309,7 @@ def _agent_cfg_upsert(table: str, key_col: str, key_val, body: "AgentCfgIn", all
              col("afk_timeout_sec", _AGENT_CFG_DEFAULTS["afk_timeout_sec"]),
              col("poll_interval_ms", _AGENT_CFG_DEFAULTS["poll_interval_ms"]),
              col("heartbeat_interval_sec", _AGENT_CFG_DEFAULTS["heartbeat_interval_sec"]),
+             col("sync_interval_sec", _AGENT_CFG_DEFAULTS["sync_interval_sec"]),
              col("capture_titles", _AGENT_CFG_DEFAULTS["capture_titles"]),
              mp_val, _now_utc().isoformat()),
         )
@@ -6208,6 +6319,7 @@ class AgentCfgIn(BaseModel):
     afk_timeout_sec:        int | None = None
     poll_interval_ms:       int | None = None
     heartbeat_interval_sec: int | None = None
+    sync_interval_sec:      int | None = None
     capture_titles:         bool | None = None
     meeting_patterns:       list[str] | None = None
 

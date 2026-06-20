@@ -1,7 +1,7 @@
 # CLAUDE.md — WorkPulse
 
 Guidance for AI agents (Claude Code / Cowork) working on WorkPulse.
-**Read this fully before changing anything.** Last updated: 2026-06-17.
+**Read this fully before changing anything.** Last updated: 2026-06-18.
 
 > **Para o estado atual (auth e-mail/senha, papéis, Localização, Administrativo,
 > Financeiro, SMTP por tenant, motor de Alertas, etc.), leia primeiro a seção
@@ -680,6 +680,69 @@ com enrollment).
 
 ---
 
+## Estado atual (2026-06-18) — Suporte Técnico, bugs de coleta (Fases A/B/C), Consolidado
+
+Sprint: nova tela **Suporte Técnico** (+ perfil), correção dos **bugs de coleta** do
+`../BUGS_COLETA.md` (AFK gigante, duplicação, sono), refinos na **Consolidado** e perf da
+Categorização.
+
+### Perfil `suporte` + tela Suporte Técnico
+- Papel **`suporte`** em `CLIENT_ROLES`/`ALL_ROLES`. Tenant-scoped, sem restrição de líder.
+  Selecionável na tela Usuários.
+- Página **Administrativo → Suporte Técnico** (`tab-suportetec`, `wp-support.js`), visível só
+  para **Admin Master, Admin e Suporte** (`data-role="suporte_admin"`; o perfil `suporte` só vê
+  essa tela — `_applyRoleUI` esconde o resto e cai nela no login).
+- 2 cards (grid 1fr 1fr): esquerda = lista paginada (Colaborador/Status/Última atividade/Versão
+  do agente); direita = detalhe ao clicar (Departamento/Máquina/Sistema/última coleta AFK·App·Web/
+  início da jornada). Endpoints `require_role("admin_master","admin","suporte")` (definidos APÓS
+  `require_role` no arquivo): `GET /v1/support/people`, `GET /v1/support/person` (últimas coletas
+  via `ORDER BY ts DESC LIMIT 1` + piso 30d, NÃO `MAX(ts)` sem piso que levava ~1min/clique).
+
+### Online/offline — tolerância a skew de relógio
+`_isOnline` (wp-people.js) considera online dentro de **±**`WP_ONLINE_MINUTES`. Agente que
+reportou "agora" pode ter `last_seen` segundos no futuro (relógio do servidor adiantado); antes
+caía em Offline com "última atividade: agora".
+
+### Bugs de coleta — Fases A/B/C (detalhe em `../BUGS_COLETA.md`)
+- **Fase A (no ar):** trava de AFK gigante (sono) nas LEITURAS. `AFK_MAX_SEC`
+  (`WORKPULSE_AFK_MAX_SEC`, default 10800s/3h) — AFK acima do teto é **descartado** em TODA soma
+  de AFK (rollup, `_hour_rows`, `_afk_in_by_user`, jornada, drill, overview/tendências, PDF,
+  retenção). `ROLLUP_SCHEMA_VER`=**3** re-rola o histórico suave.
+- **Fase B1 (no ar):** idempotência. Coluna `events.event_id` + índice único **parcial**
+  `idx_events_eid` criado **CONCURRENTLY** em `init_db` (advisory-lock + `_event_id_dedup_watcher`
+  + flag `_EVENT_ID_DEDUP`). Ingest: `INSERT ... ON CONFLICT (event_id) WHERE event_id IS NOT NULL
+  DO NOTHING` quando o índice é válido. Retrocompatível (agente antigo → NULL → grava normal).
+  Cuidado: 2 tasks subindo juntas davam deadlock no build → daí o advisory-lock + skip-se-válido.
+- **Fase B2 (agente):** `sync.rs` envia `event_id` = **UUID v5 do conteúdo**
+  (`host|bucket|ts|duration|data`) — estável entre reenvios, distinto entre eventos. `uuid` com
+  feature `v5`. (Chave natural, toca só sync.rs — sem persistir no buffer.)
+- **Fase C (agente):** `tracker.rs` detecta resume de suspensão (gap > 120s entre ciclos via
+  `last_loop_utc`) e **descarta** o buraco de sono. **Validado** (hibernação de 1h25 não virou AFK).
+- **Bug 3 — dupla contagem da carência (agente):** a fatia inicial de AFK **não retroage mais**
+  `afk_timeout`. Antes `ts=now-afk_timeout, duration=afk_timeout` contava a carência (3min) como
+  ATIVO (heartbeats) **E** AFK. Agora `ts=now, duration=0` (marcador) e o AFK acumula pelas fatias
+  periódicas. **Substitui** o ponto (1) do bloco "AFK with real duration (2026-05-27)" acima.
+- B2+C+Bug3 no **MESMO rebuild** (nova versão, ex. 2.3.0). Pendente: rollout da frota → depois
+  **Fase D** (limpeza do histórico: dedup + AFK gigante), opcional, em lotes/throttle.
+
+### Coletas → Consolidado (nova tela)
+`tab-consolidado` (`wp-consolidado.js`) abaixo de Internet. Endpoints
+`/v1/productivity/consolidado` (agregado do período inteiro, inclui browsers, `bucket=''|'afk'|
+'all'`) e `/v1/productivity/timeline` (blocos cronológicos colapsando consecutivos iguais).
+Defaults Tipo=Todos / Agrupamento=Sequencial; mais novo→mais antigo; paginação (`_renderCfgPagination`).
+Gráfico por categoria/dia com **unidade adaptativa** (min/h) + `maxBarThickness`.
+
+### Categorização — perf + lista de trabalho
+`/v1/productivity/apps` lê do rollup `agg_app_day` quando pronto + cache; `/v1/productivity/internet`
+ganhou `detail=0` (pula o scan do gráfico), filtro de navegador no SQL (`_only_browser_where`) e
+cache. Toggle **"só não categorizados"** (default on, `uncat=1`) nos cards Apps/Sites. Era ~50s → sub-segundo.
+
+### Cache busting (atual)
+`wp-consolidado.js?v=6`, `wp-support.js?v=3`, `wp-people.js?v=22`, `wp-settings.js?v=26`,
+`wp-users.js?v=27`, `wp-nav.js?v=32`, `wp-auth.js?v=22`.
+
+---
+
 ## Estado atual (2026-06-17)
 
 Snapshot consolidado do que existe hoje. O changelog detalhado por data segue abaixo
@@ -697,8 +760,9 @@ de reunião; e a **Fase 1 da gestão de frota** (distribuição de builds + enro
 Migrou do login Tenant+Token para **e-mail/senha** (cookie de sessão `wp_sess`).
 - Tabelas: `dash_users` (email único global, `role`, `status`, hash argon2),
   `dash_sessions`, `dash_user_tokens` (link de definir/redefinir senha).
-- Papéis: `admin_master`, `supervisor`, `lider`, `wp_admin` (plataforma).
-  `CLIENT_ROLES=("admin_master","supervisor","lider")`, `ALL_ROLES` inclui `wp_admin`.
+- Papéis: `admin_master`, `admin`, `supervisor`, `lider`, `suporte`, `wp_admin` (plataforma).
+  `CLIENT_ROLES=("admin_master","admin","supervisor","lider","suporte")`, `ALL_ROLES` inclui `wp_admin`.
+  `suporte` só vê a tela Suporte Técnico (ver "Estado atual 2026-06-18").
 - Deps no backend: `require_session`, `require_role("...")`, `require_tenant_scope`
   (aceita cookie de sessão **ou** token break-glass). `_load_session_user`.
 - **Líder** = perfil mais restrito: vê só colaboradores no escopo dele. Tabela

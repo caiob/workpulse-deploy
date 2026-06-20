@@ -170,13 +170,31 @@ function drawConsDailyChart(daily) {
   const ct  = chartTheme();
   const ctx = document.getElementById('chartConsDaily').getContext('2d');
   const hasAfk = daily.some(d => (d.afk || 0) > 0);
+
+  // Unidade adaptativa: minutos quando o maior dia é < 1h, senão horas.
+  // Evita a escala "0,08h" ilegível para tempos curtos.
+  const maxSec = Math.max(0, ...daily.map(d =>
+    (d.productive || 0) + (d.unproductive || 0) + (d.neutral || 0) + (d.uncategorized || 0) + (d.afk || 0)));
+  const useMin = maxSec < 3600;
+  const div    = useMin ? 60 : 3600;
+  const unit   = useMin ? 'min' : 'h';
+  const conv   = s => +((s || 0) / div).toFixed(useMin ? 0 : 2);
+
+  // Largura idêntica à da Visão Geral ("Horas trabalhadas por dia"): SEM
+  // maxBarThickness. A barra preenche o slot da categoria (padrão do Chart.js) —
+  // larga com 1 dia e afinando conforme aumentam os dias. Um cap fixo deixava 1 dia fino.
+  const mk = (label, key, color) => ({
+    label, data: daily.map(d => conv(d[key])),
+    backgroundColor: color, borderRadius: 4, stack: 'a',
+  });
   const ds = [
-    { label: 'Produtivo',        data: daily.map(d => +(d.productive    / 3600).toFixed(2)), backgroundColor: CAT_COLORS.productive,    borderRadius: 4, stack: 'a' },
-    { label: 'Não-produtivo',    data: daily.map(d => +(d.unproductive  / 3600).toFixed(2)), backgroundColor: CAT_COLORS.unproductive,  borderRadius: 4, stack: 'a' },
-    { label: 'Neutro',           data: daily.map(d => +(d.neutral       / 3600).toFixed(2)), backgroundColor: CAT_COLORS.neutral,        borderRadius: 4, stack: 'a' },
-    { label: 'Não categorizado', data: daily.map(d => +(d.uncategorized / 3600).toFixed(2)), backgroundColor: CAT_COLORS.uncategorized,  borderRadius: 4, stack: 'a' },
+    mk('Produtivo',        'productive',    CAT_COLORS.productive),
+    mk('Não-produtivo',    'unproductive',  CAT_COLORS.unproductive),
+    mk('Neutro',           'neutral',       CAT_COLORS.neutral),
+    mk('Não categorizado', 'uncategorized', CAT_COLORS.uncategorized),
   ];
-  if (hasAfk) ds.push({ label: 'AFK', data: daily.map(d => +((d.afk || 0) / 3600).toFixed(2)), backgroundColor: '#f59e0b', borderRadius: 4, stack: 'a' });
+  if (hasAfk) ds.push(mk('AFK', 'afk', '#f59e0b'));
+
   state.charts.consDaily = new Chart(ctx, {
     type: 'bar',
     data: { labels: daily.map(d => ptDate(d.day + 'T12:00:00')), datasets: ds },
@@ -184,11 +202,11 @@ function drawConsDailyChart(daily) {
       responsive: true, maintainAspectRatio: false,
       plugins: {
         legend:  { labels: { color: ct.label, font: { size: 11 }, boxWidth: 12 } },
-        tooltip: { callbacks: { label: c => ' ' + c.dataset.label + ': ' + c.parsed.y.toFixed(1) + 'h' } },
+        tooltip: { callbacks: { label: c => ' ' + c.dataset.label + ': ' + c.parsed.y + unit } },
       },
       scales: {
         x: { stacked: true, ticks: { color: ct.label }, grid: { color: ct.grid } },
-        y: { stacked: true, ticks: { color: ct.label, callback: v => v + 'h' }, grid: { color: ct.grid } },
+        y: { stacked: true, ticks: { color: ct.label, callback: val => val + unit }, grid: { color: ct.grid } },
       },
     },
   });

@@ -424,10 +424,23 @@
       <div class="card span-12">
         <h3>Config do agente (global)</h3>
         <p style="font-size:11px;color:var(--text-muted);margin:0 0 10px">Valores aplicados a <strong>todos os tenants</strong>. O agente busca essa config no servidor (sem recompilar) e cada cliente pode sobrescrever na própria conta. Mudanças valem no próximo refresh do agente (~10 min) ou ao reiniciar.</p>
+        <details class="ac-help" style="margin:0 0 14px;border:1px solid var(--border,#2a3354);border-radius:8px;padding:8px 12px;background:var(--bg-soft,rgba(127,127,127,.06))">
+          <summary style="cursor:pointer;font-size:12.5px;font-weight:600;color:var(--text)">❓ O que cada configuração faz?</summary>
+          <ul style="margin:10px 0 2px;padding-left:18px;font-size:12px;line-height:1.6;color:var(--text-muted)">
+            <li><strong>AFK após (s)</strong> — tempo sem teclado/mouse para marcar o colaborador como ausente (AFK). Padrão <strong>180</strong> (3 min). Menor = marca ausência mais rápido; maior = tolera pausas curtas.</li>
+            <li><strong>Poll (ms)</strong> — de quanto em quanto tempo o agente <em>verifica</em> a janela ativa e o input. <strong>Não</strong> é a taxa de envio de dados. Padrão <strong>1000</strong> (1s). Aumentar (ex.: 2000) reduz CPU na máquina, com perda mínima de precisão.</li>
+            <li><strong>Heartbeat (s)</strong> — intervalo em que o agente registra "presença" na janela atual mesmo sem interação (conta leitura, vídeo e reunião). É o <strong>principal regulador do VOLUME de dados</strong>. Padrão <strong>5</strong>. Aumentar para 10–15 reduz o volume em 50–66% com perda de precisão quase imperceptível. <code>0</code> = modo legado (só trocas de janela).</li>
+            <li><strong>Envio/sync (s)</strong> — de quanto em quanto tempo o agente envia os lotes acumulados ao servidor. Padrão <strong>30</strong>. Aumentar para 60–120 reduz o nº de requisições (menos carga no servidor e no banco), em troca de um atraso maior na visualização (o painel mostra os dados ~1–2 min depois). O tamanho do lote se ajusta sozinho.</li>
+            <li><strong>Capturar títulos</strong> — <strong>Sim</strong>: grava o título da janela (mais detalhe, ex.: nome do documento/aba). <strong>Não</strong>: grava só o nome do app (mais privacidade). Necessário <strong>Sim</strong> para detectar reuniões no navegador (Meet).</li>
+            <li><strong>Apps/sites de reunião (keepalive)</strong> — enquanto a janela ativa casar com algum destes termos (no nome do app OU no título), o agente <strong>não entra em AFK</strong> — a reunião conta como ativa mesmo sem teclado/mouse. Um termo por linha; lista vazia desliga o recurso.</li>
+          </ul>
+          <p style="margin:8px 0 0;font-size:11px;color:var(--text-muted)">As mudanças chegam aos agentes no próximo refresh (~10 min). Agentes instalados antes desta versão só passam a obedecer ao <strong>Envio/sync</strong> após serem atualizados.</p>
+        </details>
         <div style="display:flex;gap:16px;align-items:flex-end;flex-wrap:wrap">
           <div><label class="fld-label">AFK após (s)</label><br><input id="acAfk" class="fld" type="number" min="10" style="width:120px"></div>
           <div><label class="fld-label">Poll (ms)</label><br><input id="acPoll" class="fld" type="number" min="200" style="width:120px"></div>
           <div><label class="fld-label">Heartbeat (s)</label><br><input id="acHb" class="fld" type="number" min="0" style="width:120px"></div>
+          <div><label class="fld-label">Envio/sync (s)</label><br><input id="acSync" class="fld" type="number" min="5" style="width:120px"></div>
           <div><label class="fld-label">Capturar títulos</label><br>
             <select id="acTitles" class="fld" style="width:130px"><option value="true">Sim</option><option value="false">Não</option></select></div>
         </div>
@@ -582,6 +595,6 @@
 
 <div id="toast" class="toast hide"></div>
 
-<script src="js/admin.js?v=18"></script>
+<script src="js/admin.js?v=20"></script>
 </body>
 </html>

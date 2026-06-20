@@ -267,7 +267,13 @@ function drawIngestChart(canvasId, hourly) {
   const _ic = document.body.classList.contains('theme-light')
     ? { tick: '#4a5578', grid: 'rgba(160,180,210,.5)' }
     : { tick: '#7d8ab9', grid: 'rgba(31,44,94,.5)' };
-  const labels = hourly.map(h => h.hour.slice(11,13)+'h');
+  // h.hour vem do backend como "AAAA-MM-DDTHH" em UTC. Converte para o horário
+  // de Brasília (America/Sao_Paulo) para o eixo não aparecer 3h adiantado.
+  const labels = hourly.map(h => {
+    const d = new Date(h.hour + ':00:00Z');
+    if (isNaN(d.getTime())) return h.hour.slice(11,13)+'h';   // fallback defensivo
+    return d.toLocaleString('pt-BR', { hour: '2-digit', hour12: false, timeZone: 'America/Sao_Paulo' }) + 'h';
+  });
   const values = hourly.map(h => h.events);
   if (state.charts[canvasId]) state.charts[canvasId].destroy();
   state.charts[canvasId] = new Chart(document.getElementById(canvasId).getContext('2d'), {
@@ -677,6 +683,7 @@ async function loadAgentConfig() {
     document.getElementById('acAfk').value    = g.afk_timeout_sec ?? 180;
     document.getElementById('acPoll').value   = g.poll_interval_ms ?? 1000;
     document.getElementById('acHb').value     = g.heartbeat_interval_sec ?? 5;
+    document.getElementById('acSync').value   = g.sync_interval_sec ?? 30;
     document.getElementById('acTitles').value = (g.capture_titles === false) ? 'false' : 'true';
     document.getElementById('acMeet').value   = (g.meeting_patterns || []).join('\n');
   } catch (e) { /* silencioso */ }
@@ -688,10 +695,12 @@ async function saveAgentConfig() {
     afk_timeout_sec:        parseInt(document.getElementById('acAfk').value, 10) || 180,
     poll_interval_ms:       parseInt(document.getElementById('acPoll').value, 10) || 1000,
     heartbeat_interval_sec: parseInt(document.getElementById('acHb').value, 10),
+    sync_interval_sec:      parseInt(document.getElementById('acSync').value, 10),
     capture_titles:         document.getElementById('acTitles').value === 'true',
     meeting_patterns:       document.getElementById('acMeet').value.split('\n').map(s => s.trim()).filter(Boolean),
   };
   if (isNaN(body.heartbeat_interval_sec)) body.heartbeat_interval_sec = 5;
+  if (isNaN(body.sync_interval_sec)) body.sync_interval_sec = 30;
   try {
     await api('/v1/admin/agent-config', { method: 'PUT', body: JSON.stringify(body) });
     if (msg) { msg.textContent = 'Config global salva.'; setTimeout(() => msg.textContent = '', 2500); }
