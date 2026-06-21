@@ -749,7 +749,12 @@
         </div>
         <table id="supTable">
           <thead>
-            <tr><th>Colaborador</th><th>Status</th><th>Última atividade</th><th>Versão do agente</th></tr>
+            <tr>
+              <th onclick="_supSortBy('name')"   style="cursor:pointer;user-select:none" title="Ordenar por colaborador">Colaborador<span id="supSortName"></span></th>
+              <th onclick="_supSortBy('status')" style="cursor:pointer;user-select:none" title="Ordenar por status">Status<span id="supSortStatus"></span></th>
+              <th onclick="_supSortBy('seen')"   style="cursor:pointer;user-select:none" title="Ordenar por última atividade">Última atividade<span id="supSortSeen"></span></th>
+              <th onclick="_supSortBy('ver')"    style="cursor:pointer;user-select:none" title="Ordenar por versão do agente">Versão do agente<span id="supSortVer"></span></th>
+            </tr>
           </thead>
           <tbody><tr><td colspan="4" class="empty-state">Carregando...</td></tr></tbody>
         </table>
@@ -766,6 +771,20 @@
         </div>
       </div>
 
+    </div>
+
+    <!-- Consolidado — calculado NO CLIENTE a partir da MESMA lista já carregada
+         (/v1/support/people), sem nenhuma query extra: SO de um lado, versão do
+         agente do outro. -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px;align-items:start">
+      <div class="card no-bar" style="margin:0">
+        <h3 style="margin:0 0 10px">Devices por Sistema Operacional <span id="supSoTotal" style="color:var(--text-muted);font-weight:400;font-size:11px;margin-left:6px"></span></h3>
+        <div id="supSoDist"><div class="empty-state">—</div></div>
+      </div>
+      <div class="card no-bar" style="margin:0">
+        <h3 style="margin:0 0 10px">Devices por versão do agente <span id="supVerTotal" style="color:var(--text-muted);font-weight:400;font-size:11px;margin-left:6px"></span></h3>
+        <div id="supVerDist"><div class="empty-state">—</div></div>
+      </div>
     </div>
   </section>
 
@@ -1062,9 +1081,14 @@
           </div>
         </div>
       </div>
+      <div class="toolbar" style="margin:4px 0 12px">
+        <input id="collabsSearch" type="search" oninput="_collabsOnSearch(this.value)"
+               placeholder="🔎 Buscar por nome, device, e-mail, departamento ou função..."
+               style="flex:1;min-width:280px">
+      </div>
       <table id="collabsTable">
         <thead>
-          <tr><th>Device</th><th>Nome amigável</th><th>E-mail</th><th>Departamento</th><th>Função</th><th>Última atividade</th><th></th></tr>
+          <tr><th onclick="_collabsSortBy('device')" style="cursor:pointer;user-select:none" title="Ordenar por device">Device<span id="collabsSortDevice"></span></th><th onclick="_collabsSortBy('name')" style="cursor:pointer;user-select:none" title="Ordenar por nome">Nome amigável<span id="collabsSortName"></span></th><th>E-mail</th><th>Departamento</th><th>Função</th><th>Última atividade</th><th></th></tr>
         </thead>
         <tbody></tbody>
       </table>
@@ -1510,9 +1534,9 @@
 <script src="js/wp-consolidado.js?v=8" defer></script>
 <script src="js/wp-jornada.js?v=20" defer></script>
 <script src="js/wp-locations.js?v=4" defer></script>
-<script src="js/wp-settings.js?v=26" defer></script>
+<script src="js/wp-settings.js?v=27" defer></script>
 <script src="js/wp-users.js?v=27" defer></script>
-<script src="js/wp-support.js?v=3" defer></script>
+<script src="js/wp-support.js?v=4" defer></script>
 <script src="js/wp-reports.js?v=20" defer></script>
 <script src="js/wp-nav.js?v=32" defer></script>
 <script src="js/wp-auth.js?v=22" defer></script>

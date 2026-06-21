@@ -388,6 +388,38 @@ def _ensure_event_id_index() -> None:
         print(f"[init_db] idx_events_eid adiado: {exc}", flush=True)
 
 
+_TS_IDX_LOCK = 0x54534958   # "TSIX" — advisory lock p/ serializar o build do idx_events_ts
+
+
+def _ensure_ts_index() -> None:
+    """Cria idx_events_ts (events.ts) CONCURRENTLY, sem travar o ingest.
+    Acelera o /v1/admin/stats: as contagens 24h/7d e a 'ingestão por hora' filtram
+    events por ts SEM tenant_id, e todos os índices existentes são prefixados por
+    tenant_id (não servem p/ esse filtro). Sem este índice o Postgres varre a tabela
+    inteira (milhões de linhas) e estoura o statement_timeout de 6s, zerando os
+    números/gráfico do painel."""
+    try:
+        with db() as c:
+            row = c.execute(
+                """SELECT i.indisvalid AS ok FROM pg_class ci
+                   JOIN pg_index i ON i.indexrelid = ci.oid
+                   WHERE ci.relname = 'idx_events_ts'""",
+            ).fetchone()
+            if row and row["ok"]:
+                return
+            got = c.execute("SELECT pg_try_advisory_lock(%s) AS g", (_TS_IDX_LOCK,)).fetchone()["g"]
+            if not got:
+                return   # outra task já está construindo
+            try:
+                if row and not row["ok"]:
+                    c.execute("DROP INDEX IF EXISTS idx_events_ts")   # build anterior interrompido
+                c.execute("CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_events_ts ON events(ts)")
+            finally:
+                c.execute("SELECT pg_advisory_unlock(%s)", (_TS_IDX_LOCK,))
+    except Exception as exc:
+        print(f"[init_db] idx_events_ts adiado: {exc}", flush=True)
+
+
 def _refresh_event_id_dedup() -> bool:
     global _EVENT_ID_DEDUP
     try:
@@ -415,6 +447,7 @@ def init_db() -> None:
         for stmt in _SCHEMA_STMTS:
             c.execute(stmt)
     _ensure_event_id_index()    # CONCURRENTLY, fora do loop (não pode em transação)
+    _ensure_ts_index()          # idx_events_ts CONCURRENTLY (acelera o /v1/admin/stats)
     _refresh_event_id_dedup()   # liga o dedup se o índice já ficou válido
     print(f"[init_db] dedup por event_id: {'ATIVO' if _EVENT_ID_DEDUP else 'inativo (watcher segue tentando)'}", flush=True)
 
@@ -471,6 +504,45 @@ def _cache_bust(tenant: str) -> None:
         stale = [k for k in _CACHE if k.startswith(f"{tenant}:")]
         for k in stale:
             del _CACHE[k]
+
+
+# Throttle do cache-bust disparado pela INGESTÃO.
+# Cada lote recebido chamava _cache_bust(tenant); com dezenas/centenas de agentes
+# enviando a cada poucos segundos, o cache do tenant era esvaziado várias vezes por
+# SEGUNDO — então os painéis quase nunca achavam cache quente e re-agregavam a tabela
+# events a cada carga (pior quanto MAIOR a ingestão). Aqui limitamos a no máximo 1
+# invalidação a cada WORKPULSE_INGEST_BUST_SEC por tenant: os dados novos aparecem em
+# até esse intervalo e o custo de invalidação PARA de escalar com o volume.
+# IMPORTANTE: escritas do painel (PATCH user, regras, depts, purge) seguem usando o
+# _cache_bust direto (imediato) — só a ingestão usa este throttle.
+_INGEST_BUST_SEC = int(os.getenv("WORKPULSE_INGEST_BUST_SEC", "60"))
+_LAST_BUST: dict[str, float] = {}
+
+
+def _cache_bust_throttled(tenant: str) -> None:
+    now = time.monotonic()
+    with _CACHE_LOCK:
+        if (now - _LAST_BUST.get(tenant, 0.0)) < _INGEST_BUST_SEC:
+            return
+        _LAST_BUST[tenant] = now
+        stale = [k for k in _CACHE if k.startswith(f"{tenant}:")]
+        for k in stale:
+            del _CACHE[k]
+
+
+# Cache curto e dedicado do /v1/admin/stats (telemetria global do Platform Admin).
+# A página recarrega a cada 30s; sem cache, cada refresh re-agrega a events. Com TTL
+# de ~45s, recargas/refreshes repetidos batem em cache quente. Independente do _CACHE
+# por-tenant (esta métrica é global, não leva tenant).
+_ADMIN_STATS_CACHE: dict[str, Any] = {"ts": 0.0, "data": None}
+_ADMIN_STATS_TTL = int(os.getenv("WORKPULSE_ADMIN_STATS_TTL", "45"))
+
+
+def _admin_stats_cached() -> Any | None:
+    d = _ADMIN_STATS_CACHE
+    if d["data"] is not None and (time.monotonic() - d["ts"]) < _ADMIN_STATS_TTL:
+        return d["data"]
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1385,7 +1457,7 @@ def ingest(
             rows,
         )
 
-    _cache_bust(claims["tenant"])
+    _cache_bust_throttled(claims["tenant"])
     return {"accepted": len(payload.events)}
 
 
@@ -2698,6 +2770,9 @@ def admin_list_licenses():
 
 @app.get("/v1/admin/stats", dependencies=[Depends(require_admin)])
 def admin_stats():
+    cached = _admin_stats_cached()
+    if cached is not None:
+        return cached
     now = dt.datetime.now(dt.timezone.utc)
     h24 = (now - dt.timedelta(hours=24)).isoformat()
     d7  = (now - dt.timedelta(days=7)).isoformat()
@@ -2751,7 +2826,7 @@ def admin_stats():
             ).fetchone()["n"]
         except Exception:
             db_size = 0
-    return {
+    result = {
         "version":      APP_VERSION,
         "server_time":  now.isoformat(),
         "db_size_bytes": db_size or 0,
@@ -2769,6 +2844,9 @@ def admin_stats():
         "os_distribution":   [dict(r) for r in os_dist],
         "plan_distribution": [dict(r) for r in plan_dist],
     }
+    _ADMIN_STATS_CACHE["ts"]   = time.monotonic()
+    _ADMIN_STATS_CACHE["data"] = result
+    return result
 
 
 @app.get("/v1/admin/audit", dependencies=[Depends(require_admin)])
@@ -3723,10 +3801,10 @@ def support_people(tenant: str, request: Request):
     with db() as c:
         rows = c.execute(
             """SELECT u.user_id, u.display_name, u.department, u.last_seen,
-                      d.agent_version, d.hostname
+                      d.agent_version, d.hostname, d.os
                FROM users u
                LEFT JOIN LATERAL (
-                   SELECT agent_version, hostname FROM devices dd
+                   SELECT agent_version, hostname, os FROM devices dd
                    WHERE dd.tenant_id = u.tenant_id AND dd.user_id = u.user_id
                    ORDER BY dd.last_seen DESC LIMIT 1
                ) d ON TRUE

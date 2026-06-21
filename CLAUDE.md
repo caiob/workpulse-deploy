@@ -1,11 +1,11 @@
 # CLAUDE.md — WorkPulse
 
 Guidance for AI agents (Claude Code / Cowork) working on WorkPulse.
-**Read this fully before changing anything.** Last updated: 2026-06-18.
+**Read this fully before changing anything.** Last updated: 2026-06-21.
 
 > **Para o estado atual (auth e-mail/senha, papéis, Localização, Administrativo,
 > Financeiro, SMTP por tenant, motor de Alertas, etc.), leia primeiro a seção
-> "## Estado atual (2026-06-14)" no FINAL deste arquivo.** As seções estruturais
+> "## Estado atual (2026-06-21)" no FINAL deste arquivo.** As seções estruturais
 > abaixo (Auth, Schema, API, Workers) foram atualizadas, mas o changelog detalhado
 > de cada época fica no rodapé.
 
@@ -231,7 +231,29 @@ Always add a final verification step before declaring work done.
 
 ---
 
-## Deploy to Production (AWS CloudShell, us-east-1)
+## Deploy to Production
+
+### Método do dono (Caio) — Windows PowerShell + AWS CLI v2 (PRINCIPAL)
+
+Caio faz o deploy da máquina dele (Windows). **Não usa CloudShell e não tem python3** —
+então validação local com `py_compile` é OPCIONAL/impossível p/ ele. Pré-req: AWS CLI v2 com
+`aws configure` já feito (conta 881027528914, us-east-1). Sem Docker local (build roda no AWS
+CodeBuild). Os 3 scripts em `scripts/` que ele usa:
+
+- **`redeploy.ps1`** — BACKEND. Empacota `server/` (main.py, migration.py, requirements.txt,
+  Dockerfile) → S3 → dispara CodeBuild → força rolling deploy no ECS (zero downtime). Rode
+  após mexer em `server/`.
+- **`publicar-site.ps1`** — FRONTEND. `s3 sync site/ --delete` + invalida CloudFront. Rode
+  após mexer em `site/`. ⚠️ `--delete` publica TUDO em `site/` — mantenha `.bak`/temp FORA de
+  `site/` (há um `site/adm/admin.html.bak-*` que sobe junto; limpar).
+- **`redeploy-publicar.ps1`** — atalho que roda os dois em sequência, **backend e DEPOIS site**
+  (ordem certa), abortando se um falhar. Use quando mexer em backend E frontend.
+
+É seguro deployar sem validar localmente: o ECS tem `deployment_circuit_breaker` (rollback
+automático sem downtime se a imagem nova não passar no health check). Após mudar `site/`, lembre
+do cache-bust por arquivo (`?v=N`) e do Ctrl+Shift+R no navegador.
+
+### Alternativa — AWS CloudShell (us-east-1)
 
 All commands run in **AWS CloudShell**, inside `workpulse-deploy/`.
 
@@ -677,6 +699,79 @@ com enrollment).
   `SUM(duration_sec)` reflects the real idle time. **No server or dashboard
   changes were needed** — the SQL contracts in CRITICAL #2 already expected
   this shape, the agent just wasn't honoring it.
+
+---
+
+## Estado atual (2026-06-21) — sync_interval_sec, perf do /admin/stats, cache em escala, UI
+
+Sprint de performance/escalabilidade (ingestão maior) + ajustes de UI. **Deploy: ver "Método
+do dono (Caio)" na seção Deploy — `redeploy.ps1` / `publicar-site.ps1` / `redeploy-publicar.ps1`.**
+
+### Agente — intervalo de envio (sync) configurável pelo painel + AO VIVO
+- Novo campo **`sync_interval_sec`** na config central (Platform Admin → Sistema → "Config do
+  agente (global)", input `acSync`). Schema: coluna em `agent_config_global` e
+  `agent_config_tenant` (+ `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`), default 30; incluído em
+  `_AGENT_CFG_DEFAULTS` / `_AGENT_CFG_FIELDS` / `_agent_cfg_upsert` / `AgentCfgIn`.
+- Agente (Rust): campo em `RemoteConfig` + `apply()` (remote_config.rs). O loop de **sync**
+  agora lê a config COMPARTILHADA a cada ciclo: `sync::run` recebe `Arc<RwLock<Config>>` e
+  main.rs passa `shared_cfg` (antes recebia snapshot fixo → só valia ao reiniciar). Agora vale
+  no refresh remoto (~10 min), igual ao tracker. **Exige rebuild+rollout do agente** (FEITO,
+  em distribuição).
+- `heartbeat_interval_sec` já era central e vale nos agentes existentes; só o `sync` precisou
+  do rebuild.
+
+### Perf do /v1/admin/stats (gráficos zerados / página lenta)
+- CAUSA: contagens 24h/7d e "ingestão por hora" filtram `events` por `ts` SEM tenant_id, e
+  TODOS os índices de events são prefixados por tenant_id → varredura da tabela inteira →
+  estoura o `statement_timeout` de 6s → o except zera os números (gráfico vazio). Some quando a
+  tabela cresce.
+- FIX: **`_ensure_ts_index()`** cria `idx_events_ts ON events(ts)` CONCURRENTLY (mesmo padrão de
+  advisory lock do `idx_events_eid`), chamado em `init_db`. Não trava o ingest; no-op se já
+  existe; constrói sozinho no próximo redeploy (~1–2 min em background). NÃO precisa rodar SQL
+  na mão.
+
+### Cache em escala (gargalo nº1 sob carga)
+- **`_cache_bust_throttled(tenant)`**: o `/v1/ingest` antes chamava `_cache_bust` a cada lote,
+  zerando o cache do tenant várias vezes/s (pior quanto MAIOR a frota → painéis nunca achavam
+  cache quente). Agora no máx. 1 invalidação a cada `WORKPULSE_INGEST_BUST_SEC` (default 60s)
+  por tenant. **Escritas do painel (PATCH user, regras, depts, purge) seguem com `_cache_bust`
+  imediato** — só o ingest usa o throttle.
+- Cache dedicado do `/v1/admin/stats`: `_ADMIN_STATS_CACHE` + `_admin_stats_cached()`, TTL
+  `WORKPULSE_ADMIN_STATS_TTL` (default 45s). A página recarrega a cada 30s; evita re-agregar a
+  events a cada refresh. Global (não leva tenant), independente do `_CACHE`.
+
+### Frontend
+- **Platform Admin** (`admin.js?v=20`, `admin.html`): gráfico "Ingestão por hora" rotula o eixo
+  no fuso de **Brasília** (`drawIngestChart` converte o `hour` UTC via `toLocaleString` com
+  `timeZone: America/Sao_Paulo`). Card "Config do agente" ganhou **Helper** (`<details>`)
+  explicando cada campo + o input `acSync` (Envio/sync).
+- **Painel do cliente — Coleta consolidada** (`wp-consolidado.js?v=8`, workforce.html): a barra
+  do gráfico "Por categoria — por dia" voltou a ficar larga com 1 dia e afinar com mais dias —
+  removido o `maxBarThickness` fixo (entrou junto com o ajuste do eixo Y) p/ igualar o gráfico
+  da Visão Geral (`drawDailyChart`, que não tem cap).
+- **Colaboradores** (`wp-settings.js?v=27`, workforce.html): **campo de busca** (nome / device /
+  e-mail / depto / função) + **ordenação clicável** por Device e Nome. Funções `_collabsView`,
+  `_collabsOnSearch`, `_collabsSortBy`; tudo client-side (`state.collabs`). ⚠️ o handler é
+  **`_collabsSortBy`** — NÃO `_collabsSort` (essa é a variável de estado `{key,dir}`; nome igual
+  ao de uma função = SyntaxError que derruba o arquivo inteiro).
+- **Suporte Técnico** (`wp-support.js?v=4`, workforce.html): **ordenação clicável** nas 4 colunas
+  (Colaborador/Status/Última atividade/Versão do agente — `_supSortBy`/`_supSort`; versão com
+  compare semântico `_supVerCmp`, ex.: 2.10 > 2.9). Novo **card consolidado** (2 cards 6-col):
+  Devices por SO e Devices por versão do agente — calculado NO CLIENTE a partir de `_supUsers`
+  (mesma lista já carregada), **sem query extra** (`_supRenderDist`/`_supDistHtml`). Backend:
+  `/v1/support/people` passou a devolver `d.os` (uma coluna a mais no LATERAL existente, custo
+  desprezível) — exige redeploy do backend p/ o card de SO popular.
+
+### Novos env knobs
+`WORKPULSE_INGEST_BUST_SEC` (60), `WORKPULSE_ADMIN_STATS_TTL` (45). Já existentes:
+`WORKPULSE_CACHE_TTL` (300), `WORKPULSE_AFK_MAX_SEC` (10800), `WORKPULSE_ROLLUP_SEC` (300),
+`WORKPULSE_PERF_MS` (200).
+
+### Próximos passos de escala (recomendado, NÃO feito)
+Cache compartilhado (Redis/ElastiCache) → habilita `desired_count ≥ 2` + autoscaling por CPU;
+read replica do RDS p/ as leituras dos dashboards; manter heartbeat 10–15s + sync 60–120s p/
+frear o crescimento da `events`; migração opcional `events.ts` TEXT → timestamptz. Análise
+completa em **`WorkPulse_Analise_Performance.docx`** (pasta WORK PULSE).
 
 ---
 

@@ -16,6 +16,7 @@ let _rulesPage   = 0; let _RULES_PAGE_SIZE   = 10;
 let _appsPage    = 0; let _APPS_PAGE_SIZE    = 10;
 let _sitesPage   = 0; let _SITES_PAGE_SIZE   = 10;
 let _collabsPage = 0; let _COLLABS_PAGE_SIZE = 10;
+let _collabsSearch = ''; let _collabsSort = { key: null, dir: 1 };  // busca + ordenação (Device/Nome)
 
 /* ─────────────────────────────────────────────────────────────────
    Helper genérico de paginação (reutilizado nas 3 seções)
@@ -426,14 +427,60 @@ function renderCollabsTable(users) {
   _renderCollabsPage();
 }
 
+// Aplica busca (texto livre) + ordenação (Device/Nome) sobre state.collabs.
+// Tudo client-side — os colaboradores já vêm todos em uma chamada.
+function _collabsView() {
+  let arr = (state.collabs || []).slice();
+  const q = (_collabsSearch || '').trim().toLowerCase();
+  if (q) {
+    arr = arr.filter(u => {
+      const dev = cleanUserId(u.user_id || '');
+      return [dev, u.display_name, u.email, u.department, u.role]
+        .some(v => (v || '').toString().toLowerCase().includes(q));
+    });
+  }
+  if (_collabsSort.key) {
+    const val = u => (_collabsSort.key === 'device'
+      ? cleanUserId(u.user_id || '')
+      : (u.display_name || cleanUserId(u.user_id || ''))).toString().toLowerCase();
+    arr.sort((a, b) => val(a).localeCompare(val(b), 'pt-BR') * _collabsSort.dir);
+  }
+  return arr;
+}
+
+function _collabsOnSearch(v) {
+  _collabsSearch = v || '';
+  _collabsPage = 0;
+  _renderCollabsPage();
+}
+
+function _collabsSortBy(key) {
+  if (_collabsSort.key === key) _collabsSort.dir = -_collabsSort.dir;
+  else { _collabsSort.key = key; _collabsSort.dir = 1; }
+  _collabsPage = 0;
+  _renderCollabsPage();
+}
+
+function _collabsUpdateSortIndicators() {
+  const arrow = k => (_collabsSort.key === k ? (_collabsSort.dir > 0 ? ' ▲' : ' ▼') : '');
+  const d = document.getElementById('collabsSortDevice');
+  const n = document.getElementById('collabsSortName');
+  if (d) d.textContent = arrow('device');
+  if (n) n.textContent = arrow('name');
+}
+
 function _renderCollabsPage() {
   const tb = document.querySelector('#collabsTable tbody');
   if (!tb) return;
-  const users = state.collabs || [];
+  _collabsUpdateSortIndicators();
+  const users = _collabsView();
   const total = users.length;
 
   if (!total) {
-    tb.innerHTML = '<tr><td colspan="7" class="empty-state">Nenhum colaborador encontrado.</td></tr>';
+    const msg = (_collabsSearch || '').trim()
+      ? 'Nenhum colaborador para "' + _collabsSearch + '".'
+      : 'Nenhum colaborador encontrado.';
+    tb.innerHTML = '<tr><td colspan="7" class="empty-state">' + msg + '</td></tr>';
     _renderCfgPagination('collabsPagination', 'collabsCountLabel', 0, 0, _COLLABS_PAGE_SIZE, '_collabsGoTo', 'colaboradores');
     return;
   }
