@@ -725,10 +725,18 @@ do dono (Caio)" na seção Deploy — `redeploy.ps1` / `publicar-site.ps1` / `re
   TODOS os índices de events são prefixados por tenant_id → varredura da tabela inteira →
   estoura o `statement_timeout` de 6s → o except zera os números (gráfico vazio). Some quando a
   tabela cresce.
-- FIX: **`_ensure_ts_index()`** cria `idx_events_ts ON events(ts)` CONCURRENTLY (mesmo padrão de
-  advisory lock do `idx_events_eid`), chamado em `init_db`. Não trava o ingest; no-op se já
-  existe; constrói sozinho no próximo redeploy (~1–2 min em background). NÃO precisa rodar SQL
-  na mão.
+- FIX parcial: **`_ensure_ts_index()`** cria `idx_events_ts ON events(ts)` CONCURRENTLY (mesmo
+  padrão de advisory lock do `idx_events_eid`), chamado em `init_db`. Ajudou o COUNT de 24h, mas
+  o COUNT de 7d + o GROUP BY por hora AINDA estouravam o timeout em escala. (O índice segue útil
+  p/ o backfill e outras queries de faixa por ts.)
+- **FIX definitivo (2026-06-21b) — tabela consolidada `ingest_hour`**: dado do passado não muda,
+  então o `/admin/stats` NÃO varre mais `events`. Nova tabela `ingest_hour(tenant_id, hour, n)`
+  (PK), incrementada NO `/v1/ingest` (conta os eventos do lote por hora-UTC do evento → 1-2
+  upserts por PK; barato e O(1) por lote). O `/admin/stats` lê 24h/7d/por-hora dessa tabela
+  (poucas dezenas de linhas, instantâneo, sem `statement_timeout`). Hora passada fica congelada.
+  Backfill único das últimas 48h a partir de events na subida (`_ingest_hour_backfill`, task no
+  lifespan, em background, guardado por `MIN(hour)` p/ não varrer events a cada redeploy). Pequena
+  super-contagem possível em reenvio de lote já aceito — irrelevante p/ gráfico de volume.
 
 ### Cache em escala (gargalo nº1 sob carga)
 - **`_cache_bust_throttled(tenant)`**: o `/v1/ingest` antes chamava `_cache_bust` a cada lote,

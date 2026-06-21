@@ -1302,6 +1302,41 @@ def _afk_in_by_user(c, tenant, since, until):
 # FastAPI — app + lifespan
 # ---------------------------------------------------------------------------
 @asynccontextmanager
+def _ingest_hour_backfill() -> None:
+    """One-shot: preenche ingest_hour com as últimas 48h a partir de events (UMA
+    varredura, em background, usando idx_events_ts) quando ainda não há histórico.
+    Depois disso a tabela é mantida incrementalmente no /ingest — nunca mais varre o
+    passado. Em redeploys com histórico já presente, sai sem tocar em events."""
+    try:
+        with db() as c:
+            row = c.execute("SELECT MIN(hour) AS h FROM ingest_hour").fetchone()
+            oldest = row["h"] if row else None
+            cutoff = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=6)).isoformat()[:13]
+            if oldest is not None and oldest < cutoff:
+                return   # já há histórico — não varre events de novo
+            since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=48)).isoformat()
+            c.execute("SET statement_timeout = '30s'")
+            try:
+                c.execute(
+                    """INSERT INTO ingest_hour (tenant_id, hour, n)
+                       SELECT tenant_id, substr(ts,1,13), COUNT(*)
+                       FROM events WHERE ts >= %s
+                       GROUP BY tenant_id, substr(ts,1,13)
+                       ON CONFLICT (tenant_id, hour) DO NOTHING""",
+                    (since,),
+                )
+            finally:
+                c.execute("SET statement_timeout = 0")
+        print("[ingest_hour] backfill 48h concluido", flush=True)
+    except Exception as exc:
+        print(f"[ingest_hour] backfill adiado: {exc}", flush=True)
+
+
+async def _ingest_hour_backfill_task() -> None:
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, _ingest_hour_backfill)
+
+
 async def lifespan(app: FastAPI):
     _init_pool()
     init_db()
@@ -1311,13 +1346,15 @@ async def lifespan(app: FastAPI):
     task_alerts    = asyncio.create_task(_alerts_worker())
     task_rollup    = asyncio.create_task(_rollup_worker())
     task_dedup     = asyncio.create_task(_event_id_dedup_watcher())
+    task_ihbf      = asyncio.create_task(_ingest_hour_backfill_task())
     yield
     task_retention.cancel()
     task_reports.cancel()
     task_alerts.cancel()
     task_rollup.cancel()
     task_dedup.cancel()
-    for t in (task_retention, task_reports, task_alerts, task_rollup, task_dedup):
+    task_ihbf.cancel()
+    for t in (task_retention, task_reports, task_alerts, task_rollup, task_dedup, task_ihbf):
         try:
             await t
         except asyncio.CancelledError:
@@ -1456,6 +1493,21 @@ def ingest(
                VALUES (%s, %s, %s, %s, %s, %s, %s, %s){_conflict}""",
             rows,
         )
+
+        # Rollup de ingestão por hora: conta os eventos do lote por hora-UTC e soma
+        # na ingest_hour. Barato (1-2 upserts por PK) e mantém o /admin/stats sem
+        # precisar varrer events. (Pequena super-contagem possível em reenvio de
+        # lote já aceito — irrelevante p/ um gráfico de volume.)
+        _hour_counts: dict[str, int] = {}
+        for e in payload.events:
+            _hr = e.timestamp.isoformat()[:13]   # 'YYYY-MM-DDTHH'
+            _hour_counts[_hr] = _hour_counts.get(_hr, 0) + 1
+        for _hr, _cnt in _hour_counts.items():
+            c.execute(
+                """INSERT INTO ingest_hour (tenant_id, hour, n) VALUES (%s, %s, %s)
+                   ON CONFLICT (tenant_id, hour) DO UPDATE SET n = ingest_hour.n + EXCLUDED.n""",
+                (claims["tenant"], _hr, _cnt),
+            )
 
     _cache_bust_throttled(claims["tenant"])
     return {"accepted": len(payload.events)}
@@ -2795,23 +2847,25 @@ def admin_stats():
         except Exception:
             events = 0
 
+        # Ingestão por hora / 24h / 7d: lê do rollup ingest_hour (poucas linhas),
+        # NÃO varre events. Passado é imutável; escala sem timeout, independente do
+        # tamanho da tabela events.
         ev_24h, ev_7d, per_hour = 0, 0, []
         try:
-            c.execute("SET statement_timeout = '6s'")
-            ev_24h = c.execute("SELECT COUNT(*) AS n FROM events WHERE ts>=%s", (h24,)).fetchone()["n"]
-            ev_7d  = c.execute("SELECT COUNT(*) AS n FROM events WHERE ts>=%s", (d7,)).fetchone()["n"]
+            h24_h = h24[:13]   # 'YYYY-MM-DDTHH' UTC
+            d7_h  = d7[:13]
             per_hour = c.execute(
-                """SELECT substr(ts,1,13) AS hour, COUNT(*) AS events
-                   FROM events WHERE ts>=%s GROUP BY hour ORDER BY hour""",
-                (h24,),
+                """SELECT hour, SUM(n)::bigint AS events FROM ingest_hour
+                   WHERE hour >= %s GROUP BY hour ORDER BY hour""",
+                (h24_h,),
             ).fetchall()
+            ev_24h = sum(int(r["events"]) for r in per_hour)
+            ev_7d  = int(c.execute(
+                "SELECT COALESCE(SUM(n),0)::bigint AS n FROM ingest_hour WHERE hour >= %s",
+                (d7_h,),
+            ).fetchone()["n"])
         except Exception as exc:
-            print(f"[admin_stats] contagens de events puladas (lento/timeout): {exc}", flush=True)
-        finally:
-            try:
-                c.execute("SET statement_timeout = 0")
-            except Exception:
-                pass
+            print(f"[admin_stats] ingest_hour indisponivel: {exc}", flush=True)
         os_dist = c.execute(
             """SELECT COALESCE(os,'desconhecido') AS os, COUNT(*) AS n
                FROM devices GROUP BY os ORDER BY n DESC""",
@@ -6179,6 +6233,24 @@ _SCHEMA_STMTS.extend([
 _SCHEMA_STMTS.extend([
     "ALTER TABLE agent_config_global ADD COLUMN IF NOT EXISTS sync_interval_sec INTEGER",
     "ALTER TABLE agent_config_tenant ADD COLUMN IF NOT EXISTS sync_interval_sec INTEGER",
+])
+
+# ---------------------------------------------------------------------------
+# Rollup de INGESTÃO POR HORA — contagem de eventos por (tenant, hora-UTC).
+# Mantida INCREMENTALMENTE no /v1/ingest (1-2 upserts por lote). O /admin/stats lê
+# daqui (poucas dezenas de linhas) em vez de varrer a tabela events. Hora passada é
+# imutável — nunca recalculamos o passado. Escala independente do tamanho de events.
+# ---------------------------------------------------------------------------
+_SCHEMA_STMTS.extend([
+    """
+    CREATE TABLE IF NOT EXISTS ingest_hour (
+        tenant_id TEXT NOT NULL,
+        hour      TEXT NOT NULL,
+        n         BIGINT NOT NULL DEFAULT 0,
+        PRIMARY KEY (tenant_id, hour)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_ingest_hour_hour ON ingest_hour(hour)",
 ])
 
 # ---------------------------------------------------------------------------
