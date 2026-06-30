@@ -14,10 +14,12 @@ async function loadSupport() {
   try {
     const d = await api('/v1/support/people?tenant=' + encodeURIComponent(state.tenant));
     _supUsers = d.users || [];
+    markVacation(_supUsers);
     _supPage  = 0;
     _supRender();
     _supRenderDist();   // card consolidado (SO + versão do agente) — client-side, sem query extra
   } catch (e) { toast('Erro ao carregar Suporte: ' + e.message); }
+  _supLoadAgentDownload();   // card de download do agente (VERSÃO ATUAL)
 }
 
 function _supStatus(lastSeen) {
@@ -70,9 +72,12 @@ function _supRender() {
     const name = u.display_name || u.user_id || '—';
     const safe = (u.user_id || '').replace(/'/g, "\\'");
     const sel  = (u.user_id === _supSelected) ? ' style="background:var(--bg-2)"' : '';
+    const stat = u.on_vacation
+      ? '<span style="display:inline-flex;align-items:center;gap:5px;color:#0e7490"><span style="width:8px;height:8px;border-radius:50%;background:#22d3ee;display:inline-block"></span>🏖 Férias</span>'
+      : _supStatus(u.last_seen);
     return `<tr${sel}>
-      <td><span class="person-link" onclick="_supSelect('${safe}')"><strong>${escHtml(name)}</strong></span></td>
-      <td>${_supStatus(u.last_seen)}</td>
+      <td><span class="person-link" onclick="_supSelect('${safe}')"><strong>${escHtml(name)}</strong></span>${vacBadge(u.user_id)}</td>
+      <td>${stat}</td>
       <td style="font-size:12px;color:var(--text-dim)">${typeof relTime === 'function' ? relTime(u.last_seen) : (u.last_seen || '—')}</td>
       <td><code style="font-size:11px;color:var(--text-dim)">${escHtml(u.agent_version || '—')}</code></td>
     </tr>`;
@@ -187,4 +192,30 @@ function _supRenderDist() {
   const n = _supUsers.length;
   const st = document.getElementById('supSoTotal');  if (st) st.textContent = n + ' devices';
   const vt = document.getElementById('supVerTotal'); if (vt) vt.textContent = n + ' devices';
+}
+
+// ── Download do agente (VERSÃO ATUAL) — para o time de Suporte ──────────
+// Pega o build is_latest por SO (prefere o do tenant; senão genérico) e mostra
+// botões com URL pré-assinada gerada na hora (cada carga = link fresco, ~1h).
+async function _supLoadAgentDownload() {
+  const box = document.getElementById('supAgentDownload');
+  if (!box) return;
+  try {
+    const d = await api('/v1/support/agent-download?tenant=' + encodeURIComponent(state.tenant));
+    const items = (d && d.available) ? (d.items || []) : [];
+    if (!items.length) {
+      box.innerHTML = '<span style="font-size:12px;color:var(--text-muted)">Nenhum build marcado como “versão atual” ainda. Suba e promova um no Platform Admin.</span>';
+      return;
+    }
+    const osLabel = { windows: 'Windows', linux: 'Linux' };
+    box.innerHTML = items.map(it => {
+      const mb  = it.size_bytes ? (it.size_bytes / 1048576).toFixed(1) + ' MB' : '';
+      const tag = it.channel === 'tenant' ? 'build do tenant' : 'genérico';
+      return `<a href="${it.url}" target="_blank" rel="noopener"
+          style="display:inline-flex;align-items:center;gap:8px;text-decoration:none;background:var(--accent,#6c8cff);color:#fff;border-radius:8px;padding:8px 14px;font-size:13px;font-weight:600;margin:0 8px 8px 0">
+          ⬇ ${osLabel[it.os] || it.os} <span style="font-weight:400;opacity:.85">v${escHtml(it.version)} · ${tag}${mb ? ' · ' + mb : ''}</span></a>`;
+    }).join('');
+  } catch (e) {
+    box.innerHTML = '<span style="font-size:12px;color:var(--danger,#f87171)">Falha ao carregar downloads.</span>';
+  }
 }

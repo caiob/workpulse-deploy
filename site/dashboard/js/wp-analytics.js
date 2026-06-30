@@ -90,6 +90,9 @@ async function loadAlertConfig() {
     document.getElementById('alUnderMax').value = s.underwork_max_h ?? 2;
     document.getElementById('alOverMin').value  = s.overwork_min_h ?? 10;
     document.getElementById('alEngDays').value  = s.engagement_days ?? 7;
+    const _alLunch = document.getElementById('alLunch');
+    if (_alLunch) _alLunch.value = s.lunch_minutes ?? 60;
+    if (typeof state !== 'undefined' && s.lunch_minutes != null) state.lunchMin = s.lunch_minutes;
     document.getElementById('alEngToday').checked = !!s.engagement_include_today;
     _renderAlertRules(d.rules || {}, d.alert_labels || {});
     _renderRiskySites(d.risky_sites || []);
@@ -133,6 +136,7 @@ async function saveAlertConfig() {
     underwork_max_h:   parseFloat(document.getElementById('alUnderMax').value) || 2,
     overwork_min_h:    parseFloat(document.getElementById('alOverMin').value) || 10,
     engagement_days:          parseInt(document.getElementById('alEngDays').value, 10) || 7,
+    lunch_minutes:            parseInt((document.getElementById('alLunch') || {}).value, 10),
     engagement_include_today: document.getElementById('alEngToday').checked,
     rules,
   };

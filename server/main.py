@@ -224,6 +224,7 @@ _SCHEMA_STMTS = [
         email        TEXT,
         department   TEXT,
         role         TEXT,
+        on_vacation  BOOLEAN NOT NULL DEFAULT FALSE,
         login_user   TEXT,
         first_seen   TEXT NOT NULL,
         last_seen    TEXT NOT NULL,
@@ -697,6 +698,7 @@ class UserUpdate(BaseModel):
     email:        str | None = None
     department:   str | None = None
     role:         str | None = None
+    on_vacation:  bool | None = None
 
 
 class LicenseIssueRequest(BaseModel):
@@ -1613,7 +1615,7 @@ def list_users(tenant: str, request: Request):
     with db() as c:
         rows = c.execute(
             """SELECT user_id, display_name, email, department, role,
-                      login_user, first_seen, last_seen
+                      on_vacation, login_user, first_seen, last_seen
                FROM users WHERE tenant_id = %s ORDER BY last_seen DESC""",
             (tenant,),
         ).fetchall()
@@ -1671,14 +1673,22 @@ def user_summary(user_id: str, tenant: str, request: Request, days: int = 7,
             (tenant, user_id, since, until),
         ).fetchall()
 
+    # AFK exibido = AFK − almoço, descontado POR DIA (capado em 0).
+    _lunch = _lunch_sec(_alert_settings(tenant))
+    _daily_net, _afk_net_total = [], 0.0
+    for r in daily:
+        d = dict(r)
+        d["afk"] = _apply_lunch(d.get("afk"), _lunch)
+        _afk_net_total += d["afk"]
+        _daily_net.append(d)
     return {
         "user":     dict(info),
         "since":    since,
         "active_seconds": totals["active"] or 0,
-        "afk_seconds":    totals["afk"]    or 0,
+        "afk_seconds":    _afk_net_total,
         "top_apps": [dict(r) for r in top_apps],
-        "daily":    [dict(r) for r in daily],
-        "by_day":   [dict(r) for r in daily],
+        "daily":    _daily_net,
+        "by_day":   _daily_net,
     }
 
 
@@ -1694,6 +1704,8 @@ def update_user(user_id: str, body: UserUpdate, tenant: str, request: Request):
         fields.append("department = %s"); values.append(body.department)
     if body.role is not None:
         fields.append("role = %s"); values.append(body.role)
+    if body.on_vacation is not None:
+        fields.append("on_vacation = %s"); values.append(bool(body.on_vacation))
     if not fields:
         raise HTTPException(status_code=422, detail="no fields to update")
     values.extend([tenant, user_id])
@@ -1704,6 +1716,14 @@ def update_user(user_id: str, body: UserUpdate, tenant: str, request: Request):
         )
         if cur.rowcount == 0:
             raise HTTPException(status_code=404, detail="user not found")
+        # Se definiu um departamento, garante que ele exista na tela de gestão
+        # (auto-registro) — evita a lacuna de "atribuído na pessoa, mas sem entidade".
+        if body.department and body.department.strip():
+            c.execute(
+                "INSERT INTO tenant_departments (tenant_id, name, created_at) VALUES (%s,%s,%s) "
+                "ON CONFLICT (tenant_id, name) DO NOTHING",
+                (tenant, body.department.strip(), dt.datetime.now(dt.timezone.utc).isoformat()),
+            )
     audit("admin", "user.update", target=user_id,
           detail=f"tenant={tenant} fields={list(body.model_dump(exclude_none=True).keys())}",
           ip=request.client.host if request.client else None)
@@ -1736,15 +1756,26 @@ def team_summary(tenant: str, request: Request, days: int = 7,
         _perf.mark("connect")
         # Ativo/AFK por usuário — do agregado (agg_user_hour) quando pronto.
         _sum: dict[str, list] = {}
+        _afk_day: dict[tuple, float] = {}   # (user, dia local) -> AFK do dia (p/ desconto de almoço)
         for r in _hour_rows(c, tenant, since, until, SC, A):
-            s = _sum.setdefault(r["user_id"], [0.0, 0.0])
+            uid = r["user_id"]
+            s = _sum.setdefault(uid, [0.0, 0.0])
             s[0] += float(r["active"] or 0.0)
-            s[1] += float(r["afk"]    or 0.0)
+            a = float(r["afk"] or 0.0)
+            s[1] += a
+            _dk = (uid, _utc_hour_to_local_day(r["h"][:13]))
+            _afk_day[_dk] = _afk_day.get(_dk, 0.0) + a
+        # AFK exibido = AFK − almoço, descontado POR DIA LOCAL (capado em 0).
+        _lunch = _lunch_sec(_alert_settings(tenant))
+        _afk_net: dict[str, float] = {}
+        for (uid, _d), av in _afk_day.items():
+            _afk_net[uid] = _afk_net.get(uid, 0.0) + _apply_lunch(av, _lunch)
         _perf.mark("active_afk")
 
         # Metadados dos usuários (tabela pequena) + versão do agente.
         meta = c.execute(
             f"""SELECT u.user_id, u.display_name, u.email, u.department, u.last_seen,
+                       u.on_vacation,
                        (SELECT d.agent_version FROM devices d
                         WHERE d.tenant_id = u.tenant_id AND d.user_id = u.user_id
                         ORDER BY d.last_seen DESC LIMIT 1) AS agent_version
@@ -1775,9 +1806,10 @@ def team_summary(tenant: str, request: Request, days: int = 7,
             "department":    u["department"],
             "last_seen":     u["last_seen"],
             "agent_version": u["agent_version"],
+            "on_vacation":   bool(u["on_vacation"]),
             "active":        act,
-            "afk":           afkv,
-            "afk_in":        afk_in_map.get(uid, 0.0),   # AFK na Jornada (exclui pós-jornada)
+            "afk":           _afk_net.get(uid, afkv),    # AFK já com almoço descontado (por dia)
+            "afk_in":        afk_in_map.get(uid, 0.0),   # AFK na Jornada (desconto aplicado na aba Jornada)
         })
     users_out.sort(key=lambda d: d["active"], reverse=True)
 
@@ -2156,6 +2188,21 @@ def productivity_consolidado(
         day = _utc_hour_to_local_day(row["h"]); cat = _cat(row)
         d = dagg.setdefault(day, {"productive": 0.0, "unproductive": 0.0, "neutral": 0.0, "uncategorized": 0.0, "afk": 0.0})
         d[cat] = d.get(cat, 0.0) + (row["total_sec"] or 0.0)
+
+    # AFK exibido = AFK − almoço, descontado POR DIA LOCAL. Total cai junto (a hora
+    # de almoço não conta como tempo coletado) p/ os % fecharem.
+    _lunch = _lunch_sec(_alert_settings(tenant))
+    if _lunch > 0:
+        _afk_net, _cut_tot = 0.0, 0.0
+        for _day, _dd in dagg.items():
+            _raw = _dd.get("afk") or 0.0
+            _net = _apply_lunch(_raw, _lunch)
+            _dd["afk"] = _net
+            _afk_net  += _net
+            _cut_tot  += (_raw - _net)
+        totals["afk"]   = _afk_net
+        totals["total"] = max(0.0, totals.get("total", 0.0) - _cut_tot)
+
     daily = [{"day": k, **{kk: round(vv, 1) for kk, vv in v.items()}} for k, v in sorted(dagg.items())]
 
     result = {
@@ -2235,6 +2282,36 @@ def productivity_timeline(
                          "category": cat, "start_ts": ts, "end_ts": ts,
                          "total_sec": dur, "count": 1})
 
+    # --- (A) Fusão de RAJADAS de micro-runs do mesmo app/categoria --------------
+    # Páginas que mexem no título sozinhas (cronômetro, notificações) geram dezenas
+    # de runs de ~1s com títulos diferentes — poluem a timeline. Aqui fundimos só
+    # runs CURTOS (<= MICRO_SEC) consecutivos do mesmo (tipo, categoria, app).
+    # Visitas reais (runs >= MICRO_SEC, incl. heartbeats de 10s) NÃO são afetadas.
+    # Preserva o total (só soma os segundos). Complementa o fix do agente (debounce).
+    MICRO_SEC = 3.0
+    merged: list = []
+    for run in runs:
+        prev = merged[-1] if merged else None
+        is_micro = run["type"] != "AFK" and run["total_sec"] <= MICRO_SEC
+        if (prev is not None and prev.get("_grp")
+                and is_micro
+                and prev["type"] == run["type"]
+                and prev["category"] == run["category"]
+                and prev["app"].lower() == run["app"].lower()):
+            prev["total_sec"] += run["total_sec"]
+            prev["end_ts"]     = run["end_ts"]
+            prev["count"]     += run["count"]
+            prev["_titles"]   += 1
+            if prev["_titles"] == 2:
+                prev["title"] = "(vários títulos)"
+            continue
+        run["_grp"]    = is_micro
+        run["_titles"] = 1
+        merged.append(run)
+    for _r in merged:
+        _r.pop("_grp", None); _r.pop("_titles", None)
+    runs = merged
+
     totals = {"productive": 0.0, "unproductive": 0.0, "neutral": 0.0, "uncategorized": 0.0, "afk": 0.0, "total": 0.0}
     dagg: dict[str, dict] = {}
     for run in runs:
@@ -2247,6 +2324,20 @@ def productivity_timeline(
         run["total_sec"]   = round(sec, 1)
         run["last_access"] = run["end_ts"]
         run.pop("_k", None)
+
+    # AFK exibido = AFK − almoço, descontado POR DIA LOCAL. O total do período cai
+    # junto (a hora de almoço não conta como tempo coletado) p/ os % baterem.
+    _lunch = _lunch_sec(_alert_settings(tenant))
+    if _lunch > 0:
+        _afk_net, _cut_tot = 0.0, 0.0
+        for _day, _dd in dagg.items():
+            _raw = _dd.get("afk") or 0.0
+            _net = _apply_lunch(_raw, _lunch)
+            _dd["afk"] = _net
+            _afk_net  += _net
+            _cut_tot  += (_raw - _net)
+        totals["afk"]   = _afk_net
+        totals["total"] = max(0.0, totals.get("total", 0.0) - _cut_tot)
 
     daily = [{"day": k, **{kk: round(vv, 1) for kk, vv in v.items()}} for k, v in sorted(dagg.items())]
 
@@ -2283,6 +2374,9 @@ def license_info(tenant: str):
         "seats":       lic["seats"] if lic else 0,
         "used_seats":  used,
         "expires":     lic["expires"] if lic else None,
+        # Minutos de almoço descontados do AFK por dia (config dos Alertas). Exposto
+        # aqui (acessível a todos os papéis, carregado no boot) p/ a aba Jornada usar.
+        "lunch_minutes": int(_alert_settings(tenant).get("lunch_minutes", 60) or 60),
     }
 
 
@@ -2331,12 +2425,17 @@ def workforce_overview(tenant: str, request: Request, days: int = 7,
         # Tabela de usuários (pequena) — depto, nomes e status online.
         urows = c.execute(
             f"""SELECT user_id, display_name,
-                      COALESCE(department,'Sem departamento') AS dept, last_seen
+                      COALESCE(department,'Sem departamento') AS dept, last_seen,
+                      COALESCE(on_vacation, FALSE) AS on_vacation
                FROM users u WHERE u.tenant_id=%s{SCU}""",
             tuple([tenant, *A]),
         ).fetchall()
         _perf.mark("users")
     _perf.done()
+
+    # Férias: colaboradores de férias NÃO entram na Visão Geral (ausência justificada
+    # — para não diluir as médias/totais/contagens do time). Pulados em TODAS as somas.
+    vac_set = {u["user_id"] for u in urows if u["on_vacation"]}
 
     # ---- Agregações em memória (poucas centenas/milhares de linhas) ----
     active_total = afk_total = today_active = 0.0
@@ -2344,13 +2443,15 @@ def workforce_overview(tenant: str, request: Request, days: int = 7,
     users_seen: set[str] = set()
     _hourly_local: dict[int, float] = {}     # heatmap por hora local (BRT)
     _daily_map: dict[str, dict] = {}         # 1 barra por dia local (BRT)
+    _afk_ud: dict[tuple, float] = {}         # AFK por (user, dia local) p/ desconto de almoço
     for r in rows:
         h    = r["h"]
         uid  = r["user_id"]
+        if uid in vac_set:
+            continue
         act  = float(r["active"] or 0.0)
         afkv = float(r["afk"] or 0.0)
         active_total += act
-        afk_total    += afkv
         if h >= today_h:
             today_active += act
         active_by_user[uid] = active_by_user.get(uid, 0.0) + act
@@ -2363,8 +2464,15 @@ def workforce_overview(tenant: str, request: Request, days: int = 7,
         _d = _utc_hour_to_local_day(h)        # barra diária: hora UTC -> dia local
         _e = _daily_map.setdefault(_d, {"day": _d, "active": 0.0, "afk": 0.0, "_users": set()})
         _e["active"] += act
-        _e["afk"]    += afkv
+        _afk_ud[(uid, _d)] = _afk_ud.get((uid, _d), 0.0) + afkv
         _e["_users"].add(uid)
+
+    # AFK exibido = AFK − almoço, descontado por (usuário, dia local), capado em 0.
+    _lunch = _lunch_sec(_alert_settings(tenant))
+    for (uid, _d), av in _afk_ud.items():
+        net = _apply_lunch(av, _lunch)
+        afk_total += net
+        _daily_map[_d]["afk"] += net
 
     daily = [{"day": v["day"], "active": v["active"], "afk": v["afk"], "users": len(v["_users"])}
              for v in sorted(_daily_map.values(), key=lambda x: x["day"])]
@@ -2375,6 +2483,8 @@ def workforce_overview(tenant: str, request: Request, days: int = 7,
     overwork, underwork = [], []
     for u in urows:
         uid = u["user_id"]
+        if u["on_vacation"]:
+            continue                          # de férias → fora da Visão Geral
         if u["last_seen"] and u["last_seen"] >= online_threshold:
             online += 1
         ua = active_by_user.get(uid, 0.0)
@@ -2758,6 +2868,32 @@ def delete_department(dept_name: str, tenant: str, request: Request):
     audit("admin", "dept.delete", target=dept_name, detail=f"tenant={tenant}",
           ip=request.client.host if request.client else None)
     return {"status": "deleted", "name": dept_name}
+
+
+class DeptMembersIn(BaseModel):
+    user_ids: list[str] = []
+
+
+@app.post("/v1/departments/{dept_name}/members", dependencies=[Depends(require_tenant_scope)])
+def department_add_members(dept_name: str, body: DeptMembersIn, tenant: str, request: Request):
+    """Atribui VÁRIOS colaboradores a um departamento de uma vez (UPDATE em lote) —
+    evita editar colaborador por colaborador em equipes grandes."""
+    uids = [u for u in (body.user_ids or []) if u]
+    if not uids:
+        raise HTTPException(status_code=422, detail="informe ao menos um colaborador")
+    with db() as c:
+        if not c.execute("SELECT 1 FROM tenant_departments WHERE tenant_id=%s AND name=%s",
+                         (tenant, dept_name)).fetchone():
+            raise HTTPException(status_code=404, detail="department not found")
+        cur = c.execute(
+            "UPDATE users SET department=%s WHERE tenant_id=%s AND user_id = ANY(%s)",
+            (dept_name, tenant, uids),
+        )
+        n = cur.rowcount
+    _cache_bust(tenant)
+    audit("admin", "dept.add_members", target=dept_name,
+          detail=f"tenant={tenant} n={n}", ip=_client_ip(request))
+    return {"status": "ok", "department": dept_name, "added": n}
 
 
 # ===========================================================================
@@ -3854,7 +3990,7 @@ def support_people(tenant: str, request: Request):
     versão do agente e a máquina mais recente. Sem agregação pesada."""
     with db() as c:
         rows = c.execute(
-            """SELECT u.user_id, u.display_name, u.department, u.last_seen,
+            """SELECT u.user_id, u.display_name, u.department, u.last_seen, u.on_vacation,
                       d.agent_version, d.hostname, d.os
                FROM users u
                LEFT JOIN LATERAL (
@@ -3941,6 +4077,48 @@ def support_person(tenant: str, user_id: str, request: Request):
         "last_web":      last_web,
         "jornada_start": jstart,
     }
+
+
+@app.get("/v1/support/agent-download",
+         dependencies=[Depends(require_role("admin_master", "admin", "suporte"))])
+def support_agent_download(tenant: str, request: Request):
+    """Link de download do agente marcado como VERSÃO ATUAL (is_latest), por SO, para
+    o time de Suporte do cliente. Prefere o build DO TENANT (licença embutida); se não
+    houver, cai no genérico (enrollment). Gera uma URL pré-assinada CURTA na hora — não
+    há link de longa duração para gerenciar (cada carga/clique pega um link fresco)."""
+    if not RELEASES_BUCKET:
+        return {"available": False, "items": []}
+    expires = 3600  # 1h: tempo de sobra p/ o suporte clicar e baixar
+    tenant_chan = f"tenant:{tenant}"
+    items = []
+    with db() as c:
+        for os_ in ("windows", "linux"):
+            r = c.execute(
+                """SELECT id, os, version, filename, s3_key, sha256, size_bytes, channel
+                   FROM agent_releases
+                   WHERE os=%s AND is_latest=TRUE AND channel IN (%s, 'generic')
+                   ORDER BY (channel=%s) DESC, created_at DESC LIMIT 1""",
+                (os_, tenant_chan, tenant_chan),
+            ).fetchone()
+            if not r:
+                continue
+            try:
+                url = _s3().generate_presigned_url(
+                    "get_object",
+                    Params={"Bucket": RELEASES_BUCKET, "Key": r["s3_key"],
+                            "ResponseContentDisposition": f'attachment; filename="{r["filename"]}"'},
+                    ExpiresIn=expires,
+                )
+            except Exception as exc:
+                print(f"[support_agent_download] presign falhou: {exc}", flush=True)
+                continue
+            items.append({
+                "os": r["os"], "version": r["version"], "filename": r["filename"],
+                "size_bytes": r["size_bytes"], "sha256": r["sha256"],
+                "channel": ("tenant" if r["channel"] == tenant_chan else "generic"),
+                "url": url, "expires_in": expires,
+            })
+    return {"available": bool(items), "items": items, "tenant": tenant}
 
 
 def _client_ip(request: Request) -> str | None:
@@ -5537,12 +5715,14 @@ _SCHEMA_STMTS.extend([
         overwork_min_h    REAL NOT NULL DEFAULT 10,
         engagement_days          INTEGER NOT NULL DEFAULT 7,
         engagement_include_today BOOLEAN NOT NULL DEFAULT FALSE,
+        lunch_minutes     INTEGER NOT NULL DEFAULT 60,
         updated_at        TEXT
     )
     """,
     # Migração para tenants já existentes (idempotente).
     "ALTER TABLE alert_settings ADD COLUMN IF NOT EXISTS engagement_days INTEGER NOT NULL DEFAULT 7",
     "ALTER TABLE alert_settings ADD COLUMN IF NOT EXISTS engagement_include_today BOOLEAN NOT NULL DEFAULT FALSE",
+    "ALTER TABLE alert_settings ADD COLUMN IF NOT EXISTS lunch_minutes INTEGER NOT NULL DEFAULT 60",
     """
     CREATE TABLE IF NOT EXISTS alert_rules (
         tenant_id     TEXT NOT NULL,
@@ -5620,7 +5800,25 @@ def _alert_settings(tenant: str) -> dict:
     return {"tenant_id": tenant, "business_start": "08:00", "business_end": "18:00",
             "absent_cutoff": "10:00", "afk_threshold_min": 120,
             "underwork_max_h": 2.0, "overwork_min_h": 10.0,
-            "engagement_days": 7, "engagement_include_today": False}
+            "engagement_days": 7, "engagement_include_today": False,
+            "lunch_minutes": 60}
+
+
+def _lunch_sec(settings: dict) -> float:
+    """Segundos de almoço a descontar do AFK POR DIA LOCAL (config por tenant,
+    padrão 60 min). 0 desliga o desconto."""
+    try:
+        return max(0, int(settings.get("lunch_minutes", 60) or 0)) * 60.0
+    except Exception:
+        return 3600.0
+
+
+def _apply_lunch(afk_day: float, lunch: float) -> float:
+    """Desconta o almoço do AFK de UM dia local. REGRA: só desconta se o AFK do dia
+    for >= o almoço; abaixo disso mantém o valor cru (descontar zeraria dias com pouca
+    pausa e pareceria erro de coleta)."""
+    av = float(afk_day or 0.0)
+    return (av - lunch) if av >= lunch else av
 
 
 def _alert_rules(tenant: str) -> dict:
@@ -5704,7 +5902,7 @@ def _compute_day_alerts(tenant: str, settings: dict, risky: list, allowed=None) 
 
     with db() as c:
         users = {r["user_id"]: dict(r) for r in c.execute(
-            f"SELECT user_id, display_name, department, last_seen FROM users WHERE tenant_id=%s"
+            f"SELECT user_id, display_name, department, last_seen, on_vacation FROM users WHERE tenant_id=%s"
             + (" AND user_id = ANY(%s)" if allowed is not None else ""),
             tuple([tenant, *([allowed] if allowed is not None else [])]),
         ).fetchall()}
@@ -5719,10 +5917,28 @@ def _compute_day_alerts(tenant: str, settings: dict, risky: list, allowed=None) 
                 GROUP BY user_id""",
             tuple([tenant, bstart_utc, bend_eff_utc, *sa]),
         ).fetchall()
-        expected = {r["user_id"] for r in c.execute(
-            f"SELECT DISTINCT user_id FROM events WHERE tenant_id=%s AND bucket='window' AND ts>=%s AND ts<%s{sc}",
-            tuple([tenant, prev7_utc, day_start_utc, *sa]),
-        ).fetchall()}
+        # "Esperados" = quem teve atividade nos últimos 7 dias (roster p/ detectar
+        # ausência hoje). CAMINHO RÁPIDO: lê do rollup agg_user_day (1 linha por
+        # usuário/dia com atividade) em vez de varrer 7 dias de events. Fallback p/
+        # events crus quando o rollup ainda não cobre a janela.
+        if _agg_ready(c, tenant, prev7_utc):
+            _d_from = (today - dt.timedelta(days=7)).isoformat()
+            _d_to   = (today - dt.timedelta(days=1)).isoformat()
+            if allowed is not None:
+                expected = {r["user_id"] for r in c.execute(
+                    "SELECT DISTINCT user_id FROM agg_user_day WHERE tenant_id=%s AND day>=%s AND day<=%s AND user_id = ANY(%s)",
+                    (tenant, _d_from, _d_to, allowed),
+                ).fetchall()}
+            else:
+                expected = {r["user_id"] for r in c.execute(
+                    "SELECT DISTINCT user_id FROM agg_user_day WHERE tenant_id=%s AND day>=%s AND day<=%s",
+                    (tenant, _d_from, _d_to),
+                ).fetchall()}
+        else:
+            expected = {r["user_id"] for r in c.execute(
+                f"SELECT DISTINCT user_id FROM events WHERE tenant_id=%s AND bucket='window' AND ts>=%s AND ts<%s{sc}",
+                tuple([tenant, prev7_utc, day_start_utc, *sa]),
+            ).fetchall()}
         risky_rows = []
         if risky:
             risky_rows = c.execute(
@@ -5747,6 +5963,8 @@ def _compute_day_alerts(tenant: str, settings: dict, risky: list, allowed=None) 
             for uid in sorted(expected):
                 if uid not in started:
                     u = users.get(uid, {})
+                    if u.get("on_vacation"):
+                        continue              # de férias → ausência justificada, não alerta
                     absent_list.append({"user_id": uid, "display_name": u.get("display_name"),
                                         "department": u.get("department"), "last_seen": u.get("last_seen")})
 
@@ -5820,19 +6038,42 @@ def _compute_engagement_alerts(tenant: str, settings: dict, allowed=None) -> dic
     params = {"tz": REPORT_TZ, "tenant": tenant, "since": since, "until": until}
     if allowed is not None:
         params["uids"] = allowed
+    d_lo = min(bizdays).isoformat()   # dia local mais antigo da janela ('YYYY-MM-DD')
+    d_hi = max(bizdays).isoformat()   # dia local mais recente
 
     with db() as c:
-        rows = c.execute(
-            f"""SELECT user_id,
-                       to_char((ts::timestamptz AT TIME ZONE %(tz)s)::date, 'YYYY-MM-DD') AS lday,
-                       SUM(duration_sec) AS sec
-                FROM events
-                WHERE tenant_id=%(tenant)s AND bucket='window'
-                  AND ts::timestamptz >= %(since)s::timestamptz
-                  AND ts::timestamptz <= %(until)s::timestamptz{sc}
-                GROUP BY user_id, lday""",
-            params,
-        ).fetchall()
+        # CAMINHO RÁPIDO: lê do rollup agg_user_day quando o backfill já cobre a
+        # janela. focus_sec == SUM(duration_sec) de bucket='window' por dia local —
+        # IDÊNTICO ao cálculo cru abaixo. São poucas centenas de linhas (instantâneo)
+        # em vez de varrer 7 dias de events. Mantém o filtro de escopo (líder).
+        if _agg_ready(c, tenant, since):
+            if allowed is not None:
+                rows = c.execute(
+                    """SELECT user_id, day AS lday, focus_sec AS sec
+                       FROM agg_user_day
+                       WHERE tenant_id=%s AND day>=%s AND day<=%s AND user_id = ANY(%s)""",
+                    (tenant, d_lo, d_hi, allowed),
+                ).fetchall()
+            else:
+                rows = c.execute(
+                    """SELECT user_id, day AS lday, focus_sec AS sec
+                       FROM agg_user_day
+                       WHERE tenant_id=%s AND day>=%s AND day<=%s""",
+                    (tenant, d_lo, d_hi),
+                ).fetchall()
+        else:
+            # FALLBACK (rollup ainda não cobre a janela): agrega events cru. Mesmo
+            # resultado; ts em TEXTO no WHERE (indexável), cast só no SELECT p/ o dia local.
+            rows = c.execute(
+                f"""SELECT user_id,
+                           to_char((ts::timestamptz AT TIME ZONE %(tz)s)::date, 'YYYY-MM-DD') AS lday,
+                           SUM(duration_sec) AS sec
+                    FROM events
+                    WHERE tenant_id=%(tenant)s AND bucket='window'
+                      AND ts >= %(since)s AND ts <= %(until)s{sc}
+                    GROUP BY user_id, lday""",
+                params,
+            ).fetchall()
         names = {r["user_id"]: r["display_name"] for r in c.execute(
             "SELECT user_id, display_name FROM users WHERE tenant_id=%s", (tenant,)
         ).fetchall()}
@@ -5883,6 +6124,7 @@ class AlertConfigIn(BaseModel):
     overwork_min_h:    float = 10
     engagement_days:          int = 7
     engagement_include_today: bool = False
+    lunch_minutes:            int = 60
     rules:             list[AlertRuleIn] = []
 
 
@@ -5895,17 +6137,27 @@ class RiskySiteIn(BaseModel):
 @app.get("/v1/alerts/today", dependencies=[Depends(require_tenant_scope)])
 def alerts_today(tenant: str, request: Request, days: int = 7,
                  since: str | None = None, until: str | None = None):
+    allowed = _lider_allowed_ids(request, tenant)
+    # Cache curto POR ESCOPO: um Líder vê só o time dele, então a chave inclui o
+    # escopo p/ não vazar entre usuários. Chaveia pelos parâmetros CRUS do request
+    # (since/until = vazio quando não passados → chave estável; não usa o "now"
+    # derivado, que mudaria a cada chamada e nunca daria cache-hit). É invalidado
+    # junto com o resto do tenant nas escritas (config de alerta, etc.).
+    _scope_tag = "all" if allowed is None else "lid:" + ",".join(sorted(allowed))
+    _ckey = f"{tenant}:alerts_today:{_scope_tag}:{days}:{since or ''}:{until or ''}"
+    _cached = _cache_get(_ckey)
+    if _cached is not None:
+        return _cached
     if since is None:
         since = _since_for_days(days)
     if until is None:
         until = dt.datetime.now(dt.timezone.utc).isoformat()
-    allowed = _lider_allowed_ids(request, tenant)
     settings = _alert_settings(tenant)
     rules    = _alert_rules(tenant)
     risky    = _risky_sites(tenant)
     day = _compute_day_alerts(tenant, settings, risky, allowed=allowed)
     eng = _compute_engagement_alerts(tenant, settings, allowed=allowed)   # janela fixa: últimos 7 dias úteis
-    return {
+    _resp = {
         "tenant": tenant,
         "settings": {k: settings[k] for k in
                      ("business_start", "business_end", "absent_cutoff",
@@ -5921,6 +6173,8 @@ def alerts_today(tenant: str, request: Request, days: int = 7,
             "overwork":     eng["overwork"],
         },
     }
+    _cache_set(_ckey, _resp)
+    return _resp
 
 
 @app.get("/v1/alerts/config")
@@ -5931,7 +6185,7 @@ def alerts_config_get(tenant: str, ctx: Annotated[dict, Depends(require_role("ad
         "settings": {k: s[k] for k in
                      ("business_start", "business_end", "absent_cutoff",
                       "afk_threshold_min", "underwork_max_h", "overwork_min_h",
-                      "engagement_days", "engagement_include_today")},
+                      "engagement_days", "engagement_include_today", "lunch_minutes")},
         "rules": _alert_rules(tid),
         "risky_sites": _risky_sites(tid),
         "alert_labels": ALERT_LABELS,
@@ -5947,19 +6201,21 @@ def alerts_config_set(body: AlertConfigIn, tenant: str, request: Request,
             """INSERT INTO alert_settings
                  (tenant_id, business_start, business_end, absent_cutoff,
                   afk_threshold_min, underwork_max_h, overwork_min_h,
-                  engagement_days, engagement_include_today, updated_at)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                  engagement_days, engagement_include_today, lunch_minutes, updated_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (tenant_id) DO UPDATE SET
                  business_start=EXCLUDED.business_start, business_end=EXCLUDED.business_end,
                  absent_cutoff=EXCLUDED.absent_cutoff, afk_threshold_min=EXCLUDED.afk_threshold_min,
                  underwork_max_h=EXCLUDED.underwork_max_h, overwork_min_h=EXCLUDED.overwork_min_h,
                  engagement_days=EXCLUDED.engagement_days,
                  engagement_include_today=EXCLUDED.engagement_include_today,
+                 lunch_minutes=EXCLUDED.lunch_minutes,
                  updated_at=EXCLUDED.updated_at""",
             (tid, body.business_start, body.business_end, body.absent_cutoff,
              int(body.afk_threshold_min), float(body.underwork_max_h),
              float(body.overwork_min_h),
              max(1, int(body.engagement_days)), bool(body.engagement_include_today),
+             max(0, int(body.lunch_minutes)),
              _now_utc().isoformat()),
         )
         for r in body.rules:
@@ -5974,6 +6230,7 @@ def alerts_config_set(body: AlertConfigIn, tenant: str, request: Request,
                      recipients=EXCLUDED.recipients""",
                 (tid, r.alert_type, bool(r.enabled), bool(r.email_enabled), json.dumps(recips)),
             )
+    _cache_bust(tid)   # config (almoço, etc.) muda os números → invalida o cache do tenant
     audit(ctx.get("email"), "alerts.config_set", target=tid, ip=_client_ip(request))
     return {"ok": True}
 
@@ -6233,6 +6490,15 @@ _SCHEMA_STMTS.extend([
 _SCHEMA_STMTS.extend([
     "ALTER TABLE agent_config_global ADD COLUMN IF NOT EXISTS sync_interval_sec INTEGER",
     "ALTER TABLE agent_config_tenant ADD COLUMN IF NOT EXISTS sync_interval_sec INTEGER",
+    # Rótulo de Férias (ausência justificada): liga/desliga manual por colaborador.
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS on_vacation BOOLEAN NOT NULL DEFAULT FALSE",
+    # Auto-registra como DEPARTAMENTO qualquer nome já atribuído a um colaborador
+    # (ex.: digitado no Editar antes de existir a tela de gestão) — assim a tela de
+    # Departamentos mostra tudo sem precisar recriar. Idempotente (ON CONFLICT).
+    "INSERT INTO tenant_departments (tenant_id, name, created_at) "
+    "SELECT DISTINCT tenant_id, department, now()::text FROM users "
+    "WHERE department IS NOT NULL AND department <> '' "
+    "ON CONFLICT (tenant_id, name) DO NOTHING",
 ])
 
 # ---------------------------------------------------------------------------

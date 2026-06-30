@@ -317,17 +317,38 @@ async function loadDepts() {
   } catch (e) { toast('Erro ao carregar departamentos: ' + e.message); }
 }
 
+let _deptsPage = 0;
+const _DEPTS_PAGE_SIZE = 2;   // 2 departamentos por página (cards lado a lado)
+function _deptsGoTo(p) { _deptsPage = p; renderDeptsSection(); }
+
+// Filtra as opções do multi-select de um depto SEM re-renderizar (preserva o que
+// já estava selecionado — útil p/ filtrar, marcar, filtrar de novo e marcar mais).
+function _deptFilterOpts(deptId, q) {
+  const sel = document.getElementById('addUserSel_' + deptId);
+  if (!sel) return;
+  const t = (q || '').trim().toLowerCase();
+  Array.from(sel.options).forEach(o => {
+    if (o.disabled) return;
+    const show = !t || o.textContent.toLowerCase().includes(t);
+    o.hidden = !show;
+    o.style.display = show ? '' : 'none';
+  });
+}
+
 function renderDeptsSection() {
   const el = document.getElementById('deptsList');
   if (!el) return;
-  if (!_depts.length) {
+  const total = _depts.length;
+  if (!total) {
     el.innerHTML = '<p style="color:var(--text-muted);font-size:13px">Nenhum departamento criado ainda. Use o formulário acima para começar.</p>';
     return;
   }
-  const assignedIds = new Set(_depts.flatMap(d => (d.users || []).map(u => u.user_id)));
-  const unassigned  = state.collabs.filter(u => !assignedIds.has(u.user_id));
+  const pages = Math.max(1, Math.ceil(total / _DEPTS_PAGE_SIZE));
+  if (_deptsPage >= pages) _deptsPage = pages - 1;
+  if (_deptsPage < 0) _deptsPage = 0;
+  const slice = _depts.slice(_deptsPage * _DEPTS_PAGE_SIZE, (_deptsPage + 1) * _DEPTS_PAGE_SIZE);
 
-  el.innerHTML = _depts.map(dept => {
+  const cards = slice.map(dept => {
     const safeName = dept.name.replace(/'/g, "\\'").replace(/"/g, '&quot;');
     const userChips = (dept.users || []).map(u => {
       const label   = u.display_name || u.login_user || cleanUserId(u.user_id);
@@ -339,10 +360,17 @@ function renderDeptsSection() {
       </span>`;
     }).join('');
 
-    const unassignedOpts = unassigned.map(u => {
+    // Candidatos = todos os colaboradores que NÃO estão neste depto (inclui sem
+    // depto e os de outros, p/ poder mover). O rótulo mostra o depto atual.
+    const candidates = (state.collabs || [])
+      .filter(u => (u.department || '') !== dept.name)
+      .sort((a, b) => (a.display_name || cleanUserId(a.user_id))
+        .localeCompare(b.display_name || cleanUserId(b.user_id), 'pt-BR'));
+    const candOpts = candidates.map(u => {
       const label   = u.display_name || cleanUserId(u.user_id);
+      const cur     = u.department ? ` — atual: ${u.department}` : ' — sem depto';
       const safeUid = (u.user_id || '').replace(/"/g, '&quot;');
-      return `<option value="${safeUid}">${label}</option>`;
+      return `<option value="${safeUid}">${label}${cur}</option>`;
     }).join('');
 
     return `<div class="dept-mgmt-card">
@@ -356,15 +384,34 @@ function renderDeptsSection() {
         </div>
       </div>
       <div class="dept-users-list">${userChips || '<span style="color:var(--text-muted);font-size:12px">Nenhum colaborador neste departamento.</span>'}</div>
-      <div class="dept-add-user">
-        <select id="addUserSel_${dept.id}">
-          <option value="">— adicionar colaborador —</option>
-          ${unassignedOpts}
-        </select>
-        <button class="ghost" style="font-size:12px;padding:5px 12px" onclick="assignUserToDept(${dept.id},'${safeName}')">Adicionar</button>
+      <div class="dept-add-user" style="align-items:flex-start;flex-wrap:wrap;gap:8px">
+        <div style="flex:1;min-width:200px;display:flex;flex-direction:column;gap:6px">
+          <input type="search" placeholder="🔎 filtrar colaborador..." oninput="_deptFilterOpts(${dept.id}, this.value)"
+                 style="width:100%;box-sizing:border-box;font-size:12px;padding:6px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg-2);color:var(--text)">
+          <select id="addUserSel_${dept.id}" multiple size="6" style="width:100%;box-sizing:border-box">
+            ${candOpts || '<option disabled>Todos os colaboradores já estão neste departamento</option>'}
+          </select>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:4px">
+          <button class="primary" style="font-size:12px;padding:6px 14px" onclick="assignUsersToDept(${dept.id},'${safeName}')">Adicionar selecionados</button>
+          <span style="font-size:11px;color:var(--text-muted)">Ctrl/Shift p/ marcar vários</span>
+        </div>
       </div>
     </div>`;
   }).join('');
+
+  const grid = `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(440px,1fr));gap:16px;align-items:start">${cards}</div>`;
+  let pager = '';
+  if (pages > 1) {
+    const nav = (label, page, disabled) =>
+      `<button class="ghost ev-page-nav" ${disabled ? 'disabled' : ''} onclick="_deptsGoTo(${page})">${label}</button>`;
+    pager = `<div style="display:flex;justify-content:center;align-items:center;gap:10px;margin-top:16px">
+      ${nav('← Anterior', _deptsPage - 1, _deptsPage === 0)}
+      <span style="font-size:12px;color:var(--text-dim)">Página ${_deptsPage + 1} de ${pages} · ${total} departamentos</span>
+      ${nav('Próxima →', _deptsPage + 1, _deptsPage >= pages - 1)}
+    </div>`;
+  }
+  el.innerHTML = grid + pager;
 }
 
 async function createDept() {
@@ -387,14 +434,16 @@ async function deleteDept(name) {
   } catch (e) { toast('Erro: ' + e.message); }
 }
 
-async function assignUserToDept(deptId, deptName) {
+async function assignUsersToDept(deptId, deptName) {
   const sel = document.getElementById('addUserSel_' + deptId);
-  const uid = sel ? sel.value : '';
-  if (!uid) { toast('Selecione um colaborador.'); return; }
+  if (!sel) return;
+  const uids = Array.from(sel.selectedOptions).map(o => o.value).filter(Boolean);
+  if (!uids.length) { toast('Selecione um ou mais colaboradores.'); return; }
   try {
-    await apiFetch('PATCH', '/v1/users/' + encodeURIComponent(uid) + '?tenant=' + encodeURIComponent(state.tenant),
-      { department: deptName });
-    toast('Colaborador adicionado a ' + deptName + '.');
+    await apiFetch('POST',
+      '/v1/departments/' + encodeURIComponent(deptName) + '/members?tenant=' + encodeURIComponent(state.tenant),
+      { user_ids: uids });
+    toast(uids.length + ' colaborador(es) adicionado(s) a ' + deptName + '.');
     await Promise.all([loadDepts(), loadCollabs()]);
   } catch (e) { toast('Erro: ' + e.message); }
 }
@@ -415,6 +464,7 @@ async function loadCollabs() {
   try {
     const data = await api('/v1/users?tenant=' + encodeURIComponent(state.tenant));
     state.collabs = data.users || [];
+    markVacation(state.collabs);
     _collabsPage  = 0;
     _renderCollabsPage();
   } catch (e) { toast('Erro ao carregar colaboradores: ' + e.message); }
@@ -497,7 +547,7 @@ function _renderCollabsPage() {
       <button class="btn-danger-outline" onclick="collabDelete('${safeUid}','${safeName}')">🗑 Excluir</button>` : '';
     return `<tr>
       <td><code style="color:var(--text-dim);font-size:11px">${cleanUserId(uid)}</code></td>
-      <td>${u.display_name || '<span style="color:var(--text-muted)">—</span>'}</td>
+      <td>${u.display_name || '<span style="color:var(--text-muted)">—</span>'}${vacBadge(u.user_id)}</td>
       <td>${u.email        || '<span style="color:var(--text-muted)">—</span>'}</td>
       <td>${u.department   || '<span style="color:var(--text-muted)">—</span>'}</td>
       <td>${u.role         || '<span style="color:var(--text-muted)">—</span>'}</td>
@@ -531,6 +581,8 @@ function editUser(uid) {
   document.getElementById('collabEmail').value   = user.email || '';
   document.getElementById('collabDept').value    = user.department || '';
   document.getElementById('collabRole').value    = user.role || '';
+  const _vac = document.getElementById('collabVacation');
+  if (_vac) _vac.checked = !!user.on_vacation;
   _updateDeptDatalist();
 
   const form = document.getElementById('collabForm');
@@ -550,6 +602,10 @@ async function saveUser() {
     role:         document.getElementById('collabRole').value.trim()  || null,
   };
   Object.keys(body).forEach(k => { if (!body[k]) delete body[k]; });
+  // on_vacation é booleano: adicionado APÓS o filtro (senão 'false' seria descartado
+  // e nunca daria pra DESLIGAR as férias). Sempre enviado.
+  const _vac = document.getElementById('collabVacation');
+  if (_vac) body.on_vacation = _vac.checked;
   if (!Object.keys(body).length) { toast('Nada para salvar.'); return; }
   try {
     // apiFetch envia o cookie de sessão (credentials:'include') — necessário no

@@ -26,6 +26,7 @@ async function loadPeople() {
     const { since, until } = wpDP.getRange('peopleRange');
     const data = await api(`/v1/team/summary?tenant=${encodeURIComponent(state.tenant)}&since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`);
     state.people = data.users || [];
+    markVacation(state.people);
     _peoplePage = 0;
     renderPeopleTable();
   } catch (e) { toast('Erro ao carregar pessoas: ' + e.message); }
@@ -133,7 +134,7 @@ function renderPeopleTable() {
     const safeUid  = (u.user_id || '').replace(/'/g, "\\'");
     const safeName = (name || '').replace(/'/g, "\\'");
     return `<tr>
-      <td><span class="person-link" title="Atalhos desta pessoa" onclick="openPersonMenu(event,'${safeUid}','${safeName}')">${avatar(name)} <strong>${name}</strong></span></td>
+      <td><span class="person-link" title="Atalhos desta pessoa" onclick="openPersonMenu(event,'${safeUid}','${safeName}')">${avatar(name)} <strong>${name}</strong></span>${vacBadge(u.user_id)}</td>
       <td>${u.department || '<span style="color:var(--text-muted)">—</span>'}</td>
       <td>${fmtH(u.active)}<small style="color:var(--text-dim)"> h</small></td>
       <td>${fmtH(u.afk)}<small style="color:var(--text-dim)"> h</small></td>
@@ -168,6 +169,7 @@ function openPersonMenu(ev, uid, name) {
     <div class="pm-head">${escHtml(name)}</div>
     <button onclick="goToUserPage('events','${su}','${sn}')">⚡ Aplicativos</button>
     <button onclick="goToUserPage('internet','${su}','${sn}')">🌐 Internet</button>
+    <button onclick="goToUserPage('consolidado','${su}','${sn}')">📋 Consolidado</button>
     <button onclick="goToUserPage('jornada','${su}','${sn}')">⏱ Jornada de Trabalho</button>
     <button onclick="goToUserPage('localizacao','${su}','${sn}')">📍 Localização</button>
     <button onclick="_closePersonMenu();drillUser('${su}','${sn}')">🔎 Desdobramento (aqui)</button>`;

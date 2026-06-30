@@ -104,6 +104,7 @@ async function _loadLicenseInfo() {
   if (!state.token || !state.tenant) return;
   try {
     const info = await api('/v1/license/info?tenant=' + encodeURIComponent(state.tenant));
+    if (info && info.lunch_minutes != null) state.lunchMin = info.lunch_minutes;
 
     // Atualiza nome do tenant (agora com nome real)
     _acctSetTenant(info.tenant_id, info.tenant_name);

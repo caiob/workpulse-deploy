@@ -1,7 +1,7 @@
 # CLAUDE.md — WorkPulse
 
 Guidance for AI agents (Claude Code / Cowork) working on WorkPulse.
-**Read this fully before changing anything.** Last updated: 2026-06-21.
+**Read this fully before changing anything.** Last updated: 2026-06-29.
 
 > **Para o estado atual (auth e-mail/senha, papéis, Localização, Administrativo,
 > Financeiro, SMTP por tenant, motor de Alertas, etc.), leia primeiro a seção
@@ -748,6 +748,58 @@ do dono (Caio)" na seção Deploy — `redeploy.ps1` / `publicar-site.ps1` / `re
   `WORKPULSE_ADMIN_STATS_TTL` (default 45s). A página recarrega a cada 30s; evita re-agregar a
   events a cada refresh. Global (não leva tenant), independente do `_CACHE`.
 
+### Perf da aba Alertas (Análises → "Sinais que merecem atenção")
+- `/v1/alerts/today` calculava tudo ao vivo varrendo `events`. Dois ajustes SEM mudar resultado:
+  1. **`_compute_engagement_alerts`**: o `WHERE` usava `ts::timestamptz >= ...::timestamptz`, e o
+     cast em `ts` (TEXT) ANULAVA o índice (varria a janela inteira de 7 dias úteis convertendo
+     linha a linha). Trocado por comparação de TEXTO (`ts >= %(since)s AND ts <= %(until)s`) —
+     mesmo idioma que o `_compute_day_alerts` já usa em prod (ISO-8601 UTC, lexicográfico =
+     cronológico), índice volta a valer. O cast `to_char(... AT TIME ZONE)` fica só no SELECT
+     (rótulo do dia local), rodando apenas nas linhas já filtradas. Resultado idêntico, bem mais rápido.
+  2. **Cache POR ESCOPO** no endpoint: chave `"{tenant}:alerts_today:{scope}:{days}:{since}:{until}"`
+     onde scope = `all` (admin) ou `lid:<uids ordenados>` (Líder — não pode vazar entre escopos).
+     Chaveia pelos params CRUS do request (não pelo `now` derivado). Reusa `_cache_get/_cache_set`
+     (TTL 300s, invalidado nas escritas + throttle do ingest) → recargas e o auto-refresh de 30s
+     ficam instantâneos. Defasagem aceitável (a tela é "ponto de partida, não veredito").
+- **(2026-06-21c) Engajamento migrado p/ rollup** — o de-cast + cache NÃO bastaram: cold load do
+  `today?tenant=` ainda dava ~22s (medido no Network), pois agregar 7 dias de `events` crus é caro
+  por natureza, índice ou não. Agora `_compute_engagement_alerts` lê de **`agg_user_day`** (campo
+  `focus_sec` == `SUM(duration_sec)` de window por dia local → resultado IDÊNTICO ao cru) usando o
+  padrão **`_agg_ready` + fallback**: lê do rollup quando o backfill cobre a janela; senão cai na
+  consulta crua (de-castada). Filtro de escopo do líder preservado (`user_id = ANY(allowed)`).
+  Resultado: 22s → ~10s.
+- **(2026-06-21d) "Esperados" migrado p/ rollup** — em `_compute_day_alerts`, o roster de quem
+  esteve ativo nos últimos 7 dias (p/ detectar ausência) era um `SELECT DISTINCT user_id` varrendo
+  7 dias de events. Passou a ler `DISTINCT user_id FROM agg_user_day` no range de 7 dias locais
+  (mesmo padrão `_agg_ready` + fallback; respeita escopo). Restam AO VIVO só consultas de HOJE
+  (started/afk/risky em `_compute_day_alerts` — ~1 dia, pequenas). "Sites perigosos" fica cru
+  (depende de título, sem rollup). Resultado esperado: ~10s → ~1-2s.
+- Render progressivo (carregar card a card) ainda NÃO foi feito: a ideia some o spinner mas não
+  acelera o dado. Como os scans de 7 dias saíram, o endpoint deve ficar rápido o bastante sem isso;
+  se ainda pesar (provável culpado: `risky_rows`, GROUP BY user/app/título de hoje), avaliar.
+
+### "Picotado" na Consolidada — RESOLVIDO: era CHURN DE TÍTULO, não AFK
+- INVESTIGAÇÃO (com `RUST_LOG=debug` no Windows): **AFK está correto** — digitando continuamente
+  NÃO logou "AFK iniciado" (descartado o cenário de "AFK durante atividade"/falha de input no Win;
+  **ainda vale testar no Linux/Wayland**, onde a detecção via X11/`device_query` é mais frágil).
+- CAUSA REAL: páginas que mudam o TÍTULO a cada segundo (cronômetro, notificações do Slack, YouTube)
+  geram um evento `window` de 1s por segundo (cada título = "troca de janela"). E durante o churn o
+  heartbeat sumia (a condição era "janela não mudou"). Resultado: timeline picotada + volume alto.
+- FIX (B) AGENTE (`tracker.rs`) — **debounce de título** (exige rebuild + rollout; TESTAR antes):
+  - troca de APP → registra na hora; mesmo app, título diferente → só registra se persistir
+    `WINDOW_TITLE_DWELL_SEC`=3s (título piscando nunca "assenta" → sem evento). Estado novo:
+    `pending_win`/`pending_since`; `commit` substitui `window_changed`.
+  - heartbeat agora dispara por **mesmo APP** (`same_app_as_emitted`), não pela janela inteira —
+    assim o churn de título não suprime mais o heartbeat nem perde tempo ativo.
+  - Efeito: ~6 ev/min em vez de ~60, mesmo tempo ativo, timeline limpa. Tradeoff: visitas ao MESMO
+    app < 3s caem p/ resolução do heartbeat (~10s). (A supressão de window em AFK foi descartada —
+    o debounce já limpa o churn sem o risco de esconder tempo produtivo.)
+- FIX (A) BACKEND (`/v1/productivity/timeline`) — pós-passe que funde RAJADAS de micro-runs (<=3s)
+  consecutivos do mesmo (tipo, categoria, app) num bloco "(vários títulos)". Limpa a timeline p/
+  dados ANTIGOS e agentes ainda não atualizados, sem afetar visitas reais (runs >=3s/heartbeats de
+  10s) nem os totais. Testado em Python (churn 6→2 preservando segundos; navegação normal e AFK não
+  fundem). Deploy do A é só backend (`redeploy.ps1`); o B vai no próximo rebuild do agente.
+
 ### Frontend
 - **Platform Admin** (`admin.js?v=20`, `admin.html`): gráfico "Ingestão por hora" rotula o eixo
   no fuso de **Brasília** (`drawIngestChart` converte o `hour` UTC via `toLocaleString` com
@@ -769,6 +821,69 @@ do dono (Caio)" na seção Deploy — `redeploy.ps1` / `publicar-site.ps1` / `re
   (mesma lista já carregada), **sem query extra** (`_supRenderDist`/`_supDistHtml`). Backend:
   `/v1/support/people` passou a devolver `d.os` (uma coluna a mais no LATERAL existente, custo
   desprezível) — exige redeploy do backend p/ o card de SO popular.
+
+### Suporte: download do agente + rótulo de Férias (2026-06-25)
+- **Download do agente na tela Suporte do cliente.** Novo `GET /v1/support/agent-download`
+  (`require_role` admin_master/admin/suporte): pega o release `is_latest` por SO, **preferindo o
+  canal `tenant:<id>`; senão `generic`**, e gera URL pré-assigned na hora (1h). NÃO existe link de
+  longa duração (o mito dos "30 dias" não cabe — S3 SigV4 limita a 7 dias; aqui é fresco a cada
+  carga). Front: card "Baixar agente (versão atual)" em `tab-suportetec` + `_supLoadAgentDownload`
+  (wp-support.js?v=5). Os endpoints `/v1/admin/releases*` (upload/promote/download) seguem só admin.
+- **Rótulo de Férias** (liga/desliga manual por colaborador = ausência justificada):
+  - Schema: `users.on_vacation BOOLEAN DEFAULT FALSE` (+ ALTER). PATCH `/v1/users/{id}` aceita
+    `on_vacation` (no front é enviado SEMPRE, após o filtro de falsy, senão não dava p/ DESLIGAR).
+  - **Visão Geral (`/v1/workforce/overview`) EXCLUI quem está de férias** de TODAS as somas
+    (online, ativo, por-depto, totais) via `vac_set` — pra não diluir as médias do time.
+  - Alerta **"Ausente no dia"** (`_compute_day_alerts`) **suprime** quem está de férias.
+  - Front centralizado em wp-core.js (v=21): `state.vacation` (Set) + `markVacation(users)` +
+    `vacBadge(uid)`. O dropdown de pessoa (`_populateUserDropdown`, compartilhado) mostra
+    "🏖 (Férias)" → cobre Consolidada/Jornada/Aplicativos/Internet de uma vez. Badge 🏖 também em
+    Pessoas (wp-people v=23), Colaboradores + toggle no form (wp-settings v=28) e Suporte (status
+    "Férias"). Endpoints que passaram a devolver `on_vacation`: `/v1/users`, `/v1/team/summary`,
+    `/v1/support/people`. Deploy: backend (`redeploy.ps1`) + site (`publicar-site.ps1`).
+
+### Gestão de Departamentos — tela faltava no HTML + atribuição em LOTE (2026-06-26)
+- DESCOBERTA: o JS de gestão de depto (`renderDeptsSection`/`createDept`/`deleteDept`/`assignUser*`
+  em wp-settings.js) já existia e era chamado no load da aba Colaboradores, MAS o **HTML host
+  (`#deptsList`, `#newDeptName`) não existia** em workforce.html → `renderDeptsSection` saía no
+  `if(!el)return` e a tela nunca aparecia. Por isso o usuário atribuía depto editando 1 a 1.
+- FIX: adicionado o card "🏢 Departamentos" no topo da aba Colaboradores (workforce.html) com
+  input de novo depto + `#deptsList`. CSS (`dept-mgmt-card` etc.) já existia.
+- NOVO: atribuição **em lote**. Backend `POST /v1/departments/{name}/members` (require_tenant_scope,
+  body `{user_ids:[...]}`, `UPDATE users SET department=name WHERE user_id = ANY(%s)`). Front: o
+  `<select>` de 1 colaborador virou **multi-select** (candidatos = quem NÃO está no depto, rótulo
+  mostra o depto atual p/ permitir mover) + `assignUsersToDept` chama o endpoint em lote. Removida a
+  `assignUserToDept` (singular). wp-settings.js?v=29. Deploy: backend + site.
+- LACUNA do depto "texto livre": atribuir depto no Editar gravava só `users.department` (texto),
+  NUNCA em `tenant_departments` → a tela de gestão (que lista `tenant_departments`) saía vazia
+  mesmo com gente com depto. FIX (sem perder nada): (1) backfill idempotente em `_SCHEMA_STMTS`
+  (`INSERT ... SELECT DISTINCT department FROM users ... ON CONFLICT DO NOTHING`) registra todos os
+  nomes já atribuídos; (2) `update_user` auto-registra o depto no `tenant_departments` ao definí-lo.
+  Deletar o depto continua zerando `users.department` (não ressuscita no próximo boot).
+
+### Menu "Consolidado" no popup de cada colaborador (Pessoas) (2026-06-29)
+- Em `wp-people.js` (`openPersonMenu`) adicionado o item "📋 Consolidado" que chama
+  `goToUserPage('consolidado', uid, name)` — abre a aba Consolidada já filtrada na pessoa.
+  wp-people.js?v=24.
+
+### Desconto de almoço no AFK — configurável, por DIA LOCAL (2026-06-29)
+- DEMANDA: descontar o almoço (default **60 min**, configurável) do AFK **na jornada**, somando o
+  AFK do dia e abatendo o almoço **sem exigir bloco contínuo** (por dia local, não corrido).
+  Refletir em **todas** as telas que mostram AFK da pessoa (números e gráficos).
+- CONFIG: vive no card **"Horário comercial e limites"** (Análises → Alertas), campo
+  "Almoço descontado (min)". `0` desliga o desconto.
+- BACKEND (`main.py`): coluna `alert_settings.lunch_minutes INTEGER NOT NULL DEFAULT 60` (+ ALTER
+  idempotente). Helper `_lunch_sec(settings)`. `AlertConfigIn.lunch_minutes`, lido/gravado em
+  `alerts_config_get`/`alerts_config_set` (com `_cache_bust`). Exposto em `/v1/license/info`.
+  Desconto aplicado **por (uid, dia_local)**: `afk_exibido = max(0, afk_do_dia − almoço)` em
+  `team_summary`, `workforce_overview`, `user_summary`, `productivity_timeline` e
+  `productivity_consolidado`. **`afk_in` permanece cru** (não descontado) p/ não misturar bases.
+- FRONTEND: `state.lunchMin` (wp-core, default 60) populado por `/v1/license/info` (wp-auth
+  `_loadLicenseInfo`) e pelo config de Alertas (wp-analytics). Campo "Almoço descontado (min)"
+  (`#alLunch`) no workforce.html + load/save em wp-analytics. **Jornada** desconta localmente por
+  dia em `_jorComputeFromEvents` (wp-jornada) pois calcula do cru. Demais telas recebem o AFK já
+  abatido do backend → refletem sozinhas.
+- CACHE-BUST: wp-core v22, wp-analytics v25, wp-jornada v21, wp-auth v23. Deploy: backend + site.
 
 ### Novos env knobs
 `WORKPULSE_INGEST_BUST_SEC` (60), `WORKPULSE_ADMIN_STATS_TTL` (45). Já existentes:

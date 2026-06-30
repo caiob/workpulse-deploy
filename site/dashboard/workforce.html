@@ -738,6 +738,11 @@
   <section id="tab-suportetec" class="hide">
     <h2 style="margin:0 0 2px">Suporte Técnico</h2>
     <p style="font-size:13px;color:var(--text-dim);margin:0 0 16px">Apoio à instalação e diagnóstico dos agentes — selecione um colaborador para ver os detalhes da máquina e das coletas.</p>
+    <div class="card no-bar" style="margin:0 0 16px">
+      <h3 style="margin:0 0 4px">Baixar agente (versão atual)</h3>
+      <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px">Instalador marcado como <strong>VERSÃO ATUAL</strong> no Platform Admin. O link é gerado na hora e vale por ~1 h — se expirar, recarregue a página.</p>
+      <div id="supAgentDownload"><span style="font-size:12px;color:var(--text-muted)">Carregando…</span></div>
+    </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start">
 
       <!-- ESQUERDA (6 col): lista de colaboradores -->
@@ -1038,6 +1043,16 @@
   <section id="tab-colaboradores" class="hide">
     <h1 class="page-title"><span class="em">Colaboradores</span>.</h1>
     <p class="page-sub">Cadastro e dados dos colaboradores monitorados.</p>
+    <!-- Departamentos (gestão) -->
+    <div class="card no-bar" id="deptsMgmtSection" style="margin-bottom:18px">
+      <h3 style="margin:0 0 2px">🏢 Departamentos</h3>
+      <p style="font-size:12px;color:var(--text-dim);margin:0 0 12px">Crie, exclua e atribua colaboradores <strong>em lote</strong> — sem editar um por um.</p>
+      <div class="toolbar" style="margin-bottom:14px;flex-wrap:wrap;gap:8px">
+        <input id="newDeptName" placeholder="Nome do novo departamento..." style="min-width:240px" onkeydown="if(event.key==='Enter')createDept()">
+        <button class="primary" onclick="createDept()">+ Criar departamento</button>
+      </div>
+      <div id="deptsList"></div>
+    </div>
     <!-- Colaboradores -->
     <div class="card no-bar" id="collabsSection" style="margin-bottom:18px">
       <div style="display:flex;align-items:baseline;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:4px">
@@ -1071,6 +1086,12 @@
           <div>
             <label>Função</label>
             <input id="collabRole" placeholder="Analista, Dev..." style="min-width:130px">
+          </div>
+          <div>
+            <label>Férias</label>
+            <label style="display:flex;align-items:center;gap:8px;height:36px;font-size:13px;color:var(--text-dim);cursor:pointer" title="Marca ausência justificada: sai do alerta de ausente e da Visão Geral, e mostra o rótulo 🏖 nas telas.">
+              <input type="checkbox" id="collabVacation" style="width:16px;height:16px"> 🏖 Em férias
+            </label>
           </div>
           <div>
             <label>&nbsp;</label>
@@ -1446,6 +1467,7 @@
         <div><label>Fim do expediente</label><input id="alBEnd" type="time" value="18:00"></div>
         <div><label>Hora de corte (ausência)</label><input id="alCutoff" type="time" value="10:00"></div>
         <div><label>AFK p/ alertar (min)</label><input id="alAfkMin" type="number" min="1" value="120" style="width:120px"></div>
+        <div><label title="Minutos de almoço descontados do AFK por dia (0 = sem desconto)">Almoço descontado (min)</label><input id="alLunch" type="number" min="0" value="60" style="width:150px"></div>
         <div><label>Baixo engaj. &lt; (h/dia trabalhado)</label><input id="alUnderMax" type="number" step="0.5" min="0" value="2" style="width:170px"></div>
         <div><label>Sobrecarga &gt; (h/dia trabalhado)</label><input id="alOverMin" type="number" step="0.5" min="0" value="10" style="width:170px"></div>
         <div><label>Janela de análise (dias úteis)</label><input id="alEngDays" type="number" min="1" max="60" value="7" style="width:170px"></div>
@@ -1523,23 +1545,23 @@
 <div id="toast" class="toast hide"></div>
 
 <!-- ===== MÓDULOS JS (defer: executam após parse do DOM, em ordem) ===== -->
-<script src="js/wp-core.js?v=20" defer></script>
+<script src="js/wp-core.js?v=22" defer></script>
 <script src="js/wp-datepicker.js?v=17" defer></script>
 <script src="js/wp-overview.js?v=21" defer></script>
-<script src="js/wp-people.js?v=22" defer></script>
+<script src="js/wp-people.js?v=24" defer></script>
 <script src="js/wp-departments.js?v=17" defer></script>
-<script src="js/wp-analytics.js?v=24" defer></script>
+<script src="js/wp-analytics.js?v=25" defer></script>
 <script src="js/wp-events.js?v=19" defer></script>
 <script src="js/wp-internet.js?v=20" defer></script>
 <script src="js/wp-consolidado.js?v=8" defer></script>
-<script src="js/wp-jornada.js?v=20" defer></script>
+<script src="js/wp-jornada.js?v=23" defer></script>
 <script src="js/wp-locations.js?v=4" defer></script>
-<script src="js/wp-settings.js?v=27" defer></script>
+<script src="js/wp-settings.js?v=32" defer></script>
 <script src="js/wp-users.js?v=27" defer></script>
-<script src="js/wp-support.js?v=4" defer></script>
+<script src="js/wp-support.js?v=5" defer></script>
 <script src="js/wp-reports.js?v=20" defer></script>
 <script src="js/wp-nav.js?v=32" defer></script>
-<script src="js/wp-auth.js?v=22" defer></script>
+<script src="js/wp-auth.js?v=23" defer></script>
 
 </body>
 </html>

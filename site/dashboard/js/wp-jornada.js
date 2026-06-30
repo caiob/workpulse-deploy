@@ -64,16 +64,26 @@ function _jorHHfromFloat(v) {
  * servidor (start_float/end_float = horas desde a meia-noite local), de
  * forma que a exibição não dependa do fuso do navegador.
  */
+function _jorLunchSec() {
+  return ((typeof state !== 'undefined' && state.lunchMin != null) ? state.lunchMin : 60) * 60;
+}
+
 function _jorBuildJornada(d) {
   const [y, m, dd] = d.day.split('-').map(Number);
   const base  = new Date(y, m - 1, dd, 0, 0, 0, 0);        // meia-noite local
   const start = new Date(base.getTime() + (d.start_float || 0) * 3600000);
   const end   = new Date(base.getTime() + (d.end_float   || 0) * 3600000);
+  // Desconta o almoço (config dos Alertas, padrão 60 min) das pausas/AFK do dia.
+  // REGRA: só desconta se o AFK do dia for >= o almoço; abaixo disso mantém o cru
+  // (descontar zeraria dias com pouca pausa e pareceria erro de coleta).
+  const _ls   = _jorLunchSec();
+  const _raw  = d.pauses_sec || 0;
+  const pauses = _raw >= _ls ? (_raw - _ls) : _raw;
   return {
     day:       d.day,
     start:     start,
     end:       end,
-    pausesSec: d.pauses_sec || 0,
+    pausesSec: pauses,
     focusSec:  d.focus_sec  || 0,
     idleAfterSec: d.idle_after_sec || 0,
     isToday:   !!d.is_today,
@@ -160,8 +170,11 @@ function _jorComputeFromEvents(windowEvents, afkEvents) {
     if (afkEnd >= byDay[key].start && ts <= byDay[key].end) byDay[key].pausesSec += dur;
   }
   const todayKey = _jorLocalDayKey(new Date());
+  // Desconta o almoço (config dos Alertas, padrão 60 min) das Pausas, POR DIA,
+  // capado em 0 → a Líquida sobe pelo valor perdoado. Consistente com as outras telas.
+  const lunchSec = _jorLunchSec();
   return Object.values(byDay)
-    .map(j => ({ ...j, isToday: j.day === todayKey }))
+    .map(j => ({ ...j, pausesSec: (j.pausesSec >= lunchSec ? j.pausesSec - lunchSec : j.pausesSec), isToday: j.day === todayKey }))
     .sort((a, b) => a.day.localeCompare(b.day));
 }
 

@@ -18,6 +18,8 @@ const state = {
   people:       [],
   lastOverview: null,
   collabs:      [],
+  vacation:     new Set(),   // user_ids em férias (rótulo) — preenchido por markVacation()
+  lunchMin:     60,          // minutos de almoço descontados do AFK por dia (config Alertas)
 };
 
 /* ---------- Limite p/ considerar 'online' (espelha o backend) ---------- */
@@ -124,6 +126,25 @@ function displayName(u) {
   return (u && (u.display_name || cleanUserId(u.user_id))) || '—';
 }
 
+/* ---------- Férias (rótulo de ausência justificada) — compartilhado ---------- */
+// Atualiza state.vacation a partir de qualquer lista de usuários que tenha
+// `on_vacation`. Guarda o user_id cru E o "limpo" p/ casar com qualquer tela.
+function markVacation(users) {
+  if (!Array.isArray(users)) return;
+  for (const u of users) {
+    if (!u || !u.user_id) continue;
+    if (u.on_vacation) { state.vacation.add(u.user_id); state.vacation.add(cleanUserId(u.user_id)); }
+    else { state.vacation.delete(u.user_id); state.vacation.delete(cleanUserId(u.user_id)); }
+  }
+}
+function isVacation(uid) { return !!uid && state.vacation.has(uid); }
+// Badge HTML (para listas/tabelas). Vazio quando não está de férias.
+function vacBadge(uid) {
+  return isVacation(uid)
+    ? ' <span title="Em férias" style="display:inline-block;font-size:10px;font-weight:600;color:#0e7490;background:#cffafe;border:1px solid #a5f3fc;border-radius:6px;padding:1px 6px;vertical-align:middle">🏖 Férias</span>'
+    : '';
+}
+
 /* ---------- User dropdown helper (compartilhado entre abas) ---------- */
 async function _populateUserDropdown(selectId) {
   const sel = document.getElementById(selectId);
@@ -135,11 +156,12 @@ async function _populateUserDropdown(selectId) {
       users = data.users || [];
     } catch (_) { return; }
   }
+  markVacation(users);
   const sorted = [...users].sort((a, b) => displayName(a).localeCompare(displayName(b)));
   sorted.forEach(u => {
     const opt = document.createElement('option');
     opt.value       = cleanUserId(u.user_id);
-    opt.textContent = displayName(u);
+    opt.textContent = displayName(u) + (u.on_vacation ? ' 🏖 (Férias)' : '');
     sel.appendChild(opt);
   });
 }
