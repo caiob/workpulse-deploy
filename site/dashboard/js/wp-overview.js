@@ -82,25 +82,57 @@ function drawDailyChart(daily) {
   });
 }
 
+let _deptsOvData = [];
+let _deptsOvPage = 0;
+const _DEPTS_OV_PER = 3;   // mostra 3 departamentos por página (evita estourar o layout)
+
 function drawDepartments(depts) {
+  _deptsOvData = depts || [];
+  _deptsOvPage = 0;
+  _renderDeptsOvPage();
+}
+
+function _deptsOvGo(dir) {
+  _deptsOvPage += dir;
+  _renderDeptsOvPage();
+}
+
+function _renderDeptsOvPage() {
+  const el = document.getElementById('deptList');
+  if (!el) return;
+  const depts = _deptsOvData;
+  if (!depts.length) {
+    el.innerHTML = '<div class="empty-state"><h4>Sem dados de departamento</h4>Configure <code>department</code> nos perfis dos colaboradores.</div>';
+    return;
+  }
+  // Percentual sempre relativo ao total de TODOS os departamentos (não muda entre páginas).
   const total = depts.reduce((a, d) => a + (d.active || 0), 0) || 1;
-  const html  = depts.length === 0
-    ? '<div class="empty-state"><h4>Sem dados de departamento</h4>Configure <code>department</code> nos perfis dos colaboradores.</div>'
-    : depts.map(d => {
-        const pct = Math.round((d.active || 0) / total * 100);
-        return `<div class="dept-row">
-          <div>
-            <div class="name">${d.dept}</div>
-            <div class="meta">${d.users} pessoa${d.users === 1 ? '' : 's'}</div>
-          </div>
-          <div class="right">
-            <div class="hours">${fmtH(d.active)}h</div>
-            <div class="pct">${pct}%</div>
-          </div>
-          <div class="dept-bar"><span style="width:${pct}%"></span></div>
-        </div>`;
-      }).join('');
-  document.getElementById('deptList').innerHTML = html;
+  const pages = Math.ceil(depts.length / _DEPTS_OV_PER);
+  if (_deptsOvPage >= pages) _deptsOvPage = pages - 1;
+  if (_deptsOvPage < 0) _deptsOvPage = 0;
+  const start = _deptsOvPage * _DEPTS_OV_PER;
+  const rows = depts.slice(start, start + _DEPTS_OV_PER).map(d => {
+    const pct = Math.round((d.active || 0) / total * 100);
+    return `<div class="dept-row">
+      <div>
+        <div class="name">${d.dept}</div>
+        <div class="meta">${d.users} pessoa${d.users === 1 ? '' : 's'}</div>
+      </div>
+      <div class="right">
+        <div class="hours">${fmtH(d.active)}h</div>
+        <div class="pct">${pct}%</div>
+      </div>
+      <div class="dept-bar"><span style="width:${pct}%"></span></div>
+    </div>`;
+  }).join('');
+  const pager = pages > 1
+    ? `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
+        <button class="btn-sec" onclick="_deptsOvGo(-1)" ${_deptsOvPage === 0 ? 'disabled' : ''} style="padding:4px 10px;font-size:12px">‹ Anterior</button>
+        <span style="font-size:12px;color:var(--text-dim)">${_deptsOvPage + 1} / ${pages}</span>
+        <button class="btn-sec" onclick="_deptsOvGo(1)" ${_deptsOvPage >= pages - 1 ? 'disabled' : ''} style="padding:4px 10px;font-size:12px">Próximo ›</button>
+      </div>`
+    : '';
+  el.innerHTML = rows + pager;
 }
 
 function drawUsersChart() {

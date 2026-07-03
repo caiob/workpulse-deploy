@@ -38,6 +38,10 @@ the file looks saved but is cut off partway through. Real incidents in this repo
   source tree. All recovered via `cat > … <<'EOF'` heredoc using cached Read
   content as the source of truth; backed up beforehand to
   `../workpulse-agent-backup-20260527-145705.zip`
+- `../workpulse-agent/{Cargo.toml,src/config.rs,src/main.rs}` (2026-07-03) — editados p/ o log
+  local com rotação diária (agente 2.3.4). Edições via Edit tool casaram exato; balance de
+  delimitadores em `main.rs` OK (308 linhas). Sem toolchain Rust no ambiente → validar com
+  `cargo build --release` na máquina antes de empacotar.
 
 **Rule:** for any file over ~150 lines, do NOT use the Edit tool with multi-line
 replacements. Edit in the shell instead:
@@ -883,7 +887,43 @@ do dono (Caio)" na seção Deploy — `redeploy.ps1` / `publicar-site.ps1` / `re
   (`#alLunch`) no workforce.html + load/save em wp-analytics. **Jornada** desconta localmente por
   dia em `_jorComputeFromEvents` (wp-jornada) pois calcula do cru. Demais telas recebem o AFK já
   abatido do backend → refletem sozinhas.
-- CACHE-BUST: wp-core v22, wp-analytics v25, wp-jornada v21, wp-auth v23. Deploy: backend + site.
+- CACHE-BUST: wp-core v22, wp-analytics v25, wp-jornada v22, wp-auth v23. Deploy: backend + site.
+- AJUSTE (2026-07-03): a tela **Jornada** usa o endpoint `/v1/jornada` (caminho preferido,
+  `_jorBuildJornada`) — o desconto só estava no fallback `_jorComputeFromEvents` (404), então NÃO
+  aplicava. Movido p/ `_jorBuildJornada` (+ fallback). NOVA REGRA (pedido do usuário): **só desconta
+  se o AFK do dia for >= o almoço**; abaixo disso mantém o cru (senão zera dias de pouca pausa e
+  parece erro de coleta). Backend ganhou helper `_apply_lunch(afk_day, lunch)` com a mesma regra,
+  usado nos 5 pontos (user_summary, team_summary, os 2 productivity_*, workforce_overview).
+  wp-jornada v23. Deploy: backend + site.
+
+### Distribuição por departamento (Visão Geral) — paginação 3/página (2026-07-03)
+Card "DISTRIBUIÇÃO POR DEPARTAMENTO" estourava o layout com muitos deptos. `drawDepartments`
+(wp-overview) virou paginado: `_deptsOvData`/`_deptsOvPage`/`_DEPTS_OV_PER=3` + `_renderDeptsOvPage`
++ `_deptsOvGo(dir)` com pager ‹ Anterior / Próximo ›. Percentual sempre relativo ao total de TODOS
+os deptos (não muda entre páginas). wp-overview v22. Deploy: só site.
+
+### Agente 2.3.4 — log local com rotação diária p/ diagnóstico de TI (2026-07-03)
+DEMANDA: agentes que "sobem e caem" ou param de coletar hoje são resolvidos reinstalando; queríamos
+um log local que ajude TI a antecipar e implantar resiliência, SEM onerar CPU nem disco.
+- `../workpulse-agent` (Rust). Antes o `tracing` ia só p/ console → perdido em serviço/background.
+- Cargo.toml: dep `tracing-appender = "0.2"`; versão 2.3.4 (o número real vem do env
+  `WORKPULSE_AGENT_VERSION` no empacotamento; Cargo.toml é fallback).
+- `config.rs`: `pub fn log_dir()` = `dirs().data_dir().join("logs")` (resolve sem instância de
+  Config, p/ inicializar o log cedo).
+- `main.rs`: `init_logging()` monta subscriber em CAMADAS (console + arquivo). Arquivo via
+  `RollingFileAppender::builder()` DAILY, prefix `workpulse-agent`, suffix `log`,
+  `max_log_files(8)` (~7 dias de retenção → limita disco), writer NÃO-BLOQUEANTE
+  (`tracing_appender::non_blocking`, thread dedicada → quase zero CPU). Nível **INFO** por padrão
+  (`RUST_LOG` sobrepõe): o loop de 1s loga em debug/trace, então o arquivo só recebe início/fim,
+  licença, config e as falhas (`warn`) de coleta/gravação/sync — exatamente o que diagnostica.
+  Guarda o `WorkerGuard` vivo em `main` (flush no fim). Se a pasta não for gravável → cai p/
+  só-console e segue.
+- `install_panic_hook(log_dir)`: como o release usa `panic = "abort"`, grava a causa do panic de
+  forma SÍNCRONA num `workpulse-agent-crash.log` (além do log estruturado) — garante captura antes
+  do abort. É o arquivo que explica as quedas.
+- Startup loga "Logs locais em: <caminho>" p/ TI achar rápido. Windows: `%APPDATA%\WorkPulse\Agent\
+  data\logs\`. API validada na doc oficial (tracing-appender 0.2.5). SEM toolchain Rust no ambiente
+  de edição → `cargo build`/reempacotar MSI/.deb é na máquina do usuário.
 
 ### Novos env knobs
 `WORKPULSE_INGEST_BUST_SEC` (60), `WORKPULSE_ADMIN_STATS_TTL` (45). Já existentes:
