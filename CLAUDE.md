@@ -914,8 +914,13 @@ um log local que ajude TI a antecipar e implantar resiliência, SEM onerar CPU n
   `RollingFileAppender::builder()` DAILY, prefix `workpulse-agent`, suffix `log`,
   `max_log_files(8)` (~7 dias de retenção → limita disco), writer NÃO-BLOQUEANTE
   (`tracing_appender::non_blocking`, thread dedicada → quase zero CPU). Nível **INFO** por padrão
-  (`RUST_LOG` sobrepõe): o loop de 1s loga em debug/trace, então o arquivo só recebe início/fim,
-  licença, config e as falhas (`warn`) de coleta/gravação/sync — exatamente o que diagnostica.
+  (`RUST_LOG` sobrepõe): o loop de 1s e o heartbeat (~10s) seguem em DEBUG (fora do arquivo em
+  nível padrão). Em INFO o arquivo recebe início/fim, licença, config e as falhas (`warn`) de
+  coleta/gravação/sync. AJUSTE (2026-07-03): promovido a INFO só o sinal de envio bem-sucedido —
+  `sync.rs` agora loga `Conectado a <host> — sincronizados N eventos` (era `debug!("Sincronizados
+  N eventos")`), provando conectividade + throughput numa linha nossa (o `connected to <IP>` que
+  aparecia no console é da lib hyper, DEBUG, NÃO é nosso — por isso logamos o host por conta
+  própria). Heartbeat foi deixado em DEBUG de propósito (evita encher o INFO a cada 10s).
   Guarda o `WorkerGuard` vivo em `main` (flush no fim). Se a pasta não for gravável → cai p/
   só-console e segue.
 - `install_panic_hook(log_dir)`: como o release usa `panic = "abort"`, grava a causa do panic de
