@@ -6490,6 +6490,17 @@ _SCHEMA_STMTS.extend([
 _SCHEMA_STMTS.extend([
     "ALTER TABLE agent_config_global ADD COLUMN IF NOT EXISTS sync_interval_sec INTEGER",
     "ALTER TABLE agent_config_tenant ADD COLUMN IF NOT EXISTS sync_interval_sec INTEGER",
+    # Auto-update (F3a): parâmetros lidos pelo workpulse-service via /v1/agent/config.
+    "ALTER TABLE agent_config_global ADD COLUMN IF NOT EXISTS update_check_interval_min INTEGER",
+    "ALTER TABLE agent_config_tenant ADD COLUMN IF NOT EXISTS update_check_interval_min INTEGER",
+    "ALTER TABLE agent_config_global ADD COLUMN IF NOT EXISTS update_batch_size INTEGER",
+    "ALTER TABLE agent_config_tenant ADD COLUMN IF NOT EXISTS update_batch_size INTEGER",
+    "ALTER TABLE agent_config_global ADD COLUMN IF NOT EXISTS update_enabled BOOLEAN",
+    "ALTER TABLE agent_config_tenant ADD COLUMN IF NOT EXISTS update_enabled BOOLEAN",
+    "ALTER TABLE agent_config_global ADD COLUMN IF NOT EXISTS update_lease_ttl_min INTEGER",
+    "ALTER TABLE agent_config_tenant ADD COLUMN IF NOT EXISTS update_lease_ttl_min INTEGER",
+    "ALTER TABLE agent_config_global ADD COLUMN IF NOT EXISTS update_health_grace_min INTEGER",
+    "ALTER TABLE agent_config_tenant ADD COLUMN IF NOT EXISTS update_health_grace_min INTEGER",
     # Rótulo de Férias (ausência justificada): liga/desliga manual por colaborador.
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS on_vacation BOOLEAN NOT NULL DEFAULT FALSE",
     # Auto-registra como DEPARTAMENTO qualquer nome já atribuído a um colaborador
@@ -6606,6 +6617,36 @@ _SCHEMA_STMTS.extend([
 ])
 
 # ---------------------------------------------------------------------------
+# Auto-update (F3a) — histórico de updates + controle do LOTE (lease/slot).
+# O workpulse-service (serviço privilegiado na estação) consulta /v1/agent/version;
+# cada estação liberada ganha um lease com TTL. Contamos leases 'updating' ativos
+# por (canal, os, versão-alvo) para limitar quantas atualizam em paralelo.
+# ---------------------------------------------------------------------------
+_SCHEMA_STMTS.extend([
+    """
+    CREATE TABLE IF NOT EXISTS agent_update_log (
+        id               BIGSERIAL PRIMARY KEY,
+        tenant_id        TEXT NOT NULL,
+        device_id        TEXT NOT NULL,
+        os               TEXT NOT NULL,
+        channel          TEXT NOT NULL,
+        from_ver         TEXT,
+        to_ver           TEXT NOT NULL,
+        status           TEXT NOT NULL,      -- updating|success|failed|rolled_back
+        lease_id         TEXT,
+        lease_expires_at TEXT,               -- ISO-8601; enquanto > now e status=updating, ocupa slot
+        detail           TEXT,
+        created_at       TEXT NOT NULL,
+        updated_at       TEXT NOT NULL
+    )
+    """,
+    # Contagem do lote: leases ativos por alvo.
+    "CREATE INDEX IF NOT EXISTS idx_upd_active ON agent_update_log(channel, os, to_ver, status)",
+    # Fechar lease pelo lease_id no report.
+    "CREATE INDEX IF NOT EXISTS idx_upd_lease ON agent_update_log(lease_id)",
+])
+
+# ---------------------------------------------------------------------------
 # Enrollment — onboarding do agente genérico (código → licença do tenant).
 # ---------------------------------------------------------------------------
 _SCHEMA_STMTS.extend([
@@ -6654,9 +6695,19 @@ _AGENT_CFG_DEFAULTS = {
         "zoom meeting", "zoom.us",
         "webex", "whereby.com", "gotomeeting", "goto meeting", "bluejeans",
     ],
+    # Auto-update (F3a) — lidos pelo workpulse-service. Defaults conservadores.
+    "update_check_interval_min": 120,   # de quanto em quanto consulta a versão
+    "update_batch_size":         5,     # máx. estações atualizando em paralelo (teto 10)
+    "update_enabled":            True,  # kill switch do rollout
+    "update_lease_ttl_min":      30,    # expiração do slot do lote
+    "update_health_grace_min":   10,    # janela do portão de saúde pós-update
 }
 _AGENT_CFG_FIELDS = ("afk_timeout_sec", "poll_interval_ms", "heartbeat_interval_sec",
-                     "sync_interval_sec", "capture_titles", "meeting_patterns")
+                     "sync_interval_sec", "capture_titles", "meeting_patterns",
+                     "update_check_interval_min", "update_batch_size", "update_enabled",
+                     "update_lease_ttl_min", "update_health_grace_min")
+# Campos booleanos (decodificados como bool, não int).
+_AGENT_CFG_BOOL = ("capture_titles", "update_enabled")
 
 
 def _agent_cfg_decode(row) -> dict:
@@ -6665,7 +6716,12 @@ def _agent_cfg_decode(row) -> dict:
     if not row:
         return out
     for f in _AGENT_CFG_FIELDS:
-        v = row[f]
+        # Colunas de update podem não existir em bancos muito antigos até a migração
+        # rodar; row pode não conter a chave. Tolerar.
+        try:
+            v = row[f]
+        except Exception:
+            continue
         if v is None:
             continue
         if f == "meeting_patterns":
@@ -6673,7 +6729,7 @@ def _agent_cfg_decode(row) -> dict:
                 out[f] = json.loads(v) if isinstance(v, str) else v
             except Exception:
                 continue
-        elif f == "capture_titles":
+        elif f in _AGENT_CFG_BOOL:
             out[f] = bool(v)
         else:
             out[f] = int(v)
@@ -6711,8 +6767,10 @@ def _agent_cfg_upsert(table: str, key_col: str, key_val, body: "AgentCfgIn", all
         c.execute(
             f"""INSERT INTO {table}
                   ({key_col}, afk_timeout_sec, poll_interval_ms, heartbeat_interval_sec,
-                   sync_interval_sec, capture_titles, meeting_patterns, updated_at)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                   sync_interval_sec, capture_titles, meeting_patterns,
+                   update_check_interval_min, update_batch_size, update_enabled,
+                   update_lease_ttl_min, update_health_grace_min, updated_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT ({key_col}) DO UPDATE SET
                   afk_timeout_sec=EXCLUDED.afk_timeout_sec,
                   poll_interval_ms=EXCLUDED.poll_interval_ms,
@@ -6720,6 +6778,11 @@ def _agent_cfg_upsert(table: str, key_col: str, key_val, body: "AgentCfgIn", all
                   sync_interval_sec=EXCLUDED.sync_interval_sec,
                   capture_titles=EXCLUDED.capture_titles,
                   meeting_patterns=EXCLUDED.meeting_patterns,
+                  update_check_interval_min=EXCLUDED.update_check_interval_min,
+                  update_batch_size=EXCLUDED.update_batch_size,
+                  update_enabled=EXCLUDED.update_enabled,
+                  update_lease_ttl_min=EXCLUDED.update_lease_ttl_min,
+                  update_health_grace_min=EXCLUDED.update_health_grace_min,
                   updated_at=EXCLUDED.updated_at""",
             (key_val,
              col("afk_timeout_sec", _AGENT_CFG_DEFAULTS["afk_timeout_sec"]),
@@ -6727,7 +6790,13 @@ def _agent_cfg_upsert(table: str, key_col: str, key_val, body: "AgentCfgIn", all
              col("heartbeat_interval_sec", _AGENT_CFG_DEFAULTS["heartbeat_interval_sec"]),
              col("sync_interval_sec", _AGENT_CFG_DEFAULTS["sync_interval_sec"]),
              col("capture_titles", _AGENT_CFG_DEFAULTS["capture_titles"]),
-             mp_val, _now_utc().isoformat()),
+             mp_val,
+             col("update_check_interval_min", _AGENT_CFG_DEFAULTS["update_check_interval_min"]),
+             col("update_batch_size", _AGENT_CFG_DEFAULTS["update_batch_size"]),
+             col("update_enabled", _AGENT_CFG_DEFAULTS["update_enabled"]),
+             col("update_lease_ttl_min", _AGENT_CFG_DEFAULTS["update_lease_ttl_min"]),
+             col("update_health_grace_min", _AGENT_CFG_DEFAULTS["update_health_grace_min"]),
+             _now_utc().isoformat()),
         )
 
 
@@ -6738,6 +6807,12 @@ class AgentCfgIn(BaseModel):
     sync_interval_sec:      int | None = None
     capture_titles:         bool | None = None
     meeting_patterns:       list[str] | None = None
+    # Auto-update (F3a)
+    update_check_interval_min: int | None = None
+    update_batch_size:         int | None = None
+    update_enabled:            bool | None = None
+    update_lease_ttl_min:      int | None = None
+    update_health_grace_min:   int | None = None
 
 
 # --- Agente: busca a config efetiva (autenticado pela licença) ---
@@ -6918,6 +6993,209 @@ def releases_delete(rid: int, request: Request):
 
 
 # ===========================================================================
+# Auto-update (F3a) — descoberta de versão + gate de lote + report do desfecho.
+# Consumido pelo workpulse-service (serviço privilegiado na estação).
+# ===========================================================================
+def _sign_sha256(sha_hex: str) -> str:
+    """Assina o sha256 (bytes ASCII do hex minúsculo) com a MESMA chave Ed25519
+    da licença. O workpulse-service verifica com a chave pública pública já
+    conhecida (/v1/license/pubkey). base64 padrão."""
+    priv = load_or_create_keypair()
+    sig = priv.sign(sha_hex.strip().lower().encode("ascii"))
+    return base64.b64encode(sig).decode("ascii")
+
+
+def _cmp_versions(a: str, b: str) -> int:
+    """Compara MAJOR.MINOR.PATCH numericamente. -1 se a<b, 0 se igual, 1 se a>b.
+    Tolera sufixos não-numéricos (ignora a partir do 1º não-dígito de cada parte)."""
+    def parts(v: str):
+        out = []
+        for tok in str(v).split("."):
+            n = ""
+            for ch in tok:
+                if ch.isdigit():
+                    n += ch
+                else:
+                    break
+            out.append(int(n) if n else 0)
+        return out
+    pa, pb = parts(a), parts(b)
+    for i in range(max(len(pa), len(pb))):
+        x = pa[i] if i < len(pa) else 0
+        y = pb[i] if i < len(pb) else 0
+        if x != y:
+            return -1 if x < y else 1
+    return 0
+
+
+@app.get("/v1/agent/version")
+def agent_version_check(
+    os:      Annotated[str, Query(alias="os", pattern="^(windows|linux)$")],
+    current: str = "0.0.0",
+    arch:    str = "amd64",
+    device_id: str = "",
+    authorization: Annotated[str | None, Header()] = None,
+    x_tenant:      Annotated[str | None, Header()] = None,
+):
+    """Diz à estação o que fazer: none | hold (lote cheio) | update (com URL +
+    sha256 + assinatura). A 'versão alvo' é a marcada is_latest (prefere o canal
+    do tenant; senão o genérico), exatamente como o download do suporte."""
+    if not x_tenant:
+        raise HTTPException(400, "X-Tenant header required")
+    token  = parse_bearer(authorization)
+    claims = validate_agent_token(token, x_tenant)
+    tenant = claims["tenant"]
+
+    cfg = _agent_cfg_effective(tenant)
+    if not bool(cfg.get("update_enabled", True)):
+        return {"action": "none", "target": current}   # kill switch
+    if not RELEASES_BUCKET:
+        return {"action": "none", "target": current}
+
+    tenant_chan = f"tenant:{tenant}"
+    with db() as c:
+        r = c.execute(
+            """SELECT version, filename, s3_key, sha256, size_bytes, channel
+                 FROM agent_releases
+                WHERE os=%s AND is_latest=TRUE AND channel IN (%s,'generic')
+                ORDER BY (channel=%s) DESC, created_at DESC
+                LIMIT 1""",
+            (os, tenant_chan, tenant_chan),
+        ).fetchone()
+    if not r:
+        return {"action": "none", "target": current}
+
+    target  = r["version"]
+    channel = r["channel"]
+    if _cmp_versions(target, current) <= 0:
+        return {"action": "none", "target": target}    # já igual/maior
+
+    # --- Gate de lote (§4): no máx. N atualizando em paralelo por alvo ---
+    now      = _now_utc()
+    now_iso  = now.isoformat()
+    batch    = max(1, min(int(cfg.get("update_batch_size", 5) or 5), 10))
+    ttl_min  = max(10, min(int(cfg.get("update_lease_ttl_min", 30) or 30), 120))
+
+    with db() as c:
+        # Idempotência: se a estação já tem lease ativo para este alvo, reusa.
+        existing = c.execute(
+            """SELECT lease_id FROM agent_update_log
+                WHERE device_id=%s AND channel=%s AND os=%s AND to_ver=%s
+                  AND status='updating' AND lease_expires_at > %s
+                ORDER BY created_at DESC LIMIT 1""",
+            (device_id, channel, os, target, now_iso),
+        ).fetchone()
+        if existing:
+            lease_id = existing["lease_id"]
+        else:
+            active = c.execute(
+                """SELECT COUNT(*) AS n FROM agent_update_log
+                    WHERE channel=%s AND os=%s AND to_ver=%s
+                      AND status='updating' AND lease_expires_at > %s""",
+                (channel, os, target, now_iso),
+            ).fetchone()["n"]
+            if int(active) >= batch:
+                return {"action": "hold", "target": target, "retry_after_sec": 900}
+            lease_id = secrets.token_hex(16)
+            expires  = (now + dt.timedelta(minutes=ttl_min)).isoformat()
+            c.execute(
+                """INSERT INTO agent_update_log
+                     (tenant_id, device_id, os, channel, from_ver, to_ver, status,
+                      lease_id, lease_expires_at, created_at, updated_at)
+                   VALUES (%s,%s,%s,%s,%s,%s,'updating',%s,%s,%s,%s)""",
+                (tenant, device_id, os, channel, current, target, lease_id, expires,
+                 now_iso, now_iso),
+            )
+
+    url = _s3().generate_presigned_url(
+        "get_object",
+        Params={"Bucket": RELEASES_BUCKET, "Key": r["s3_key"],
+                "ResponseContentDisposition": f'attachment; filename="{r["filename"]}"'},
+        ExpiresIn=600,   # 10 min: tempo de sobra p/ baixar
+    )
+    return {
+        "action":        "update",
+        "target":        target,
+        "url":           url,
+        "sha256":        r["sha256"],
+        "signature":     _sign_sha256(r["sha256"]),
+        "size_bytes":    r["size_bytes"],
+        "lease_id":      lease_id,
+        "lease_ttl_sec": ttl_min * 60,
+    }
+
+
+class UpdateResultIn(BaseModel):
+    lease_id:  str
+    device_id: str | None = None
+    os:        str | None = None
+    from_ver:  str | None = None
+    to_ver:    str | None = None
+    status:    str
+    detail:    str | None = None
+
+
+@app.post("/v1/agent/update-result")
+def agent_update_result(
+    body: UpdateResultIn,
+    authorization: Annotated[str | None, Header()] = None,
+    x_tenant:      Annotated[str | None, Header()] = None,
+):
+    """Fecha o lease (libera o slot do lote) e grava o desfecho no histórico."""
+    if not x_tenant:
+        raise HTTPException(400, "X-Tenant header required")
+    token  = parse_bearer(authorization)
+    claims = validate_agent_token(token, x_tenant)
+    tenant = claims["tenant"]
+
+    status = body.status if body.status in ("success", "failed", "rolled_back") else "failed"
+    now_iso = _now_utc().isoformat()
+    with db() as c:
+        upd = c.execute(
+            """UPDATE agent_update_log
+                  SET status=%s, detail=%s, updated_at=%s
+                WHERE lease_id=%s AND tenant_id=%s AND status='updating'
+                RETURNING id""",
+            (status, body.detail, now_iso, body.lease_id, tenant),
+        ).fetchone()
+        if not upd:
+            # Lease já expirado/limpo: registra assim mesmo (auditoria do rollout).
+            c.execute(
+                """INSERT INTO agent_update_log
+                     (tenant_id, device_id, os, channel, from_ver, to_ver, status,
+                      lease_id, lease_expires_at, detail, created_at, updated_at)
+                   VALUES (%s,%s,%s,'?',%s,%s,%s,%s,NULL,%s,%s,%s)""",
+                (tenant, body.device_id or "", body.os or "", body.from_ver,
+                 body.to_ver or "?", status, body.lease_id, body.detail, now_iso, now_iso),
+            )
+    return {"ok": True}
+
+
+@app.get("/v1/admin/update-status", dependencies=[Depends(require_admin)])
+def admin_update_status():
+    """Panorama do rollout para o painel: por (canal, os, versão-alvo), quantas
+    estações estão atualizando / concluíram / falharam / reverteram."""
+    now_iso = _now_utc().isoformat()
+    with db() as c:
+        rows = c.execute(
+            """SELECT channel, os, to_ver,
+                      COUNT(*) FILTER (WHERE status='updating'
+                                       AND lease_expires_at > %s)      AS updating,
+                      COUNT(*) FILTER (WHERE status='success')          AS success,
+                      COUNT(*) FILTER (WHERE status='failed')           AS failed,
+                      COUNT(*) FILTER (WHERE status='rolled_back')      AS rolled_back,
+                      COUNT(*)                                          AS total,
+                      MAX(updated_at)                                   AS last_at
+                 FROM agent_update_log
+                GROUP BY channel, os, to_ver
+                ORDER BY MAX(updated_at) DESC NULLS LAST
+                LIMIT 100""",
+            (now_iso,),
+        ).fetchall()
+    return {"rows": [dict(r) for r in rows]}
+
+
+# ===========================================================================
 # Enrollment — onboarding do agente genérico
 #   Público:      POST /v1/enroll        (o agente troca o código pela licença)
 #   Admin Master: gerar/listar/revogar códigos, ajustar aprovação, fila pendente
@@ -6926,310 +7204,4 @@ class EnrollIn(BaseModel):
     code:     str
     device:   str
     os:       str | None = None
-    hostname: str | None = None
-
-
-def _gen_enroll_code() -> str:
-    return "-".join(secrets.token_hex(2).upper() for _ in range(3))  # AAAA-BBBB-CCCC
-
-
-def _tenant_license_token(c, tenant: str) -> str | None:
-    r = c.execute(
-        "SELECT token FROM licenses WHERE tenant_id=%s AND revoked=0 ORDER BY issued DESC LIMIT 1",
-        (tenant,),
-    ).fetchone()
-    return r["token"] if r else None
-
-
-@app.post("/v1/enroll")
-def enroll(req: EnrollIn, request: Request):
-    """Troca um código de enrollment pela licença do tenant. Sem auth — o código
-    É a credencial. Se o tenant exige aprovação, o device entra como 'pendente'."""
-    code = (req.code or "").strip().upper()
-    if not code:
-        raise HTTPException(400, "código ausente")
-    if not (req.device or "").strip():
-        raise HTTPException(400, "device ausente")
-    now = dt.datetime.now(dt.timezone.utc)
-    with db() as c:
-        cr = c.execute(
-            "SELECT tenant_id, active, expires_at FROM enrollment_codes WHERE code=%s", (code,)
-        ).fetchone()
-        if not cr or not cr["active"]:
-            raise HTTPException(403, "código inválido")
-        if cr["expires_at"] and cr["expires_at"] < now.isoformat():
-            raise HTTPException(403, "código expirado")
-        tenant = cr["tenant_id"]
-
-        ap = c.execute("SELECT COALESCE(enroll_approval, TRUE) AS a FROM tenants WHERE id=%s",
-                       (tenant,)).fetchone()
-        need_approval = bool(ap["a"]) if ap else True
-
-        dev = c.execute(
-            "SELECT status FROM enrolled_devices WHERE tenant_id=%s AND device_id=%s",
-            (tenant, req.device),
-        ).fetchone()
-        if dev:
-            status = dev["status"]
-        else:
-            status = "pending" if need_approval else "approved"
-            c.execute(
-                """INSERT INTO enrolled_devices
-                       (tenant_id, device_id, code, status, hostname, os,
-                        requested_at, decided_at, decided_by)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                (tenant, req.device, code, status, req.hostname, req.os, now.isoformat(),
-                 now.isoformat() if status == "approved" else None,
-                 "auto" if status == "approved" else None),
-            )
-
-        if status == "approved":
-            token = _tenant_license_token(c, tenant)
-            if not token:
-                raise HTTPException(409, "tenant sem licença ativa")
-            return {"status": "approved", "tenant": tenant, "license_key": token}
-        if status == "rejected":
-            return {"status": "rejected"}
-        return {"status": "pending"}
-
-
-# ----------------------- Admin Master: gestão -----------------------
-def _enroll_tid(ctx, tenant):
-    return ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
-
-
-@app.get("/v1/enroll-settings")
-def enroll_settings_get(tenant: str, ctx: Annotated[dict, Depends(require_role("admin_master"))]):
-    tid = _enroll_tid(ctx, tenant)
-    with db() as c:
-        r = c.execute("SELECT COALESCE(enroll_approval, TRUE) AS a FROM tenants WHERE id=%s", (tid,)).fetchone()
-    return {"approval_required": bool(r["a"]) if r else True}
-
-
-class EnrollSettingsIn(BaseModel):
-    approval_required: bool
-
-
-@app.put("/v1/enroll-settings")
-def enroll_settings_set(body: EnrollSettingsIn, tenant: str, request: Request,
-                        ctx: Annotated[dict, Depends(require_role("admin_master"))]):
-    tid = _enroll_tid(ctx, tenant)
-    with db() as c:
-        c.execute("UPDATE tenants SET enroll_approval=%s WHERE id=%s", (body.approval_required, tid))
-    audit(ctx.get("email"), "enroll.settings", target=tid,
-          detail=f"approval={body.approval_required}", ip=_client_ip(request))
-    return {"ok": True, "approval_required": body.approval_required}
-
-
-@app.get("/v1/enroll-codes")
-def enroll_codes_list(tenant: str, ctx: Annotated[dict, Depends(require_role("admin_master"))]):
-    tid = _enroll_tid(ctx, tenant)
-    with db() as c:
-        rows = c.execute(
-            "SELECT code, label, active, expires_at, created_at FROM enrollment_codes "
-            "WHERE tenant_id=%s ORDER BY created_at DESC", (tid,),
-        ).fetchall()
-    return {"codes": [dict(r) for r in rows]}
-
-
-class EnrollCodeIn(BaseModel):
-    label:      str | None = None
-    days_valid: int | None = None   # null = permanente
-
-
-@app.post("/v1/enroll-codes")
-def enroll_codes_create(body: EnrollCodeIn, tenant: str, request: Request,
-                        ctx: Annotated[dict, Depends(require_role("admin_master"))]):
-    tid = _enroll_tid(ctx, tenant)
-    now = dt.datetime.now(dt.timezone.utc)
-    expires = None
-    if body.days_valid and body.days_valid > 0:
-        expires = (now + dt.timedelta(days=int(body.days_valid))).isoformat()
-    code = _gen_enroll_code()
-    with db() as c:
-        c.execute(
-            "INSERT INTO enrollment_codes (code, tenant_id, label, active, expires_at, created_by, created_at) "
-            "VALUES (%s,%s,%s,TRUE,%s,%s,%s)",
-            (code, tid, (body.label or None), expires, ctx.get("email"), now.isoformat()),
-        )
-    audit(ctx.get("email"), "enroll.code.create", target=tid, detail=code, ip=_client_ip(request))
-    return {"ok": True, "code": code, "expires_at": expires}
-
-
-@app.delete("/v1/enroll-codes/{code}")
-def enroll_codes_revoke(code: str, tenant: str, request: Request,
-                        ctx: Annotated[dict, Depends(require_role("admin_master"))]):
-    tid = _enroll_tid(ctx, tenant)
-    with db() as c:
-        c.execute("UPDATE enrollment_codes SET active=FALSE WHERE code=%s AND tenant_id=%s",
-                  (code.upper(), tid))
-    audit(ctx.get("email"), "enroll.code.revoke", target=tid, detail=code, ip=_client_ip(request))
-    return {"ok": True}
-
-
-@app.get("/v1/enroll-devices")
-def enroll_devices_list(tenant: str, ctx: Annotated[dict, Depends(require_role("admin_master"))],
-                        status: str | None = None):
-    tid = _enroll_tid(ctx, tenant)
-    where, args = ["tenant_id=%s"], [tid]
-    if status:
-        where.append("status=%s"); args.append(status)
-    with db() as c:
-        rows = c.execute(
-            f"SELECT id, device_id, code, status, hostname, os, requested_at, decided_at, decided_by "
-            f"FROM enrolled_devices WHERE {' AND '.join(where)} ORDER BY requested_at DESC LIMIT 500",
-            tuple(args),
-        ).fetchall()
-    return {"devices": [dict(r) for r in rows]}
-
-
-class EnrollDecisionIn(BaseModel):
-    action: str   # 'approve' | 'reject'
-
-
-@app.post("/v1/enroll-devices/{did}/decide")
-def enroll_device_decide(did: int, body: EnrollDecisionIn, tenant: str, request: Request,
-                         ctx: Annotated[dict, Depends(require_role("admin_master"))]):
-    tid = _enroll_tid(ctx, tenant)
-    if body.action not in ("approve", "reject"):
-        raise HTTPException(400, "ação inválida")
-    new_status = "approved" if body.action == "approve" else "rejected"
-    now = dt.datetime.now(dt.timezone.utc).isoformat()
-    with db() as c:
-        r = c.execute("SELECT device_id FROM enrolled_devices WHERE id=%s AND tenant_id=%s",
-                      (did, tid)).fetchone()
-        if not r:
-            raise HTTPException(404, "device não encontrado")
-        c.execute(
-            "UPDATE enrolled_devices SET status=%s, decided_at=%s, decided_by=%s WHERE id=%s",
-            (new_status, now, ctx.get("email"), did),
-        )
-    audit(ctx.get("email"), f"enroll.device.{body.action}", target=tid,
-          detail=r["device_id"], ip=_client_ip(request))
-    return {"ok": True, "status": new_status}
-
-
-@app.delete("/v1/enroll-devices/{did}")
-def enroll_device_delete(did: int, tenant: str, request: Request,
-                         ctx: Annotated[dict, Depends(require_role("admin_master"))]):
-    """Remove o registro de enrollment do device. Se ele re-enrollar depois,
-    passa pela fila de novo. Não revoga licença já entregue nem para coleta em
-    andamento (para isso, use 'Agentes bloqueados')."""
-    tid = _enroll_tid(ctx, tenant)
-    with db() as c:
-        r = c.execute("SELECT device_id FROM enrolled_devices WHERE id=%s AND tenant_id=%s",
-                      (did, tid)).fetchone()
-        if not r:
-            raise HTTPException(404, "device não encontrado")
-        c.execute("DELETE FROM enrolled_devices WHERE id=%s AND tenant_id=%s", (did, tid))
-    audit(ctx.get("email"), "enroll.device.delete", target=tid,
-          detail=r["device_id"], ip=_client_ip(request))
-    return {"ok": True}
-
-
-# ===========================================================================
-# Diagnóstico — dump dos eventos crus de um colaborador (Platform Admin)
-# Útil p/ investigar dados estranhos (ex.: AFK > tempo decorrido).
-# ===========================================================================
-@app.get("/v1/admin/events-dump", dependencies=[Depends(require_admin)])
-def admin_events_dump(tenant: str, match: str,
-                      since: str | None = None, until: str | None = None,
-                      bucket: str | None = None, limit: int = 200000):
-    now = dt.datetime.now(dt.timezone.utc)
-    if since is None:
-        since = (now - dt.timedelta(days=3)).isoformat()
-    if until is None:
-        until = now.isoformat()
-    m = f"%{(match or '').strip()}%"
-    with db() as c:
-        urows = c.execute(
-            """SELECT DISTINCT u.user_id, u.display_name
-               FROM users u
-               LEFT JOIN devices d ON d.tenant_id=u.tenant_id AND d.user_id=u.user_id
-               WHERE u.tenant_id=%s
-                 AND (u.user_id ILIKE %s OR u.display_name ILIKE %s OR d.hostname ILIKE %s)""",
-            (tenant, m, m, m),
-        ).fetchall()
-        uids = [r["user_id"] for r in urows]
-        events = []
-        if uids:
-            where = ["tenant_id=%s", "user_id = ANY(%s)", "ts>=%s", "ts<=%s"]
-            args: list = [tenant, uids, since, until]
-            if bucket:
-                where.append("bucket=%s"); args.append(bucket)
-            events = c.execute(
-                f"SELECT user_id, device_id, bucket, ts, duration_sec, data_json "
-                f"FROM events WHERE {' AND '.join(where)} ORDER BY ts LIMIT %s",
-                tuple(args + [int(limit)]),
-            ).fetchall()
-    return {
-        "tenant": tenant, "match": match, "since": since, "until": until,
-        "users":  [dict(r) for r in urows],
-        "count":  len(events),
-        "events": [dict(r) for r in events],
-    }
-
-
-@app.get("/v1/admin/dup-report", dependencies=[Depends(require_admin)])
-def admin_dup_report(tenant: str, since: str | None = None, until: str | None = None):
-    """Relatório por usuário (uma linha cada): total de eventos, estimativa de
-    DUPLICATAS (total - distintos por ts|bucket|duração) e o maior AFK. Serve p/
-    ver se a duplicação/AFK gigante é da frota ou de uma máquina só. Período
-    padrão = hoje (UTC) — passe since/until p/ ampliar a janela."""
-    now = dt.datetime.now(dt.timezone.utc)
-    if since is None:
-        since = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-    if until is None:
-        until = now.isoformat()
-    with db() as c:
-        rows = c.execute(
-            """SELECT u.user_id,
-                      COALESCE(u.display_name, u.user_id) AS name,
-                      COUNT(*)                                              AS total,
-                      COUNT(*) FILTER (WHERE e.bucket='afk')               AS afk_events,
-                      COUNT(*) - COUNT(DISTINCT
-                          (e.ts || '|' || e.bucket || '|' || e.duration_sec::text)) AS dups,
-                      COALESCE(MAX(e.duration_sec) FILTER (WHERE e.bucket='afk'), 0) AS max_afk_sec,
-                      COUNT(*) FILTER (WHERE e.bucket='afk' AND e.duration_sec > 3600) AS afk_gt_1h
-               FROM users u
-               JOIN events e ON e.tenant_id=u.tenant_id AND e.user_id=u.user_id
-                    AND e.ts>=%s AND e.ts<=%s
-               WHERE u.tenant_id=%s
-               GROUP BY u.user_id, u.display_name
-               ORDER BY dups DESC""",
-            (since, until, tenant),
-        ).fetchall()
-    out = []
-    for r in rows:
-        total = r["total"] or 0
-        dups  = r["dups"] or 0
-        out.append({
-            "user_id":   r["user_id"],
-            "name":      r["name"],
-            "total":     total,
-            "afk_events": r["afk_events"],
-            "dups":      dups,
-            "dup_pct":   round(dups / total * 100, 1) if total else 0,
-            "max_afk_h": round((r["max_afk_sec"] or 0) / 3600, 2),
-            "afk_gt_1h": r["afk_gt_1h"],
-        })
-    return {"tenant": tenant, "since": since, "until": until, "users": out}
-
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-def serve() -> None:
-    import uvicorn
-    concurrency = int(os.getenv("WEB_CONCURRENCY", "2"))
-    host, _, port_s = LISTEN_ADDR.rpartition(":")
-    uvicorn.run(
-        "main:app",
-        host=host or "0.0.0.0",
-        port=int(port_s or 8080),
-        workers=concurrency,
-    )
-
-
-if __name__ == "__main__":
-    serve()
+    hostname: 

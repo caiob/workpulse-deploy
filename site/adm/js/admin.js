@@ -570,6 +570,7 @@ async function loadSystem() {
     loadPlanPrices();
     loadAgentConfig();
     loadReleases();
+    loadUpdateStatus();
   } catch (e) { toast('Erro: '+e.message); }
 }
 
@@ -604,6 +605,28 @@ async function loadReleases() {
           ${r.is_latest ? '' : `<button class="ghost" onclick="promoteRelease(${r.id})">Tornar última</button>`}
           <button class="ghost" style="color:var(--danger)" onclick="deleteRelease(${r.id},'${(r.version||'').replace(/'/g,'')}')">Excluir</button>
         </td>
+      </tr>`).join('') + '</tbody></table>';
+  } catch (e) { box.innerHTML = '<p style="color:var(--text-muted)">Erro: '+e.message+'</p>'; }
+}
+
+async function loadUpdateStatus() {
+  const box = document.getElementById('updStatus');
+  if (!box) return;
+  try {
+    const d = await api('/v1/admin/update-status');
+    const rows = d.rows || [];
+    if (!rows.length) { box.innerHTML = '<p style="color:var(--text-muted)">Nenhum update registrado ainda.</p>'; return; }
+    const chip = (n, color) => `<span style="color:${color};font-weight:600">${n||0}</span>`;
+    box.innerHTML = '<table><thead><tr><th>Canal</th><th>SO</th><th>Versão</th><th>Atualizando</th><th>Sucesso</th><th>Falha</th><th>Revertidas</th><th>Último evento</th></tr></thead><tbody>' +
+      rows.map(r => `<tr>
+        <td>${r.channel === 'generic' ? 'Genérico' : (r.channel||'')}</td>
+        <td>${r.os||''}</td>
+        <td><strong>${r.to_ver||'—'}</strong></td>
+        <td>${chip(r.updating, '#2f6fed')}</td>
+        <td>${chip(r.success, 'var(--success,#2e9e5b)')}</td>
+        <td>${chip(r.failed, 'var(--danger,#d64545)')}</td>
+        <td>${chip(r.rolled_back, '#c98a12')}</td>
+        <td style="font-size:12px">${r.last_at ? new Date(r.last_at).toLocaleString('pt-BR') : '—'}</td>
       </tr>`).join('') + '</tbody></table>';
   } catch (e) { box.innerHTML = '<p style="color:var(--text-muted)">Erro: '+e.message+'</p>'; }
 }
@@ -686,6 +709,15 @@ async function loadAgentConfig() {
     document.getElementById('acSync').value   = g.sync_interval_sec ?? 30;
     document.getElementById('acTitles').value = (g.capture_titles === false) ? 'false' : 'true';
     document.getElementById('acMeet').value   = (g.meeting_patterns || []).join('\n');
+    // Auto-update (F3a)
+    const updEnabled = document.getElementById('acUpdEnabled');
+    if (updEnabled) updEnabled.value = (g.update_enabled === false) ? 'false' : 'true';
+    const updInt = document.getElementById('acUpdInterval');
+    if (updInt) updInt.value = g.update_check_interval_min ?? 120;
+    const updBatch = document.getElementById('acUpdBatch');
+    if (updBatch) updBatch.value = g.update_batch_size ?? 5;
+    const updGrace = document.getElementById('acUpdGrace');
+    if (updGrace) updGrace.value = g.update_health_grace_min ?? 10;
   } catch (e) { /* silencioso */ }
 }
 
@@ -701,6 +733,17 @@ async function saveAgentConfig() {
   };
   if (isNaN(body.heartbeat_interval_sec)) body.heartbeat_interval_sec = 5;
   if (isNaN(body.sync_interval_sec)) body.sync_interval_sec = 30;
+  // Auto-update (F3a) — só envia se os campos existem no DOM.
+  const _updEn = document.getElementById('acUpdEnabled');
+  if (_updEn) {
+    body.update_enabled = _updEn.value === 'true';
+    const iv = parseInt(document.getElementById('acUpdInterval').value, 10);
+    const bt = parseInt(document.getElementById('acUpdBatch').value, 10);
+    const gr = parseInt(document.getElementById('acUpdGrace').value, 10);
+    body.update_check_interval_min = isNaN(iv) ? 120 : Math.min(1440, Math.max(15, iv));
+    body.update_batch_size         = isNaN(bt) ? 5   : Math.min(10,   Math.max(1,  bt));
+    body.update_health_grace_min   = isNaN(gr) ? 10  : Math.min(30,   Math.max(3,  gr));
+  }
   try {
     await api('/v1/admin/agent-config', { method: 'PUT', body: JSON.stringify(body) });
     if (msg) { msg.textContent = 'Config global salva.'; setTimeout(() => msg.textContent = '', 2500); }
@@ -1150,48 +1193,4 @@ async function loadTenantCosts() {
       tb.innerHTML = '<tr><td colspan="8" class="empty">Sem base de custo.</td></tr>';
       return;
     }
-    if (sumEl) sumEl.innerHTML = `Base: <strong>US$ ${(d.usage_total || 0).toFixed(2)}</strong> de uso no mês (${d.month || '—'}), rateado por ${d.driver === 'devices' ? 'agentes' : 'usuários'}.`;
-    const rows = d.tenants || [];
-    if (!rows.length) { tb.innerHTML = '<tr><td colspan="8" class="empty">Nenhum cliente.</td></tr>'; return; }
-    tb.innerHTML = rows.map(t => `<tr>
-      <td><strong>${escHtml(t.name || t.tenant_id)}</strong><div class="mono" style="font-size:11px;color:var(--text-muted)">${escHtml(t.tenant_id)}</div></td>
-      <td>${planBadge(t.plan)}</td>
-      <td class="num">${fmtNum(t.users)}</td>
-      <td class="num">${fmtNum(t.devices)}</td>
-      <td class="num">${fmtNum(t.events || 0)}</td>
-      <td class="num"><strong>US$ ${(t.cost || 0).toFixed(2)}</strong></td>
-      <td class="num">${t.cost_per_user  != null ? ('US$ ' + t.cost_per_user.toFixed(2))  : '—'}</td>
-      <td class="num">${t.cost_per_agent != null ? ('US$ ' + t.cost_per_agent.toFixed(2)) : '—'}</td>
-    </tr>`).join('');
-  } catch (e) {
-    tb.innerHTML = `<tr><td colspan="8" class="empty">Erro: ${escHtml(e.message)}</td></tr>`;
-  }
-}
-
-
-async function runSim() {
-  const tb = document.querySelector('#simTable tbody');
-  if (!tb) return;
-  const n = parseInt((document.getElementById('simUsers') || {}).value, 10);
-  try {
-    const d = await api('/v1/admin/cost-simulate' + (n > 0 ? ('?users=' + n) : ''));
-    const sumEl = document.getElementById('simSummary');
-    if (!d.available) {
-      if (sumEl) sumEl.textContent = 'Custos AWS indisponíveis.';
-      tb.innerHTML = '<tr><td colspan="3" class="empty">Sem base de custo.</td></tr>';
-      return;
-    }
-    if (sumEl) sumEl.innerHTML = `<strong>${fmtNum(d.users)}</strong> usuários → total <strong>US$ ${(d.total || 0).toFixed(2)}/mês</strong> · custo/usuário <strong>US$ ${d.cost_per_user != null ? d.cost_per_user.toFixed(2) : '—'}</strong>`;
-    const rows = d.items || [];
-    tb.innerHTML = rows.map(it => `<tr>
-      <td>${escHtml(it.service)}</td>
-      <td>${it.fixed ? '<span class="badge muted">fixo</span>' : '<span class="badge ok">variável</span>'}</td>
-      <td class="num">US$ ${(it.projected || 0).toFixed(2)}</td>
-    </tr>`).join('') +
-      `<tr style="font-weight:600;border-top:2px solid var(--border)"><td>Total</td><td></td><td class="num">US$ ${(d.total || 0).toFixed(2)}</td></tr>`;
-    const inp = document.getElementById('simUsers');
-    if (inp && !inp.value) inp.value = d.users;
-  } catch (e) {
-    tb.innerHTML = `<tr><td colspan="3" class="empty">Erro: ${escHtml(e.message)}</td></tr>`;
-  }
-}
+    if (sumEl) sumEl.innerHTML = `Base: <strong>US$ ${(d.usage_total || 0).t

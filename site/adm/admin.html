@@ -444,6 +444,19 @@
           <div><label class="fld-label">Capturar títulos</label><br>
             <select id="acTitles" class="fld" style="width:130px"><option value="true">Sim</option><option value="false">Não</option></select></div>
         </div>
+
+        <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border,#2a3354)">
+          <label class="fld-label" style="font-weight:600;color:var(--text)">Auto-update do agente (workpulse-service)</label>
+          <p style="font-size:11px;color:var(--text-muted);margin:4px 0 10px">O serviço em cada estação consulta a versão marcada <strong>"última"</strong> e atualiza sozinho, em lotes pequenos, verificando assinatura. <strong>Desligar</strong> aqui é o <em>kill switch</em> — pausa todo o rollout na hora.</p>
+          <div style="display:flex;gap:16px;align-items:flex-end;flex-wrap:wrap">
+            <div><label class="fld-label">Auto-update</label><br>
+              <select id="acUpdEnabled" class="fld" style="width:130px"><option value="true">Ligado</option><option value="false">Desligado (pausar)</option></select></div>
+            <div><label class="fld-label">Verificar a cada (min)</label><br><input id="acUpdInterval" class="fld" type="number" min="15" max="1440" style="width:140px" placeholder="120"></div>
+            <div><label class="fld-label">Lote (máx. em paralelo)</label><br><input id="acUpdBatch" class="fld" type="number" min="1" max="10" style="width:140px" placeholder="5"></div>
+            <div><label class="fld-label">Janela de saúde (min)</label><br><input id="acUpdGrace" class="fld" type="number" min="3" max="30" style="width:140px" placeholder="10"></div>
+          </div>
+        </div>
+
         <div style="margin-top:12px">
           <label class="fld-label">Apps/sites de reunião (keepalive) — um por linha</label>
           <textarea id="acMeet" class="fld" rows="5" style="width:100%;box-sizing:border-box;font-family:var(--mono);font-size:12px" placeholder="meet:&#10;google meet&#10;microsoft teams&#10;zoom meeting"></textarea>
@@ -475,6 +488,15 @@
           <span id="relMsg" style="font-size:12px;color:var(--text-muted)"></span>
         </div>
         <div id="relList" style="margin-top:14px;overflow-x:auto"><p style="color:var(--text-muted)">Carregando…</p></div>
+      </div>
+
+      <div class="card span-12">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <h3 style="margin:0">Rollout do auto-update</h3>
+          <button class="ghost" onclick="loadUpdateStatus()">Atualizar</button>
+        </div>
+        <p style="font-size:11px;color:var(--text-muted);margin:6px 0 10px">Progresso do auto-update por versão-alvo. <strong>Atualizando</strong> = estações com update em andamento (ocupando um slot do lote). <strong>Revertidas</strong> = o agente novo não passou no health-check e voltou para a versão anterior — vale investigar a build.</p>
+        <div id="updStatus" style="overflow-x:auto"><p style="color:var(--text-muted)">Carregando…</p></div>
       </div>
 
       <div class="card span-12">
@@ -558,43 +580,4 @@
         <div><label style="font-size:12px;color:var(--muted,#8c97c4)">Cliente (Tenant)</label><br><select id="clTenant" style="min-width:200px"><option value="">— selecione —</option></select></div>
         <div><label style="font-size:12px;color:var(--muted,#8c97c4)">Nome</label><br><input id="clName" placeholder="Nome"></div>
         <div><label style="font-size:12px;color:var(--muted,#8c97c4)">E-mail</label><br><input id="clEmail" type="email" placeholder="usuario@empresa.com"></div>
-        <div><label style="font-size:12px;color:var(--muted,#8c97c4)">Perfil</label><br>
-          <select id="clRole">
-            <option value="admin_master">Admin Master (cliente)</option>
-            <option value="supervisor">Supervisor (cliente)</option>
-            <option value="lider">Líder (cliente)</option>
-          </select>
-        </div>
-        <div><button class="primary" onclick="clCreate()">Criar e enviar link</button></div>
-      </div>
-      <p style="font-size:12px;color:var(--muted,#8c97c4);margin:8px 0 0">O usuário recebe um e-mail com link para definir a própria senha. O link também aparece abaixo, para você copiar e enviar manualmente ou testar.</p>
-      <div id="clError" style="color:var(--danger,#f87171);font-size:13px;margin-top:8px;display:none"></div>
-      <div id="clLinkBox" style="display:none;margin-top:12px;padding:12px;border:1px solid var(--border,#243070);border-radius:8px;background:rgba(108,140,255,.06)">
-        <div style="font-size:12px;color:var(--muted,#8c97c4);margin-bottom:6px">Link de definição de senha (válido por 48h) — <span id="clLinkFor"></span></div>
-        <div style="display:flex;gap:8px;align-items:center">
-          <input id="clLink" readonly onclick="this.select()" style="flex:1;font-family:var(--mono,monospace);font-size:12px">
-          <button class="primary" onclick="clCopyLink()">Copiar</button>
-        </div>
-      </div>
-    </div>
-
-    <div class="card">
-      <div style="display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
-        <input id="clFilter" oninput="clRender()" placeholder="filtrar por e-mail, tenant ou perfil..." style="flex:1;min-width:220px">
-        <span id="clCount" style="font-size:12px;color:var(--muted,#8c97c4)"></span>
-        <button class="ghost" onclick="loadLogins()">recarregar</button>
-      </div>
-      <table id="clTable">
-        <thead><tr><th>Tenant</th><th>Nome</th><th>E-mail</th><th>Perfil</th><th>Status</th><th></th></tr></thead>
-        <tbody><tr><td colspan="6" class="empty">Carregando...</td></tr></tbody>
-      </table>
-    </div>
-  </section>
-
-</main>
-
-<div id="toast" class="toast hide"></div>
-
-<script src="js/admin.js?v=20"></script>
-</body>
-</html>
+        <div><label s
