@@ -7204,4 +7204,310 @@ class EnrollIn(BaseModel):
     code:     str
     device:   str
     os:       str | None = None
-    hostname: 
+    hostname: str | None = None
+
+
+def _gen_enroll_code() -> str:
+    return "-".join(secrets.token_hex(2).upper() for _ in range(3))  # AAAA-BBBB-CCCC
+
+
+def _tenant_license_token(c, tenant: str) -> str | None:
+    r = c.execute(
+        "SELECT token FROM licenses WHERE tenant_id=%s AND revoked=0 ORDER BY issued DESC LIMIT 1",
+        (tenant,),
+    ).fetchone()
+    return r["token"] if r else None
+
+
+@app.post("/v1/enroll")
+def enroll(req: EnrollIn, request: Request):
+    """Troca um código de enrollment pela licença do tenant. Sem auth — o código
+    É a credencial. Se o tenant exige aprovação, o device entra como 'pendente'."""
+    code = (req.code or "").strip().upper()
+    if not code:
+        raise HTTPException(400, "código ausente")
+    if not (req.device or "").strip():
+        raise HTTPException(400, "device ausente")
+    now = dt.datetime.now(dt.timezone.utc)
+    with db() as c:
+        cr = c.execute(
+            "SELECT tenant_id, active, expires_at FROM enrollment_codes WHERE code=%s", (code,)
+        ).fetchone()
+        if not cr or not cr["active"]:
+            raise HTTPException(403, "código inválido")
+        if cr["expires_at"] and cr["expires_at"] < now.isoformat():
+            raise HTTPException(403, "código expirado")
+        tenant = cr["tenant_id"]
+
+        ap = c.execute("SELECT COALESCE(enroll_approval, TRUE) AS a FROM tenants WHERE id=%s",
+                       (tenant,)).fetchone()
+        need_approval = bool(ap["a"]) if ap else True
+
+        dev = c.execute(
+            "SELECT status FROM enrolled_devices WHERE tenant_id=%s AND device_id=%s",
+            (tenant, req.device),
+        ).fetchone()
+        if dev:
+            status = dev["status"]
+        else:
+            status = "pending" if need_approval else "approved"
+            c.execute(
+                """INSERT INTO enrolled_devices
+                       (tenant_id, device_id, code, status, hostname, os,
+                        requested_at, decided_at, decided_by)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (tenant, req.device, code, status, req.hostname, req.os, now.isoformat(),
+                 now.isoformat() if status == "approved" else None,
+                 "auto" if status == "approved" else None),
+            )
+
+        if status == "approved":
+            token = _tenant_license_token(c, tenant)
+            if not token:
+                raise HTTPException(409, "tenant sem licença ativa")
+            return {"status": "approved", "tenant": tenant, "license_key": token}
+        if status == "rejected":
+            return {"status": "rejected"}
+        return {"status": "pending"}
+
+
+# ----------------------- Admin Master: gestão -----------------------
+def _enroll_tid(ctx, tenant):
+    return ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
+
+
+@app.get("/v1/enroll-settings")
+def enroll_settings_get(tenant: str, ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    tid = _enroll_tid(ctx, tenant)
+    with db() as c:
+        r = c.execute("SELECT COALESCE(enroll_approval, TRUE) AS a FROM tenants WHERE id=%s", (tid,)).fetchone()
+    return {"approval_required": bool(r["a"]) if r else True}
+
+
+class EnrollSettingsIn(BaseModel):
+    approval_required: bool
+
+
+@app.put("/v1/enroll-settings")
+def enroll_settings_set(body: EnrollSettingsIn, tenant: str, request: Request,
+                        ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    tid = _enroll_tid(ctx, tenant)
+    with db() as c:
+        c.execute("UPDATE tenants SET enroll_approval=%s WHERE id=%s", (body.approval_required, tid))
+    audit(ctx.get("email"), "enroll.settings", target=tid,
+          detail=f"approval={body.approval_required}", ip=_client_ip(request))
+    return {"ok": True, "approval_required": body.approval_required}
+
+
+@app.get("/v1/enroll-codes")
+def enroll_codes_list(tenant: str, ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    tid = _enroll_tid(ctx, tenant)
+    with db() as c:
+        rows = c.execute(
+            "SELECT code, label, active, expires_at, created_at FROM enrollment_codes "
+            "WHERE tenant_id=%s ORDER BY created_at DESC", (tid,),
+        ).fetchall()
+    return {"codes": [dict(r) for r in rows]}
+
+
+class EnrollCodeIn(BaseModel):
+    label:      str | None = None
+    days_valid: int | None = None   # null = permanente
+
+
+@app.post("/v1/enroll-codes")
+def enroll_codes_create(body: EnrollCodeIn, tenant: str, request: Request,
+                        ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    tid = _enroll_tid(ctx, tenant)
+    now = dt.datetime.now(dt.timezone.utc)
+    expires = None
+    if body.days_valid and body.days_valid > 0:
+        expires = (now + dt.timedelta(days=int(body.days_valid))).isoformat()
+    code = _gen_enroll_code()
+    with db() as c:
+        c.execute(
+            "INSERT INTO enrollment_codes (code, tenant_id, label, active, expires_at, created_by, created_at) "
+            "VALUES (%s,%s,%s,TRUE,%s,%s,%s)",
+            (code, tid, (body.label or None), expires, ctx.get("email"), now.isoformat()),
+        )
+    audit(ctx.get("email"), "enroll.code.create", target=tid, detail=code, ip=_client_ip(request))
+    return {"ok": True, "code": code, "expires_at": expires}
+
+
+@app.delete("/v1/enroll-codes/{code}")
+def enroll_codes_revoke(code: str, tenant: str, request: Request,
+                        ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    tid = _enroll_tid(ctx, tenant)
+    with db() as c:
+        c.execute("UPDATE enrollment_codes SET active=FALSE WHERE code=%s AND tenant_id=%s",
+                  (code.upper(), tid))
+    audit(ctx.get("email"), "enroll.code.revoke", target=tid, detail=code, ip=_client_ip(request))
+    return {"ok": True}
+
+
+@app.get("/v1/enroll-devices")
+def enroll_devices_list(tenant: str, ctx: Annotated[dict, Depends(require_role("admin_master"))],
+                        status: str | None = None):
+    tid = _enroll_tid(ctx, tenant)
+    where, args = ["tenant_id=%s"], [tid]
+    if status:
+        where.append("status=%s"); args.append(status)
+    with db() as c:
+        rows = c.execute(
+            f"SELECT id, device_id, code, status, hostname, os, requested_at, decided_at, decided_by "
+            f"FROM enrolled_devices WHERE {' AND '.join(where)} ORDER BY requested_at DESC LIMIT 500",
+            tuple(args),
+        ).fetchall()
+    return {"devices": [dict(r) for r in rows]}
+
+
+class EnrollDecisionIn(BaseModel):
+    action: str   # 'approve' | 'reject'
+
+
+@app.post("/v1/enroll-devices/{did}/decide")
+def enroll_device_decide(did: int, body: EnrollDecisionIn, tenant: str, request: Request,
+                         ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    tid = _enroll_tid(ctx, tenant)
+    if body.action not in ("approve", "reject"):
+        raise HTTPException(400, "ação inválida")
+    new_status = "approved" if body.action == "approve" else "rejected"
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
+    with db() as c:
+        r = c.execute("SELECT device_id FROM enrolled_devices WHERE id=%s AND tenant_id=%s",
+                      (did, tid)).fetchone()
+        if not r:
+            raise HTTPException(404, "device não encontrado")
+        c.execute(
+            "UPDATE enrolled_devices SET status=%s, decided_at=%s, decided_by=%s WHERE id=%s",
+            (new_status, now, ctx.get("email"), did),
+        )
+    audit(ctx.get("email"), f"enroll.device.{body.action}", target=tid,
+          detail=r["device_id"], ip=_client_ip(request))
+    return {"ok": True, "status": new_status}
+
+
+@app.delete("/v1/enroll-devices/{did}")
+def enroll_device_delete(did: int, tenant: str, request: Request,
+                         ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    """Remove o registro de enrollment do device. Se ele re-enrollar depois,
+    passa pela fila de novo. Não revoga licença já entregue nem para coleta em
+    andamento (para isso, use 'Agentes bloqueados')."""
+    tid = _enroll_tid(ctx, tenant)
+    with db() as c:
+        r = c.execute("SELECT device_id FROM enrolled_devices WHERE id=%s AND tenant_id=%s",
+                      (did, tid)).fetchone()
+        if not r:
+            raise HTTPException(404, "device não encontrado")
+        c.execute("DELETE FROM enrolled_devices WHERE id=%s AND tenant_id=%s", (did, tid))
+    audit(ctx.get("email"), "enroll.device.delete", target=tid,
+          detail=r["device_id"], ip=_client_ip(request))
+    return {"ok": True}
+
+
+# ===========================================================================
+# Diagnóstico — dump dos eventos crus de um colaborador (Platform Admin)
+# Útil p/ investigar dados estranhos (ex.: AFK > tempo decorrido).
+# ===========================================================================
+@app.get("/v1/admin/events-dump", dependencies=[Depends(require_admin)])
+def admin_events_dump(tenant: str, match: str,
+                      since: str | None = None, until: str | None = None,
+                      bucket: str | None = None, limit: int = 200000):
+    now = dt.datetime.now(dt.timezone.utc)
+    if since is None:
+        since = (now - dt.timedelta(days=3)).isoformat()
+    if until is None:
+        until = now.isoformat()
+    m = f"%{(match or '').strip()}%"
+    with db() as c:
+        urows = c.execute(
+            """SELECT DISTINCT u.user_id, u.display_name
+               FROM users u
+               LEFT JOIN devices d ON d.tenant_id=u.tenant_id AND d.user_id=u.user_id
+               WHERE u.tenant_id=%s
+                 AND (u.user_id ILIKE %s OR u.display_name ILIKE %s OR d.hostname ILIKE %s)""",
+            (tenant, m, m, m),
+        ).fetchall()
+        uids = [r["user_id"] for r in urows]
+        events = []
+        if uids:
+            where = ["tenant_id=%s", "user_id = ANY(%s)", "ts>=%s", "ts<=%s"]
+            args: list = [tenant, uids, since, until]
+            if bucket:
+                where.append("bucket=%s"); args.append(bucket)
+            events = c.execute(
+                f"SELECT user_id, device_id, bucket, ts, duration_sec, data_json "
+                f"FROM events WHERE {' AND '.join(where)} ORDER BY ts LIMIT %s",
+                tuple(args + [int(limit)]),
+            ).fetchall()
+    return {
+        "tenant": tenant, "match": match, "since": since, "until": until,
+        "users":  [dict(r) for r in urows],
+        "count":  len(events),
+        "events": [dict(r) for r in events],
+    }
+
+
+@app.get("/v1/admin/dup-report", dependencies=[Depends(require_admin)])
+def admin_dup_report(tenant: str, since: str | None = None, until: str | None = None):
+    """Relatório por usuário (uma linha cada): total de eventos, estimativa de
+    DUPLICATAS (total - distintos por ts|bucket|duração) e o maior AFK. Serve p/
+    ver se a duplicação/AFK gigante é da frota ou de uma máquina só. Período
+    padrão = hoje (UTC) — passe since/until p/ ampliar a janela."""
+    now = dt.datetime.now(dt.timezone.utc)
+    if since is None:
+        since = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    if until is None:
+        until = now.isoformat()
+    with db() as c:
+        rows = c.execute(
+            """SELECT u.user_id,
+                      COALESCE(u.display_name, u.user_id) AS name,
+                      COUNT(*)                                              AS total,
+                      COUNT(*) FILTER (WHERE e.bucket='afk')               AS afk_events,
+                      COUNT(*) - COUNT(DISTINCT
+                          (e.ts || '|' || e.bucket || '|' || e.duration_sec::text)) AS dups,
+                      COALESCE(MAX(e.duration_sec) FILTER (WHERE e.bucket='afk'), 0) AS max_afk_sec,
+                      COUNT(*) FILTER (WHERE e.bucket='afk' AND e.duration_sec > 3600) AS afk_gt_1h
+               FROM users u
+               JOIN events e ON e.tenant_id=u.tenant_id AND e.user_id=u.user_id
+                    AND e.ts>=%s AND e.ts<=%s
+               WHERE u.tenant_id=%s
+               GROUP BY u.user_id, u.display_name
+               ORDER BY dups DESC""",
+            (since, until, tenant),
+        ).fetchall()
+    out = []
+    for r in rows:
+        total = r["total"] or 0
+        dups  = r["dups"] or 0
+        out.append({
+            "user_id":   r["user_id"],
+            "name":      r["name"],
+            "total":     total,
+            "afk_events": r["afk_events"],
+            "dups":      dups,
+            "dup_pct":   round(dups / total * 100, 1) if total else 0,
+            "max_afk_h": round((r["max_afk_sec"] or 0) / 3600, 2),
+            "afk_gt_1h": r["afk_gt_1h"],
+        })
+    return {"tenant": tenant, "since": since, "until": until, "users": out}
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+def serve() -> None:
+    import uvicorn
+    concurrency = int(os.getenv("WEB_CONCURRENCY", "2"))
+    host, _, port_s = LISTEN_ADDR.rpartition(":")
+    uvicorn.run(
+        "main:app",
+        host=host or "0.0.0.0",
+        port=int(port_s or 8080),
+        workers=concurrency,
+    )
+
+
+if __name__ == "__main__":
+    serve()
