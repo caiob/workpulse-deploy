@@ -64,39 +64,32 @@ function _jorHHfromFloat(v) {
  * servidor (start_float/end_float = horas desde a meia-noite local), de
  * forma que a exibição não dependa do fuso do navegador.
  */
-function _jorLunchSec() {
-  return ((typeof state !== 'undefined' && state.lunchMin != null) ? state.lunchMin : 60) * 60;
-}
-
 function _jorBuildJornada(d) {
   const [y, m, dd] = d.day.split('-').map(Number);
   const base  = new Date(y, m - 1, dd, 0, 0, 0, 0);        // meia-noite local
   const start = new Date(base.getTime() + (d.start_float || 0) * 3600000);
   const end   = new Date(base.getTime() + (d.end_float   || 0) * 3600000);
-  // O almoço agora é descontado NO SERVIDOR (pauses_sec já vem líquido) e a
-  // Líquida (net_sec) também já desconta suspensão (sleep_sec) e buracos sem
-  // coleta (gap_sec). O desconto client-side foi REMOVIDO — era aplicado em
-  // duplicidade com outras telas (ver ANALISE_CONFLITO_SARA_0607.md).
-  // Fallback: servidor antigo (sem gap_sec) → desconta o almoço aqui como antes.
-  const legacy = (d.gap_sec == null);
-  let pauses = d.pauses_sec || 0;
-  if (legacy) {
-    const _ls = _jorLunchSec();
-    pauses = pauses >= _ls ? (pauses - _ls) : pauses;
-  }
-  const gross = Math.max(0, (end - start) / 1000);
-  const uncov = (d.sleep_sec || 0) + (d.gap_sec || 0);   // sem coleta na jornada
-  const net   = legacy ? Math.max(0, gross - pauses) : (d.net_sec || 0);
+  // MÉTRICAS ALINHADAS AO CONSOLIDADO (decisão 2026-07-13): sem desconto de
+  // almoço em lugar nenhum (AFK cru). activitySec = atividade coletada;
+  // afkDaySec = AFK do dia (na jornada + pós); totalSec = atividade + AFK —
+  // os MESMOS números dos cards da aba Consolidado para o mesmo período.
+  const pauses    = d.pauses_sec || 0;                 // AFK na jornada (cru)
+  const idleAfter = d.idle_after_sec || 0;             // AFK pós jornada
+  const activity  = (d.activity_sec != null) ? d.activity_sec : (d.focus_sec || 0);
+  const afkDay    = (d.afk_day_sec  != null) ? d.afk_day_sec  : (pauses + idleAfter);
+  const totalSec  = (d.total_sec    != null) ? d.total_sec    : (activity + afkDay);
   return {
     day:       d.day,
     start:     start,
     end:       end,
     pausesSec: pauses,
-    uncovSec:  uncov,
-    netSec:    net,
+    activitySec: activity,
+    afkDaySec:   afkDay,
+    totalSec:    totalSec,
+    uncovSec:  (d.sleep_sec || 0) + (d.gap_sec || 0),  // sem coleta na jornada
     coveragePct: (d.coverage_pct != null) ? d.coverage_pct : null,
-    focusSec:  d.focus_sec  || 0,
-    idleAfterSec: d.idle_after_sec || 0,
+    focusSec:  activity,
+    idleAfterSec: idleAfter,
     isToday:   !!d.is_today,
   };
 }
@@ -181,16 +174,14 @@ function _jorComputeFromEvents(windowEvents, afkEvents) {
     if (afkEnd >= byDay[key].start && ts <= byDay[key].end) byDay[key].pausesSec += dur;
   }
   const todayKey = _jorLocalDayKey(new Date());
-  // Desconta o almoço (config dos Alertas, padrão 60 min) das Pausas, POR DIA,
-  // capado em 0 → a Líquida sobe pelo valor perdoado. Consistente com as outras telas.
-  const lunchSec = _jorLunchSec();
   return Object.values(byDay)
     .map(j => {
-      const pauses = (j.pausesSec >= lunchSec ? j.pausesSec - lunchSec : j.pausesSec);
-      const gross  = Math.max(0, (j.end - j.start) / 1000);
-      // Fallback sem servidor: não detecta buracos de coleta (uncov = 0).
-      return { ...j, pausesSec: pauses, uncovSec: 0, netSec: Math.max(0, gross - pauses),
-               coveragePct: null, isToday: j.day === todayKey };
+      // Fallback sem servidor: AFK cru (sem desconto de almoço) e sem detecção
+      // de buracos de coleta. AFK pós não é separado aqui (entra em pausesSec).
+      const activity = j.focusSec || 0;
+      return { ...j, uncovSec: 0, activitySec: activity, afkDaySec: j.pausesSec,
+               totalSec: activity + j.pausesSec, coveragePct: null,
+               isToday: j.day === todayKey };
     })
     .sort((a, b) => a.day.localeCompare(b.day));
 }
@@ -257,7 +248,7 @@ async function loadJornada() {
 
 /* ---------- KPIs ---------- */
 function _jorResetKpis() {
-  ['kpiJorDays', 'kpiJorAvgWork', 'kpiJorAvgStart', 'kpiJorAvgEnd', 'kpiJorAvgPause'].forEach(id => {
+  ['kpiJorDays', 'kpiJorTotal', 'kpiJorAfk', 'kpiJorActivity', 'kpiJorAvgStart', 'kpiJorAvgEnd'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.innerHTML = '—';
   });
@@ -268,26 +259,28 @@ function _jorRenderKpis(jornadas) {
   document.getElementById('kpiJorDays').innerHTML =
     jornadas.length + '<small>dias</small>';
 
+  // Somas do período — MESMOS números dos cards da aba Consolidado.
+  const totSec = jornadas.reduce((a, j) => a + (j.totalSec    || 0), 0);
+  const afkSec = jornadas.reduce((a, j) => a + (j.afkDaySec   || 0), 0);
+  const actSec = jornadas.reduce((a, j) => a + (j.activitySec || 0), 0);
+  document.getElementById('kpiJorTotal').innerHTML    = _jorDur(totSec) + '<small>h</small>';
+  document.getElementById('kpiJorAfk').innerHTML      = _jorDur(afkSec) + '<small>h</small>';
+  document.getElementById('kpiJorActivity').innerHTML = _jorDur(actSec) + '<small>h</small>';
+
   if (!completos.length) {
-    document.getElementById('kpiJorAvgWork').innerHTML  = '—';
     document.getElementById('kpiJorAvgStart').innerHTML = '—';
     document.getElementById('kpiJorAvgEnd').innerHTML   = '—';
-    document.getElementById('kpiJorAvgPause').innerHTML = '—';
     return;
   }
 
-  const avgWorkSec  = completos.reduce((a, j) => a + (j.netSec != null ? j.netSec : Math.max(0, (j.end - j.start) / 1000 - j.pausesSec)), 0) / completos.length;
-  const avgPauseSec = completos.reduce((a, j) => a + j.pausesSec, 0) / completos.length;
   const avgStartMin = completos.reduce((a, j) => a + j.start.getHours() * 60 + j.start.getMinutes(), 0) / completos.length;
   const avgEndMin   = completos.reduce((a, j) => a + j.end.getHours()   * 60 + j.end.getMinutes(),   0) / completos.length;
 
   const sh = Math.floor(avgStartMin / 60), sm = Math.round(avgStartMin % 60);
   const eh = Math.floor(avgEndMin   / 60), em = Math.round(avgEndMin   % 60);
 
-  document.getElementById('kpiJorAvgWork').innerHTML  = _jorDur(avgWorkSec)  + '<small>h</small>';
   document.getElementById('kpiJorAvgStart').innerHTML = String(sh).padStart(2, '0') + ':' + String(sm).padStart(2, '0');
   document.getElementById('kpiJorAvgEnd').innerHTML   = String(eh).padStart(2, '0') + ':' + String(em).padStart(2, '0');
-  document.getElementById('kpiJorAvgPause').innerHTML = _jorDur(avgPauseSec) + '<small>h</small>';
 }
 
 /* ---------- Chart: horas líquidas + pausas por dia ---------- */
@@ -303,15 +296,15 @@ function _jorDrawHoursChart(jornadas) {
       labels: jornadas.map(j => _jorDDMM(j.day)),
       datasets: [
         {
-          label: 'Tempo trabalhado',
-          data: jornadas.map(j => +Math.max(0, (j.netSec || 0) / 3600).toFixed(2)),
+          label: 'Atividade',
+          data: jornadas.map(j => +Math.max(0, (j.activitySec || 0) / 3600).toFixed(2)),
           backgroundColor: 'rgba(74,222,128,.80)',
           borderRadius: 6,
           stack: 'a',
         },
         {
-          label: 'Pausas (AFK)',
-          data: jornadas.map(j => +(j.pausesSec / 3600).toFixed(2)),
+          label: 'AFK (ocioso)',
+          data: jornadas.map(j => +((j.afkDaySec || 0) / 3600).toFixed(2)),
           backgroundColor: 'rgba(245,158,11,.70)',
           borderRadius: 6,
           stack: 'a',
@@ -337,7 +330,7 @@ function _jorDrawHoursChart(jornadas) {
             label: c => ' ' + c.dataset.label + ': ' + c.parsed.y.toFixed(1) + 'h',
             footer: items => {
               const total = items.reduce((s, i) => s + i.parsed.y, 0);
-              return 'Total da jornada: ' + total.toFixed(1) + 'h';
+              return 'Total (coletado + sem coleta): ' + total.toFixed(1) + 'h';
             },
           },
         },
@@ -431,7 +424,7 @@ function _jorRenderTable(jornadas) {
     const wd      = _jorWeekday(j.day);
     const ini     = _jorHHMM(j.start);
     const grossSec = (j.end - j.start) / 1000;
-    const liqSec   = (j.netSec != null) ? j.netSec : Math.max(0, grossSec - j.pausesSec);
+    const actSec   = j.activitySec || 0;
     const uncovTag = (j.uncovSec || 0) > 300
       ? ' <small style="color:var(--text-dim)" title="Tempo dentro da jornada sem nenhuma coleta (suspensão / agente parado) — já descontado da Líquida">sem coleta ' + _jorDur(j.uncovSec) + '</small>'
       : '';
@@ -444,8 +437,8 @@ function _jorRenderTable(jornadas) {
       : _jorHHMM(j.end);
 
     const liq = j.isToday
-      ? '<span style="color:var(--text-muted);font-style:italic">parcial · ' + _jorDur(liqSec) + '</span>'
-      : '<strong>' + _jorDur(liqSec) + '</strong>';
+      ? '<span style="color:var(--text-muted);font-style:italic">parcial · ' + _jorDur(actSec) + '</span>'
+      : '<strong>' + _jorDur(actSec) + '</strong>';
 
     return `<tr${j.isToday ? ' style="background:rgba(108,140,255,.05)"' : ''}>
       <td>

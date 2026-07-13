@@ -88,6 +88,17 @@ function fmtSec(s) {
   return h < 1 ? (s / 60).toFixed(0) + 'min' : h.toFixed(1) + 'h';
 }
 
+// Formato ÚNICO de duração longa (hh:mm) — mesma unidade na Jornada e no
+// Consolidado, para as telas conversarem (antes: "7.7h" vs "07:41").
+function fmtHM(s) {
+  if (s == null || isNaN(s)) return '—';
+  if (s < 60) return Math.round(s || 0) + 's';
+  let h = Math.floor(s / 3600);
+  let m = Math.round((s % 3600) / 60);
+  if (m === 60) { h += 1; m = 0; }
+  return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
+}
+
 function relTime(iso) {
   if (!iso) return '—';
   const d   = new Date(iso);

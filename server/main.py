@@ -1673,12 +1673,15 @@ def user_summary(user_id: str, tenant: str, request: Request, days: int = 7,
             (tenant, user_id, since, until),
         ).fetchall()
 
-    # AFK exibido = AFK − almoço, descontado POR DIA (capado em 0).
-    _lunch = _lunch_sec(_alert_settings(tenant))
+    # DECISÃO 2026-07-13: o desconto de almoço foi REMOVIDO de TODAS as métricas
+    # exibidas. Ele quebrava as identidades entre telas (Total = AFK + Atividade;
+    # Bruta = Total + Sem coleta) e cada tela descontava num lugar diferente.
+    # AFK agora é sempre o valor CRU coletado. A config de almoço segue valendo
+    # apenas para o motor de Alertas (_lunch_sec/_apply_lunch continuam lá).
     _daily_net, _afk_net_total = [], 0.0
     for r in daily:
         d = dict(r)
-        d["afk"] = _apply_lunch(d.get("afk"), _lunch)
+        d["afk"] = float(d.get("afk") or 0.0)
         _afk_net_total += d["afk"]
         _daily_net.append(d)
     return {
@@ -1765,11 +1768,11 @@ def team_summary(tenant: str, request: Request, days: int = 7,
             s[1] += a
             _dk = (uid, _utc_hour_to_local_day(r["h"][:13]))
             _afk_day[_dk] = _afk_day.get(_dk, 0.0) + a
-        # AFK exibido = AFK − almoço, descontado POR DIA LOCAL (capado em 0).
-        _lunch = _lunch_sec(_alert_settings(tenant))
+        # DECISÃO 2026-07-13: almoço NÃO é mais descontado (AFK cru) — ver nota
+        # em user_summary. Mantém o agrupamento por (uid, dia) por compat.
         _afk_net: dict[str, float] = {}
         for (uid, _d), av in _afk_day.items():
-            _afk_net[uid] = _afk_net.get(uid, 0.0) + _apply_lunch(av, _lunch)
+            _afk_net[uid] = _afk_net.get(uid, 0.0) + av
         _perf.mark("active_afk")
 
         # Metadados dos usuários (tabela pequena) + versão do agente.
@@ -1919,7 +1922,7 @@ def jornada(
     if _allowed is not None and user_id not in set(_allowed):
         raise HTTPException(status_code=403, detail="colaborador fora do seu escopo")
 
-    cache_key = f"{tenant}:jornada:v2:{user_id}:{since}:{until}"
+    cache_key = f"{tenant}:jornada:v3:{user_id}:{since}:{until}"
     cached    = _cache_get(cache_key)
     if cached is not None:
         return cached
@@ -2037,25 +2040,24 @@ def jornada(
         ZoneInfo(REPORT_TZ)
     ).date().isoformat() if ZoneInfo else None
 
-    # Desconto de almoço agora é feito AQUI (servidor) — o frontend não desconta
-    # mais (era duplicado em wp-jornada.js; ver ANALISE_CONFLITO_SARA_0607.md).
-    _lunch = _lunch_sec(_alert_settings(tenant))
-
+    # DECISÃO 2026-07-13: a Jornada usa as MESMAS métricas do Consolidado
+    # (total do período = AFK + atividade, tudo CRU, sem desconto de almoço).
+    # Identidades: total_sec = afk_day_sec + activity_sec;
+    #              gross ≈ total_sec + sem coleta (gap/sleep + micro-drift).
     days_out = []
     for r in rows:
-        focus     = float(r["focus_sec"]     or 0.0)   # soma das janelas (tempo ativo)
-        afk_raw   = float(r["pauses_sec"]    or 0.0)   # AFK dentro da jornada (início→fim)
-        afk_after = float(r["afk_after_sec"] or 0.0)   # AFK após a última coleta de tela
+        focus     = float(r["focus_sec"]     or 0.0)   # soma das janelas (atividade)
+        afk_in    = float(r["pauses_sec"]    or 0.0)   # AFK dentro da jornada (cru)
+        afk_after = float(r["afk_after_sec"] or 0.0)   # AFK após a última atividade
         sleep_in  = float(r["sleep_sec"]     or 0.0)   # suspensão marcada pelo agente
         gap_in    = float(r["gap_sec"]       or 0.0)   # buracos sem coleta (> 5 min)
         start_sec = float(r["start_sec"] or 0.0)
         end_sec   = float(r["end_sec"]   or 0.0)
-        gross   = max(0.0, end_sec - start_sec)
-        afk_in  = _apply_lunch(afk_raw, _lunch)        # almoço descontado POR DIA
-        # Líquida honesta = Bruta − AFK(pós-almoço) − suspensão − buracos sem coleta.
-        # Antes, suspensão e buracos contavam como "trabalhado".
-        net     = max(0.0, gross - afk_in - sleep_in - gap_in)
-        uncov   = min(gross, sleep_in + gap_in)        # tempo sem coleta na jornada
+        gross    = max(0.0, end_sec - start_sec)
+        activity = min(focus, gross)                   # Total de atividade (= Consolidado)
+        afk_day  = afk_in + afk_after                  # AFK do dia (= Consolidado)
+        total    = activity + afk_day                  # Tempo total (= Consolidado)
+        uncov    = min(gross, sleep_in + gap_in)       # sem coleta na jornada
         coverage = (100.0 * (gross - uncov) / gross) if gross > 0 else 100.0
         days_out.append({
             "day":        r["day"],
@@ -2063,21 +2065,22 @@ def jornada(
             "end":        r["end_hm"][:5],
             "start_float": round(start_sec / 3600.0, 4),
             "end_float":   round(end_sec   / 3600.0, 4),
-            "focus_sec":  round(min(focus, gross), 1),
-            "pauses_sec": round(afk_in, 1),            # AFK na Jornada (pós-almoço)
-            "pauses_raw_sec": round(afk_raw, 1),       # AFK cru (sem desconto)
+            "focus_sec":  round(activity, 1),
+            "activity_sec": round(activity, 1),        # Total de atividade
+            "afk_day_sec":  round(afk_day, 1),         # AFK do dia (jornada + pós)
+            "total_sec":    round(total, 1),           # Tempo total coletado no dia
+            "pauses_sec": round(afk_in, 1),            # AFK na Jornada (cru)
             "sleep_sec":  round(sleep_in, 1),          # suspensão (agente >= 2.4)
             "gap_sec":    round(gap_in, 1),            # sem coleta (> 5 min)
             "coverage_pct": round(coverage, 1),
             "gross_sec":  round(gross, 1),
-            "net_sec":    round(net, 1),
             "idle_after_sec": round(afk_after, 1),     # AFK Pós Jornada
             "is_today":   (r["day"] == today_local),
         })
 
     result = {"tenant": tenant, "user_id": user_id,
               "since": since, "until": until, "tz": REPORT_TZ,
-              "lunch_discounted": True, "lunch_min": int(_lunch // 60),
+              "lunch_discounted": False, "metrics": "consolidado",
               "days": days_out}
     _cache_set(cache_key, result)
     return result
@@ -2200,7 +2203,7 @@ def productivity_consolidado(
 
     all_b = (bucket == "all")
     one_b = None if all_b else (bucket or "window")
-    cache_key = f"{tenant}:consolidado:v2:{user_id or ''}:{since}:{until}:{bucket or 'window'}"
+    cache_key = f"{tenant}:consolidado:v3:{user_id or ''}:{since}:{until}:{bucket or 'window'}"
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
@@ -2264,19 +2267,8 @@ def productivity_consolidado(
         d = dagg.setdefault(day, {"productive": 0.0, "unproductive": 0.0, "neutral": 0.0, "uncategorized": 0.0, "afk": 0.0})
         d[cat] = d.get(cat, 0.0) + (row["total_sec"] or 0.0)
 
-    # AFK exibido = AFK − almoço, descontado POR DIA LOCAL. Total cai junto (a hora
-    # de almoço não conta como tempo coletado) p/ os % fecharem.
-    _lunch = _lunch_sec(_alert_settings(tenant))
-    if _lunch > 0:
-        _afk_net, _cut_tot = 0.0, 0.0
-        for _day, _dd in dagg.items():
-            _raw = _dd.get("afk") or 0.0
-            _net = _apply_lunch(_raw, _lunch)
-            _dd["afk"] = _net
-            _afk_net  += _net
-            _cut_tot  += (_raw - _net)
-        totals["afk"]   = _afk_net
-        totals["total"] = max(0.0, totals.get("total", 0.0) - _cut_tot)
+    # DECISÃO 2026-07-13: almoço NÃO é mais descontado (AFK cru) — ver nota em
+    # user_summary. Identidade garantida: total = afk + atividade.
 
     daily = [{"day": k, **{kk: round(vv, 1) for kk, vv in v.items()}} for k, v in sorted(dagg.items())]
 
@@ -2316,7 +2308,7 @@ def productivity_timeline(
 
     all_b = (bucket == "all")
     one_b = None if all_b else (bucket or "window")
-    cache_key = f"{tenant}:timeline:v2:{user_id}:{since}:{until}:{bucket or 'window'}"
+    cache_key = f"{tenant}:timeline:v3:{user_id}:{since}:{until}:{bucket or 'window'}"
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
@@ -2404,19 +2396,8 @@ def productivity_timeline(
         run["last_access"] = run["end_ts"]
         run.pop("_k", None)
 
-    # AFK exibido = AFK − almoço, descontado POR DIA LOCAL. O total do período cai
-    # junto (a hora de almoço não conta como tempo coletado) p/ os % baterem.
-    _lunch = _lunch_sec(_alert_settings(tenant))
-    if _lunch > 0:
-        _afk_net, _cut_tot = 0.0, 0.0
-        for _day, _dd in dagg.items():
-            _raw = _dd.get("afk") or 0.0
-            _net = _apply_lunch(_raw, _lunch)
-            _dd["afk"] = _net
-            _afk_net  += _net
-            _cut_tot  += (_raw - _net)
-        totals["afk"]   = _afk_net
-        totals["total"] = max(0.0, totals.get("total", 0.0) - _cut_tot)
+    # DECISÃO 2026-07-13: almoço NÃO é mais descontado (AFK cru) — ver nota em
+    # user_summary. Identidade garantida: total = afk + atividade.
 
     daily = [{"day": k, **{kk: round(vv, 1) for kk, vv in v.items()}} for k, v in sorted(dagg.items())]
 
@@ -2547,12 +2528,11 @@ def workforce_overview(tenant: str, request: Request, days: int = 7,
         _afk_ud[(uid, _d)] = _afk_ud.get((uid, _d), 0.0) + afkv
         _e["_users"].add(uid)
 
-    # AFK exibido = AFK − almoço, descontado por (usuário, dia local), capado em 0.
-    _lunch = _lunch_sec(_alert_settings(tenant))
+    # DECISÃO 2026-07-13: almoço NÃO é mais descontado (AFK cru) — ver nota
+    # em user_summary.
     for (uid, _d), av in _afk_ud.items():
-        net = _apply_lunch(av, _lunch)
-        afk_total += net
-        _daily_map[_d]["afk"] += net
+        afk_total += av
+        _daily_map[_d]["afk"] += av
 
     daily = [{"day": v["day"], "active": v["active"], "afk": v["afk"], "users": len(v["_users"])}
              for v in sorted(_daily_map.values(), key=lambda x: x["day"])]

@@ -22,7 +22,7 @@ function applyConsolidado()   { _consShowAll = false; loadConsolidado(); }
 function loadConsolidadoAll() { _consShowAll = true;  const s = document.getElementById('consUser'); if (s) s.value = ''; loadConsolidado(); }
 
 function _renderConsPrompt() {
-  ['kpiConsTotal', 'kpiConsProd', 'kpiConsUnprod', 'kpiConsUncat', 'kpiConsNeutral'].forEach(id => {
+  ['kpiConsTotal', 'kpiConsProd', 'kpiConsUnprod', 'kpiConsUncat', 'kpiConsNeutral', 'kpiConsActive'].forEach(id => {
     const e = document.getElementById(id); if (e) e.innerHTML = '—';
   });
   if (state.charts.consDaily) { state.charts.consDaily.destroy(); state.charts.consDaily = null; }
@@ -73,19 +73,19 @@ async function loadConsolidado() {
     // incluindo AFK — "Produtivo 41%" parecia baixo e os cards nunca somavam
     // 100% (ver ANALISE_CONFLITO_SARA_0607.md).
     const active = (t.active != null) ? t.active : Math.max(0, total - afk);
-    const pctAct = v => active > 0 ? ` <small>${(v / active * 100).toFixed(0)}% do ativo</small>` : '';
     const pctTot = v => total  > 0 ? ` <small>${(v / total  * 100).toFixed(0)}%</small>` : '';
     const uncat  = (t.uncategorized || 0) + (t.neutral || 0);
-    document.getElementById('kpiConsTotal').innerHTML  = fmtSec(total);
-    document.getElementById('kpiConsProd').innerHTML   = fmtSec(t.productive   || 0) + pctAct(t.productive   || 0);
-    document.getElementById('kpiConsUnprod').innerHTML = fmtSec(t.unproductive || 0) + pctAct(t.unproductive || 0);
-    // 4º card: AFK (% do total). 5º card: Não categorizado + neutro (% do ativo)
-    // — agora Produtivo + Não-produtivo + Não categorizado fecham 100% do ativo.
-    const lbl4 = document.getElementById('kpiConsUncatLabel');
-    document.getElementById('kpiConsUncat').innerHTML = fmtSec(afk) + pctTot(afk);
-    if (lbl4) lbl4.textContent = 'AFK (ocioso)';
+    // Layout: Total no período = AFK + Total de atividade; a atividade abre em
+    // Produtivo + Não categorizado + Não-produtivo (% sobre a atividade).
+    document.getElementById('kpiConsTotal').innerHTML = fmtHM(total);
+    document.getElementById('kpiConsUncat').innerHTML = fmtHM(afk) + pctTot(afk);
+    const elA = document.getElementById('kpiConsActive');
+    if (elA) elA.innerHTML = fmtHM(active) + pctTot(active);
+    const _part = v => fmtHM(v) + (active > 0 ? ` <small>${(v / active * 100).toFixed(0)}%</small>` : '');
+    document.getElementById('kpiConsProd').innerHTML   = _part(t.productive   || 0);
+    document.getElementById('kpiConsUnprod').innerHTML = _part(t.unproductive || 0);
     const elU = document.getElementById('kpiConsNeutral');
-    if (elU) elU.innerHTML = fmtSec(uncat) + pctAct(uncat);
+    if (elU) elU.innerHTML = _part(uncat);
 
     drawConsDailyChart(d.daily || []);
     _consItems = d.items || [];
