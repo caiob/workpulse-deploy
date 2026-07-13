@@ -1919,7 +1919,7 @@ def jornada(
     if _allowed is not None and user_id not in set(_allowed):
         raise HTTPException(status_code=403, detail="colaborador fora do seu escopo")
 
-    cache_key = f"{tenant}:jornada:{user_id}:{since}:{until}"
+    cache_key = f"{tenant}:jornada:v2:{user_id}:{since}:{until}"
     cached    = _cache_get(cache_key)
     if cached is not None:
         return cached
@@ -1963,6 +1963,54 @@ def jornada(
                        WHERE a.lts > win.end_ts), 0)                            AS afk_after
             FROM afk_ev a JOIN win ON win.day = a.day
             GROUP BY a.day
+        ),
+        -- Suspensao/sono marcada pelo agente (bucket='afk', status='sleep',
+        -- agente >= 2.4): maquina dormiu DENTRO da jornada. Nao e AFK nem
+        -- trabalho — e descontado da Liquida e exibido como "sem coleta".
+        sleep_ev AS (
+            SELECT (ts::timestamptz AT TIME ZONE %(tz)s)        AS lts,
+                   (ts::timestamptz AT TIME ZONE %(tz)s)::date  AS day,
+                   duration_sec
+            FROM events
+            WHERE tenant_id = %(tenant)s AND user_id = %(uid)s AND bucket = 'afk'
+              AND data_json->>'status' = 'sleep'
+              AND ts::timestamptz >= %(since)s::timestamptz
+              AND ts::timestamptz <  %(until)s::timestamptz
+        ),
+        slp AS (
+            SELECT s.day,
+                   COALESCE(SUM(s.duration_sec) FILTER (
+                       WHERE s.lts >= win.start_ts AND s.lts <= win.end_ts), 0) AS sleep_in
+            FROM sleep_ev s JOIN win ON win.day = s.day
+            GROUP BY s.day
+        ),
+        -- BURACOS de cobertura: trechos > 5 min SEM NENHUM evento coletado
+        -- (janela, AFK valido ou sleep). Agente parado/suspensao sem marcador.
+        -- Antes esses trechos viravam "tempo trabalhado" na Liquida.
+        cover AS (
+            SELECT (ts::timestamptz AT TIME ZONE %(tz)s)::date  AS day,
+                   (ts::timestamptz AT TIME ZONE %(tz)s)        AS lts,
+                   (ts::timestamptz AT TIME ZONE %(tz)s)
+                       + (duration_sec || ' seconds')::interval AS lend
+            FROM events
+            WHERE tenant_id = %(tenant)s AND user_id = %(uid)s
+              AND ts::timestamptz >= %(since)s::timestamptz
+              AND ts::timestamptz <  %(until)s::timestamptz
+              AND (bucket = 'window'
+                   OR (bucket = 'afk' AND (
+                         (data_json->>'status' = 'afk' AND duration_sec <= {AFK_MAX_SEC})
+                         OR data_json->>'status' = 'sleep')))
+        ),
+        gaps AS (
+            SELECT day, SUM(EXTRACT(EPOCH FROM (lts - prev_end))) AS gap_sec
+            FROM (
+                SELECT day, lts,
+                       MAX(lend) OVER (PARTITION BY day ORDER BY lts
+                           ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS prev_end
+                FROM cover
+            ) g
+            WHERE prev_end IS NOT NULL AND lts - prev_end > interval '5 minutes'
+            GROUP BY day
         )
         SELECT to_char(win.day, 'YYYY-MM-DD')        AS day,
                to_char(win.start_ts, 'HH24:MI:SS')   AS start_hm,
@@ -1971,8 +2019,13 @@ def jornada(
                EXTRACT(EPOCH FROM (win.end_ts   - win.day::timestamp)) AS end_sec,
                win.focus_sec                         AS focus_sec,
                COALESCE(afk.afk_in, 0)               AS pauses_sec,
-               COALESCE(afk.afk_after, 0)            AS afk_after_sec
-        FROM win LEFT JOIN afk ON afk.day = win.day
+               COALESCE(afk.afk_after, 0)            AS afk_after_sec,
+               COALESCE(slp.sleep_in, 0)             AS sleep_sec,
+               COALESCE(gaps.gap_sec, 0)             AS gap_sec
+        FROM win
+        LEFT JOIN afk  ON afk.day  = win.day
+        LEFT JOIN slp  ON slp.day  = win.day
+        LEFT JOIN gaps ON gaps.day = win.day
         ORDER BY win.day
     """
     params = {"tz": REPORT_TZ, "tenant": tenant, "uid": user_id,
@@ -1984,15 +2037,26 @@ def jornada(
         ZoneInfo(REPORT_TZ)
     ).date().isoformat() if ZoneInfo else None
 
+    # Desconto de almoço agora é feito AQUI (servidor) — o frontend não desconta
+    # mais (era duplicado em wp-jornada.js; ver ANALISE_CONFLITO_SARA_0607.md).
+    _lunch = _lunch_sec(_alert_settings(tenant))
+
     days_out = []
     for r in rows:
         focus     = float(r["focus_sec"]     or 0.0)   # soma das janelas (tempo ativo)
-        afk_in    = float(r["pauses_sec"]    or 0.0)   # AFK dentro da jornada (início→fim)
+        afk_raw   = float(r["pauses_sec"]    or 0.0)   # AFK dentro da jornada (início→fim)
         afk_after = float(r["afk_after_sec"] or 0.0)   # AFK após a última coleta de tela
+        sleep_in  = float(r["sleep_sec"]     or 0.0)   # suspensão marcada pelo agente
+        gap_in    = float(r["gap_sec"]       or 0.0)   # buracos sem coleta (> 5 min)
         start_sec = float(r["start_sec"] or 0.0)
         end_sec   = float(r["end_sec"]   or 0.0)
-        gross  = max(0.0, end_sec - start_sec)
-        net    = max(0.0, gross - afk_in)              # Líquida = Bruta − AFK na Jornada
+        gross   = max(0.0, end_sec - start_sec)
+        afk_in  = _apply_lunch(afk_raw, _lunch)        # almoço descontado POR DIA
+        # Líquida honesta = Bruta − AFK(pós-almoço) − suspensão − buracos sem coleta.
+        # Antes, suspensão e buracos contavam como "trabalhado".
+        net     = max(0.0, gross - afk_in - sleep_in - gap_in)
+        uncov   = min(gross, sleep_in + gap_in)        # tempo sem coleta na jornada
+        coverage = (100.0 * (gross - uncov) / gross) if gross > 0 else 100.0
         days_out.append({
             "day":        r["day"],
             "start":      r["start_hm"][:5],
@@ -2000,7 +2064,11 @@ def jornada(
             "start_float": round(start_sec / 3600.0, 4),
             "end_float":   round(end_sec   / 3600.0, 4),
             "focus_sec":  round(min(focus, gross), 1),
-            "pauses_sec": round(afk_in, 1),            # AFK na Jornada
+            "pauses_sec": round(afk_in, 1),            # AFK na Jornada (pós-almoço)
+            "pauses_raw_sec": round(afk_raw, 1),       # AFK cru (sem desconto)
+            "sleep_sec":  round(sleep_in, 1),          # suspensão (agente >= 2.4)
+            "gap_sec":    round(gap_in, 1),            # sem coleta (> 5 min)
+            "coverage_pct": round(coverage, 1),
             "gross_sec":  round(gross, 1),
             "net_sec":    round(net, 1),
             "idle_after_sec": round(afk_after, 1),     # AFK Pós Jornada
@@ -2008,7 +2076,9 @@ def jornada(
         })
 
     result = {"tenant": tenant, "user_id": user_id,
-              "since": since, "until": until, "tz": REPORT_TZ, "days": days_out}
+              "since": since, "until": until, "tz": REPORT_TZ,
+              "lunch_discounted": True, "lunch_min": int(_lunch // 60),
+              "days": days_out}
     _cache_set(cache_key, result)
     return result
 
@@ -2130,7 +2200,7 @@ def productivity_consolidado(
 
     all_b = (bucket == "all")
     one_b = None if all_b else (bucket or "window")
-    cache_key = f"{tenant}:consolidado:{user_id or ''}:{since}:{until}:{bucket or 'window'}"
+    cache_key = f"{tenant}:consolidado:v2:{user_id or ''}:{since}:{until}:{bucket or 'window'}"
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
@@ -2143,6 +2213,11 @@ def productivity_consolidado(
         where.append("user_id=%s"); args.append(user_id)
     elif allowed is not None:
         where.append("user_id = ANY(%s)"); args.append(allowed)
+    # Regra ÚNICA de AFK (igual à jornada): só status='afk' e <= AFK_MAX_SEC.
+    # Exclui marcadores not-afk, suspensão (status='sleep') e AFK gigante —
+    # antes entravam no total e divergiam da aba Jornada.
+    where.append(f"(bucket <> 'afk' OR (data_json->>'status' = 'afk'"
+                 f" AND duration_sec <= {AFK_MAX_SEC}))")
     wc = " AND ".join(where)
 
     with db() as c:
@@ -2205,6 +2280,7 @@ def productivity_consolidado(
 
     daily = [{"day": k, **{kk: round(vv, 1) for kk, vv in v.items()}} for k, v in sorted(dagg.items())]
 
+    totals["active"] = max(0.0, totals.get("total", 0.0) - totals.get("afk", 0.0))
     result = {
         "tenant": tenant, "since": since, "until": until,
         "totals": {k: round(v, 1) for k, v in totals.items()},
@@ -2240,7 +2316,7 @@ def productivity_timeline(
 
     all_b = (bucket == "all")
     one_b = None if all_b else (bucket or "window")
-    cache_key = f"{tenant}:timeline:{user_id}:{since}:{until}:{bucket or 'window'}"
+    cache_key = f"{tenant}:timeline:v2:{user_id}:{since}:{until}:{bucket or 'window'}"
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
@@ -2249,6 +2325,9 @@ def productivity_timeline(
     args: list = [tenant, user_id, since, until]
     if not all_b:
         where.append("bucket=%s"); args.append(one_b)
+    # Regra ÚNICA de AFK (igual à jornada/consolidado): ver comentário lá.
+    where.append(f"(bucket <> 'afk' OR (data_json->>'status' = 'afk'"
+                 f" AND duration_sec <= {AFK_MAX_SEC}))")
     wc = " AND ".join(where)
 
     with db() as c:
@@ -2341,6 +2420,7 @@ def productivity_timeline(
 
     daily = [{"day": k, **{kk: round(vv, 1) for kk, vv in v.items()}} for k, v in sorted(dagg.items())]
 
+    totals["active"] = max(0.0, totals.get("total", 0.0) - totals.get("afk", 0.0))
     result = {
         "tenant": tenant, "since": since, "until": until, "timeline": True,
         "totals": {k: round(v, 1) for k, v in totals.items()},

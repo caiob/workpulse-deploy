@@ -1,0 +1,937 @@
+﻿{
+    "tenant":  "0292843554376",
+    "since":  "2026-07-06T14:03:12.7468259Z",
+    "until":  "2026-07-13T14:03:13.551701+00:00",
+    "users":  [
+                  {
+                      "user_id":  "asaptech-note-c73",
+                      "name":  "Giovanna GalvÃ£o",
+                      "total":  29069,
+                      "afk_events":  17380,
+                      "dups":  5,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  63.81,
+                      "afk_gt_1h":  1
+                  },
+                  {
+                      "user_id":  "asapcard-note-501",
+                      "name":  "Igor Simon",
+                      "total":  10620,
+                      "afk_events":  10215,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asapcard-note-byh",
+                      "name":  "Alfredo ConceiÃ§ao",
+                      "total":  151,
+                      "afk_events":  1,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asapcard-note-c8k",
+                      "name":  "JoÃ£o Zauza",
+                      "total":  21244,
+                      "afk_events":  14881,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asapcard-note-g3j",
+                      "name":  "Eduardo Silvestre",
+                      "total":  16059,
+                      "afk_events":  6313,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asapcard-note-h0b",
+                      "name":  "Yann Stinger",
+                      "total":  15341,
+                      "afk_events":  2465,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asapcard-note-vyy",
+                      "name":  "Alan Penteado",
+                      "total":  16588,
+                      "afk_events":  4892,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-168",
+                      "name":  "Alisson Magalhaes",
+                      "total":  22850,
+                      "afk_events":  13435,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-1mm",
+                      "name":  "Marco Antonio",
+                      "total":  28277,
+                      "afk_events":  9503,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-1n5",
+                      "name":  "Jessica Guardize",
+                      "total":  35052,
+                      "afk_events":  25589,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.53,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-1ntz3",
+                      "name":  "Jamilson Melo",
+                      "total":  24094,
+                      "afk_events":  17749,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-1p2",
+                      "name":  "asaptech-note-1p2",
+                      "total":  361,
+                      "afk_events":  183,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-1p4",
+                      "name":  "Wanderson Silva",
+                      "total":  15083,
+                      "afk_events":  4382,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-1pd",
+                      "name":  "Carlos Montoia",
+                      "total":  26538,
+                      "afk_events":  15967,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.03,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-1pe",
+                      "name":  "Thiago Rocha",
+                      "total":  15356,
+                      "afk_events":  5478,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-1q8",
+                      "name":  "Isabella Carvalho",
+                      "total":  22088,
+                      "afk_events":  14539,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.07,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-1qf",
+                      "name":  "Gleyfeson dos Santos",
+                      "total":  21155,
+                      "afk_events":  14668,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-1vh-k",
+                      "name":  "Kaique Arraias",
+                      "total":  16999,
+                      "afk_events":  8999,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-1xl",
+                      "name":  "Rodrigo Almeida",
+                      "total":  26704,
+                      "afk_events":  22581,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.03,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-20qy3",
+                      "name":  "Wilton Cesar",
+                      "total":  20227,
+                      "afk_events":  4944,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-33l",
+                      "name":  "Sara Salvador",
+                      "total":  15468,
+                      "afk_events":  6363,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-360",
+                      "name":  "Kendal Katharine",
+                      "total":  14804,
+                      "afk_events":  3188,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-368",
+                      "name":  "Eduardo Torres",
+                      "total":  14392,
+                      "afk_events":  9321,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-36a",
+                      "name":  "Luciano Sadagurcshi",
+                      "total":  28396,
+                      "afk_events":  14241,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.03,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-36b",
+                      "name":  "Alex Barreto",
+                      "total":  21600,
+                      "afk_events":  6031,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-390",
+                      "name":  "Jose Geraldo Duarte",
+                      "total":  14052,
+                      "afk_events":  7826,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-396",
+                      "name":  "Bruno Alliguieri Dias",
+                      "total":  15454,
+                      "afk_events":  7587,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-397",
+                      "name":  "Luis Sibim",
+                      "total":  13801,
+                      "afk_events":  3442,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.01,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-398",
+                      "name":  "Jaqueline Santana",
+                      "total":  25690,
+                      "afk_events":  12361,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.04,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-3dr",
+                      "name":  "Lucas Henrique",
+                      "total":  17080,
+                      "afk_events":  8347,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-3ee",
+                      "name":  "Solange Lemos",
+                      "total":  6519,
+                      "afk_events":  6519,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.03,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-3ev",
+                      "name":  "Amanda Marone",
+                      "total":  13809,
+                      "afk_events":  2717,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-3ew",
+                      "name":  "Luan Nabarrete",
+                      "total":  56196,
+                      "afk_events":  35780,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "Asaptech-note-3ey",
+                      "name":  "Anderson Palmeira",
+                      "total":  11763,
+                      "afk_events":  4503,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-3tz3",
+                      "name":  "Joao Vitor",
+                      "total":  63958,
+                      "afk_events":  55132,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.01,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-501",
+                      "name":  "asaptech-note-501",
+                      "total":  8829,
+                      "afk_events":  5385,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.01,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-50s8qy3",
+                      "name":  "Lucas Pereira",
+                      "total":  15197,
+                      "afk_events":  8564,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note--53",
+                      "name":  "asaptech-note--53",
+                      "total":  16,
+                      "afk_events":  2,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-6kly3",
+                      "name":  "Antonio Lima",
+                      "total":  37543,
+                      "afk_events":  29830,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-6pn",
+                      "name":  "Edgard Nascimento",
+                      "total":  6553,
+                      "afk_events":  1317,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-70qy3",
+                      "name":  "Lucas Bezerra",
+                      "total":  14479,
+                      "afk_events":  8149,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-8en",
+                      "name":  "Leandro Job",
+                      "total":  110529,
+                      "afk_events":  101884,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.03,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-9kv",
+                      "name":  "Veronica Santos",
+                      "total":  41118,
+                      "afk_events":  33508,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-bs9",
+                      "name":  "Alan Lescano",
+                      "total":  893,
+                      "afk_events":  174,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-bve",
+                      "name":  "Bruno Almeida",
+                      "total":  21001,
+                      "afk_events":  7112,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.03,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-bx9",
+                      "name":  "Dami Augusto",
+                      "total":  13761,
+                      "afk_events":  4043,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-by0",
+                      "name":  "Vinicius Lemes",
+                      "total":  9742,
+                      "afk_events":  2955,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-byy",
+                      "name":  "Rodrigo Fernando",
+                      "total":  20327,
+                      "afk_events":  13527,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-bz9",
+                      "name":  "Williams de Pietro",
+                      "total":  22295,
+                      "afk_events":  15396,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  85.43,
+                      "afk_gt_1h":  2
+                  },
+                  {
+                      "user_id":  "asaptech-note-c06",
+                      "name":  "Carina Jamile",
+                      "total":  13529,
+                      "afk_events":  4606,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.01,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-c23",
+                      "name":  "Paulo Teixeira",
+                      "total":  14784,
+                      "afk_events":  10771,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-c2f",
+                      "name":  "Alexandre Gomes",
+                      "total":  30110,
+                      "afk_events":  15895,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  61.35,
+                      "afk_gt_1h":  1
+                  },
+                  {
+                      "user_id":  "asaptech-note-c32",
+                      "name":  "Rodrigo Rios",
+                      "total":  14694,
+                      "afk_events":  5030,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.03,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-c5k",
+                      "name":  "Matheus Julio Santana",
+                      "total":  18310,
+                      "afk_events":  10773,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  26.87,
+                      "afk_gt_1h":  2
+                  },
+                  {
+                      "user_id":  "asaptech-note-c5y",
+                      "name":  "Matheus Sant Anna",
+                      "total":  11072,
+                      "afk_events":  3632,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  1.2,
+                      "afk_gt_1h":  1
+                  },
+                  {
+                      "user_id":  "asaptech-note-c66",
+                      "name":  "Mauricio Aparecido",
+                      "total":  18439,
+                      "afk_events":  6054,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-c8v",
+                      "name":  "Gabriel Elias",
+                      "total":  17779,
+                      "afk_events":  10075,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-c8y",
+                      "name":  "David Fernandes",
+                      "total":  11326,
+                      "afk_events":  2215,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-d9501",
+                      "name":  "Bruno Vitello",
+                      "total":  96875,
+                      "afk_events":  90035,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-dm3",
+                      "name":  "Caio Ferreira",
+                      "total":  45587,
+                      "afk_events":  40211,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-fm3",
+                      "name":  "Joao Frugis",
+                      "total":  35846,
+                      "afk_events":  29800,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-gbr",
+                      "name":  "Keven Mario",
+                      "total":  16555,
+                      "afk_events":  3980,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-gp9",
+                      "name":  "Frederico Capozzoli",
+                      "total":  17345,
+                      "afk_events":  5356,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.03,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-gts",
+                      "name":  "Leandro SÃ¡",
+                      "total":  25921,
+                      "afk_events":  15417,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.25,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-h0a",
+                      "name":  "Luiz Guilherme dos Santos",
+                      "total":  19114,
+                      "afk_events":  11249,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-jnz",
+                      "name":  "Vinicius Guedes",
+                      "total":  17022,
+                      "afk_events":  7370,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-kr0",
+                      "name":  "Kevin Elias",
+                      "total":  47275,
+                      "afk_events":  37310,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-krq",
+                      "name":  "Maxwel Bueno",
+                      "total":  13886,
+                      "afk_events":  2534,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-krv",
+                      "name":  "Joseane Oliveira",
+                      "total":  19892,
+                      "afk_events":  10906,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.03,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-krz",
+                      "name":  "Noeli Soares",
+                      "total":  25892,
+                      "afk_events":  8756,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.03,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-ktr",
+                      "name":  "Viviana Oliveira",
+                      "total":  16624,
+                      "afk_events":  4554,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-nfe",
+                      "name":  "Angelo Matheus",
+                      "total":  12332,
+                      "afk_events":  7603,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-nyx",
+                      "name":  "Pedro Oliveira",
+                      "total":  44319,
+                      "afk_events":  33758,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.04,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-p02",
+                      "name":  "Ricardo Schmid",
+                      "total":  872,
+                      "afk_events":  242,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-qn7",
+                      "name":  "Jacob Darrossi",
+                      "total":  56414,
+                      "afk_events":  44555,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.01,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-qy3",
+                      "name":  "Ravi Leal",
+                      "total":  17951,
+                      "afk_events":  6198,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-sy3",
+                      "name":  "Marcel Bellini",
+                      "total":  29417,
+                      "afk_events":  17372,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  14.45,
+                      "afk_gt_1h":  2
+                  },
+                  {
+                      "user_id":  "asaptech-note-t67",
+                      "name":  "Giovanna Teodoro",
+                      "total":  15761,
+                      "afk_events":  8402,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.03,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-t7f",
+                      "name":  "Franceli Cristina",
+                      "total":  31384,
+                      "afk_events":  19250,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-t8q",
+                      "name":  "Camila Lais",
+                      "total":  17864,
+                      "afk_events":  4691,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-tz3",
+                      "name":  "Lucas Daniel",
+                      "total":  17189,
+                      "afk_events":  12643,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-v0s",
+                      "name":  "Marcos Vinicius Cabral",
+                      "total":  66764,
+                      "afk_events":  37590,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-vsw",
+                      "name":  "Andre Queiroz",
+                      "total":  24548,
+                      "afk_events":  13725,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  26.81,
+                      "afk_gt_1h":  2
+                  },
+                  {
+                      "user_id":  "asaptech-note-vta",
+                      "name":  "Caio Batalha",
+                      "total":  10203,
+                      "afk_events":  3448,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "Asaptech-note-vx4",
+                      "name":  "Michel Candido",
+                      "total":  39214,
+                      "afk_events":  27411,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-vxa",
+                      "name":  "Igor Samuel",
+                      "total":  13661,
+                      "afk_events":  6870,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-wnd",
+                      "name":  "Joao Carlos",
+                      "total":  31261,
+                      "afk_events":  16973,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.03,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-wwa",
+                      "name":  "Fernando Haddad",
+                      "total":  20453,
+                      "afk_events":  5787,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.04,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-wwl",
+                      "name":  "Karen Gomes",
+                      "total":  22686,
+                      "afk_events":  6576,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.03,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asaptech-note-zqy",
+                      "name":  "Tamyris Norato",
+                      "total":  7048,
+                      "afk_events":  6299,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  14.07,
+                      "afk_gt_1h":  2
+                  },
+                  {
+                      "user_id":  "asaptech-temp",
+                      "name":  "asaptech-temp",
+                      "total":  879,
+                      "afk_events":  427,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.01,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "asapcard-note-37k",
+                      "name":  "Iesley Bezerra",
+                      "total":  13683,
+                      "afk_events":  7382,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.0,
+                      "afk_gt_1h":  0
+                  },
+                  {
+                      "user_id":  "DESKTOP-N1Q4US4",
+                      "name":  "Caio Desenvolvimento",
+                      "total":  4384,
+                      "afk_events":  2259,
+                      "dups":  0,
+                      "dup_pct":  0.0,
+                      "max_afk_h":  0.02,
+                      "afk_gt_1h":  0
+                  }
+              ]
+}

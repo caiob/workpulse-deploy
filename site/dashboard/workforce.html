@@ -697,7 +697,7 @@
       <button class="ghost" onclick="applyConsolidado()">↻ Buscar</button>
     </div>
 
-    <div class="kpi-row">
+    <div class="kpi-row" style="grid-template-columns:repeat(5,1fr)">
       <div class="kpi-card" style="border-top:3px solid var(--primary)">
         <div class="kpi-val" id="kpiConsTotal">—</div><div class="kpi-label">Tempo total no período</div>
       </div>
@@ -708,7 +708,10 @@
         <div class="kpi-val" id="kpiConsUnprod">—</div><div class="kpi-label">Não-produtivo</div>
       </div>
       <div class="kpi-card" style="border-top:3px solid var(--warn)">
-        <div class="kpi-val" id="kpiConsUncat">—</div><div class="kpi-label" id="kpiConsUncatLabel">Não categorizado</div>
+        <div class="kpi-val" id="kpiConsUncat">—</div><div class="kpi-label" id="kpiConsUncatLabel">AFK (ocioso)</div>
+      </div>
+      <div class="kpi-card" style="border-top:3px solid #94a3b8">
+        <div class="kpi-val" id="kpiConsNeutral">—</div><div class="kpi-label">Não categorizado</div>
       </div>
     </div>
 

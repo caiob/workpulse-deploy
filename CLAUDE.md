@@ -930,6 +930,57 @@ um log local que ajude TI a antecipar e implantar resiliência, SEM onerar CPU n
   data\logs\`. API validada na doc oficial (tracing-appender 0.2.5). SEM toolchain Rust no ambiente
   de edição → `cargo build`/reempacotar MSI/.deb é na máquina do usuário.
 
+### Agente 2.3.6 — modo debug persistente via `log_level` no agent.conf (2026-07-10)
+DEMANDA: ligar/desligar debug pra deixar o dia todo e analisar quando precisar, sem `RUST_LOG`
+(chato em serviço/background) e sem recompilar.
+- `config.rs`: novo campo `log_level: String` (default `"info"`) no `Config` (serde(default) →
+  retrocompatível, agent.conf antigo assume info). Nova `pub fn read_log_level()` — lê SÓ o nível do
+  agent.conf de forma tolerante (error|warn|info|debug|trace; inválido/ausente → "info"), p/ inicializar
+  o log antes do load completo.
+- `main.rs` `init_logging()`: base do filtro passou a ser `EnvFilter::try_from_default_env()
+  .unwrap_or_else(|| EnvFilter::new(config::read_log_level()))`. **Prioridade: RUST_LOG > log_level
+  (agent.conf) > info.** Boot loga "Nivel de log: <x> ..." p/ confirmar. Uso: `log_level = "debug"` +
+  reiniciar o agente → debug o dia todo no arquivo; voltar a "info" desliga.
+- Versão: Cargo 2.3.4 → **2.3.6** (a build do usuário já estava em 2.3.5 — que tinha o log em arquivo
+  mas NÃO o `log_level`; por isso "não pegou" ao editar o agent.conf: serde ignora chave desconhecida).
+  Precisa recompilar/reempacotar (`-Version 2.3.6`) p/ o campo valer.
+- (2026-07-10) O `agent.conf` gerado agora JÁ traz o campo com comentário das opções, nos 3 geradores:
+  template do `config.rs` (`load_or_create`), `windows/build-msi.ps1` e `linux/build-deb.sh`:
+  `# log_level: error | warn | info | debug | trace ...` + `log_level = "info"`.
+- COMPORTAMENTO: o nível é lido UMA vez no boot (`init_logging`) → mudar exige **reiniciar** o agente
+  (não é hot-reload). Reler o arquivo seria barato (arquivo minúsculo), mas manteríamos restart por
+  simplicidade/robustez; live-reload via `tracing_subscriber::reload` é possível se pedirem.
+- DOC atualizado: `DOCS/Caderno_Testes_Agente_WorkPulse.docx` (ref. 2.3.6): Seção 4 com caminhos dos
+  logs, Seção 9 reescrita (log em arquivo automático + modo debug), tabela de mensagens-chave com
+  `Logs locais em`/`Nivel de log`/`Conectado a ...`/`PANIC`, e removido o bloco obsoleto "BUTA A
+  MAQUINA" (workaround manual de autostart, superado pelo log built-in). Salvo como
+  `Caderno_Testes_Agente_WorkPulse_2.3.6.docx` (arquivo original estava travado/aberto).
+
+### Agente — formato/timezone do timestamp do log (2026-07-10)
+O log saía em UTC com `T` e fração de segundo (`2026-07-10T14:26:12.001407Z`). Trocado para horário
+LOCAL da máquina, limpo: `2026-07-10 14:26:12` (espaço, sem fração, sem `Z`).
+- Cargo.toml: `tracing-subscriber` ganhou a feature `chrono` (já dependíamos de `chrono`).
+- `main.rs` `init_logging()`: `let timer = fmt::time::ChronoLocal::new("%Y-%m-%d %H:%M:%S".into())`
+  aplicado com `.with_timer(timer.clone())` nas DUAS camadas (console e arquivo). ChronoLocal usa
+  `chrono::Local` → fuso da máquina (em Brasília, -3). Vai junto na build 2.3.6.
+
+### Agente — instância única (uma por usuário) (2026-07-10)
+DEMANDA: às vezes a máquina rodava com 2 agentes ao mesmo tempo (autostart duplo etc.) → SQLite
+duplicado / eventos em dobro. Além do WatchDog, tratar no próprio agente.
+- Cargo.toml: dep `fs2 = "0.4"` (lock de arquivo advisory multiplataforma: `flock` Unix / `LockFile`
+  Windows; liberado pelo SO no fim do processo, inclusive em `panic=abort` → nunca fica preso).
+- `main.rs`: helper `acquire_single_instance_lock(data_dir)` → trava exclusiva em
+  `<data_dir>/agent.lock`. Chamado logo após carregar a config (antes de abrir o SQLite). Retorna
+  Ok(Some(File)) [mantido vivo em `_instance_lock` no main], Ok(None) [outra instância detém →
+  `warn` + `return Ok(())`], ou Err [falha de I/O ao criar/abrir → segue SEM proteção, não suprime
+  coleta]. Contenção detectada por `ErrorKind::WouldBlock` ou raw_os_error 33/11/35/13.
+- É POR USUÁRIO de propósito (a pasta de dados é por usuário): dois usuários distintos, cada um com
+  seu agente, continua correto — cada sessão coleta a sua.
+- Validação: `cargo build` é na máquina do usuário (sem toolchain aqui). O verificador Python de
+  balanceamento dá falso positivo por causa das strings multi-linha `\`-continuadas do bloco de
+  heartbeat (pré-existentes); provado balance-neutro (stripped==full) e a 2.3.5 compila. Blocos
+  novos conferidos à mão. Vai junto na build 2.3.6.
+
 ### Novos env knobs
 `WORKPULSE_INGEST_BUST_SEC` (60), `WORKPULSE_ADMIN_STATS_TTL` (45). Já existentes:
 `WORKPULSE_CACHE_TTL` (300), `WORKPULSE_AFK_MAX_SEC` (10800), `WORKPULSE_ROLLUP_SEC` (300),

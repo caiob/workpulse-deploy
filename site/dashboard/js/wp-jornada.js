@@ -73,17 +73,28 @@ function _jorBuildJornada(d) {
   const base  = new Date(y, m - 1, dd, 0, 0, 0, 0);        // meia-noite local
   const start = new Date(base.getTime() + (d.start_float || 0) * 3600000);
   const end   = new Date(base.getTime() + (d.end_float   || 0) * 3600000);
-  // Desconta o almoço (config dos Alertas, padrão 60 min) das pausas/AFK do dia.
-  // REGRA: só desconta se o AFK do dia for >= o almoço; abaixo disso mantém o cru
-  // (descontar zeraria dias com pouca pausa e pareceria erro de coleta).
-  const _ls   = _jorLunchSec();
-  const _raw  = d.pauses_sec || 0;
-  const pauses = _raw >= _ls ? (_raw - _ls) : _raw;
+  // O almoço agora é descontado NO SERVIDOR (pauses_sec já vem líquido) e a
+  // Líquida (net_sec) também já desconta suspensão (sleep_sec) e buracos sem
+  // coleta (gap_sec). O desconto client-side foi REMOVIDO — era aplicado em
+  // duplicidade com outras telas (ver ANALISE_CONFLITO_SARA_0607.md).
+  // Fallback: servidor antigo (sem gap_sec) → desconta o almoço aqui como antes.
+  const legacy = (d.gap_sec == null);
+  let pauses = d.pauses_sec || 0;
+  if (legacy) {
+    const _ls = _jorLunchSec();
+    pauses = pauses >= _ls ? (pauses - _ls) : pauses;
+  }
+  const gross = Math.max(0, (end - start) / 1000);
+  const uncov = (d.sleep_sec || 0) + (d.gap_sec || 0);   // sem coleta na jornada
+  const net   = legacy ? Math.max(0, gross - pauses) : (d.net_sec || 0);
   return {
     day:       d.day,
     start:     start,
     end:       end,
     pausesSec: pauses,
+    uncovSec:  uncov,
+    netSec:    net,
+    coveragePct: (d.coverage_pct != null) ? d.coverage_pct : null,
     focusSec:  d.focus_sec  || 0,
     idleAfterSec: d.idle_after_sec || 0,
     isToday:   !!d.is_today,
@@ -174,7 +185,13 @@ function _jorComputeFromEvents(windowEvents, afkEvents) {
   // capado em 0 → a Líquida sobe pelo valor perdoado. Consistente com as outras telas.
   const lunchSec = _jorLunchSec();
   return Object.values(byDay)
-    .map(j => ({ ...j, pausesSec: (j.pausesSec >= lunchSec ? j.pausesSec - lunchSec : j.pausesSec), isToday: j.day === todayKey }))
+    .map(j => {
+      const pauses = (j.pausesSec >= lunchSec ? j.pausesSec - lunchSec : j.pausesSec);
+      const gross  = Math.max(0, (j.end - j.start) / 1000);
+      // Fallback sem servidor: não detecta buracos de coleta (uncov = 0).
+      return { ...j, pausesSec: pauses, uncovSec: 0, netSec: Math.max(0, gross - pauses),
+               coveragePct: null, isToday: j.day === todayKey };
+    })
     .sort((a, b) => a.day.localeCompare(b.day));
 }
 
@@ -259,7 +276,7 @@ function _jorRenderKpis(jornadas) {
     return;
   }
 
-  const avgWorkSec  = completos.reduce((a, j) => a + Math.max(0, (j.end - j.start) / 1000 - j.pausesSec), 0) / completos.length;
+  const avgWorkSec  = completos.reduce((a, j) => a + (j.netSec != null ? j.netSec : Math.max(0, (j.end - j.start) / 1000 - j.pausesSec)), 0) / completos.length;
   const avgPauseSec = completos.reduce((a, j) => a + j.pausesSec, 0) / completos.length;
   const avgStartMin = completos.reduce((a, j) => a + j.start.getHours() * 60 + j.start.getMinutes(), 0) / completos.length;
   const avgEndMin   = completos.reduce((a, j) => a + j.end.getHours()   * 60 + j.end.getMinutes(),   0) / completos.length;
@@ -287,10 +304,7 @@ function _jorDrawHoursChart(jornadas) {
       datasets: [
         {
           label: 'Tempo trabalhado',
-          data: jornadas.map(j => {
-            const gross = (j.end - j.start) / 1000;
-            return +Math.max(0, (gross - j.pausesSec) / 3600).toFixed(2);
-          }),
+          data: jornadas.map(j => +Math.max(0, (j.netSec || 0) / 3600).toFixed(2)),
           backgroundColor: 'rgba(74,222,128,.80)',
           borderRadius: 6,
           stack: 'a',
@@ -299,6 +313,15 @@ function _jorDrawHoursChart(jornadas) {
           label: 'Pausas (AFK)',
           data: jornadas.map(j => +(j.pausesSec / 3600).toFixed(2)),
           backgroundColor: 'rgba(245,158,11,.70)',
+          borderRadius: 6,
+          stack: 'a',
+        },
+        {
+          // Suspensão da máquina + trechos sem nenhum evento (> 5 min).
+          // Antes era somado ao verde como se fosse trabalho.
+          label: 'Sem coleta',
+          data: jornadas.map(j => +((j.uncovSec || 0) / 3600).toFixed(2)),
+          backgroundColor: 'rgba(148,163,184,.45)',
           borderRadius: 6,
           stack: 'a',
         },
@@ -408,7 +431,10 @@ function _jorRenderTable(jornadas) {
     const wd      = _jorWeekday(j.day);
     const ini     = _jorHHMM(j.start);
     const grossSec = (j.end - j.start) / 1000;
-    const liqSec   = Math.max(0, grossSec - j.pausesSec);
+    const liqSec   = (j.netSec != null) ? j.netSec : Math.max(0, grossSec - j.pausesSec);
+    const uncovTag = (j.uncovSec || 0) > 300
+      ? ' <small style="color:var(--text-dim)" title="Tempo dentro da jornada sem nenhuma coleta (suspensão / agente parado) — já descontado da Líquida">sem coleta ' + _jorDur(j.uncovSec) + '</small>'
+      : '';
     const todayBadge = j.isToday
       ? ' <span class="pill" style="font-size:10px;padding:2px 8px;background:rgba(108,140,255,.18);color:var(--primary);border-color:rgba(108,140,255,.4)">HOJE</span>'
       : '';
@@ -432,7 +458,7 @@ function _jorRenderTable(jornadas) {
       <td>${_jorDur(j.pausesSec)}</td>
       <td>${j.idleAfterSec > 0 ? _jorDur(j.idleAfterSec) : '<span style="color:var(--text-dim)">—</span>'}</td>
       <td style="color:var(--text-dim)">${j.isToday ? '—' : _jorDur(grossSec)}</td>
-      <td>${liq}</td>
+      <td>${liq}${uncovTag}</td>
     </tr>`;
   }).join('');
 }

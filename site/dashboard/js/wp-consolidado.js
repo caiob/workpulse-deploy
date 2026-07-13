@@ -22,7 +22,7 @@ function applyConsolidado()   { _consShowAll = false; loadConsolidado(); }
 function loadConsolidadoAll() { _consShowAll = true;  const s = document.getElementById('consUser'); if (s) s.value = ''; loadConsolidado(); }
 
 function _renderConsPrompt() {
-  ['kpiConsTotal', 'kpiConsProd', 'kpiConsUnprod', 'kpiConsUncat'].forEach(id => {
+  ['kpiConsTotal', 'kpiConsProd', 'kpiConsUnprod', 'kpiConsUncat', 'kpiConsNeutral'].forEach(id => {
     const e = document.getElementById(id); if (e) e.innerHTML = '—';
   });
   if (state.charts.consDaily) { state.charts.consDaily.destroy(); state.charts.consDaily = null; }
@@ -67,21 +67,25 @@ async function loadConsolidado() {
     const d = await api(path + '?' + params.toString());
     _consTimeline = seq;
     const t = d.totals || {};
-    const total = t.total || 0;
-    const pctOf = v => total > 0 ? ` <small>${(v / total * 100).toFixed(0)}%</small>` : '';
+    const total  = t.total || 0;
+    const afk    = t.afk   || 0;
+    // Base dos % de categoria = tempo ATIVO (total − AFK). Antes era o total
+    // incluindo AFK — "Produtivo 41%" parecia baixo e os cards nunca somavam
+    // 100% (ver ANALISE_CONFLITO_SARA_0607.md).
+    const active = (t.active != null) ? t.active : Math.max(0, total - afk);
+    const pctAct = v => active > 0 ? ` <small>${(v / active * 100).toFixed(0)}% do ativo</small>` : '';
+    const pctTot = v => total  > 0 ? ` <small>${(v / total  * 100).toFixed(0)}%</small>` : '';
+    const uncat  = (t.uncategorized || 0) + (t.neutral || 0);
     document.getElementById('kpiConsTotal').innerHTML  = fmtSec(total);
-    document.getElementById('kpiConsProd').innerHTML   = fmtSec(t.productive   || 0) + pctOf(t.productive   || 0);
-    document.getElementById('kpiConsUnprod').innerHTML = fmtSec(t.unproductive || 0) + pctOf(t.unproductive || 0);
-    // 4º card: AFK quando há tempo ocioso no resultado; senão "Não categorizado".
-    const afk  = t.afk || 0;
+    document.getElementById('kpiConsProd').innerHTML   = fmtSec(t.productive   || 0) + pctAct(t.productive   || 0);
+    document.getElementById('kpiConsUnprod').innerHTML = fmtSec(t.unproductive || 0) + pctAct(t.unproductive || 0);
+    // 4º card: AFK (% do total). 5º card: Não categorizado + neutro (% do ativo)
+    // — agora Produtivo + Não-produtivo + Não categorizado fecham 100% do ativo.
     const lbl4 = document.getElementById('kpiConsUncatLabel');
-    if (afk > 0) {
-      document.getElementById('kpiConsUncat').innerHTML = fmtSec(afk) + pctOf(afk);
-      if (lbl4) lbl4.textContent = 'AFK (ocioso)';
-    } else {
-      document.getElementById('kpiConsUncat').innerHTML = fmtSec(t.uncategorized || 0) + pctOf(t.uncategorized || 0);
-      if (lbl4) lbl4.textContent = 'Não categorizado';
-    }
+    document.getElementById('kpiConsUncat').innerHTML = fmtSec(afk) + pctTot(afk);
+    if (lbl4) lbl4.textContent = 'AFK (ocioso)';
+    const elU = document.getElementById('kpiConsNeutral');
+    if (elU) elU.innerHTML = fmtSec(uncat) + pctAct(uncat);
 
     drawConsDailyChart(d.daily || []);
     _consItems = d.items || [];
