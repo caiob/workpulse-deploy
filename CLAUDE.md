@@ -1,13 +1,56 @@
 # CLAUDE.md — WorkPulse
 
 Guidance for AI agents (Claude Code / Cowork) working on WorkPulse.
-**Read this fully before changing anything.** Last updated: 2026-06-29.
+**Read this fully before changing anything.** Last updated: 2026-07-16.
 
 > **Para o estado atual (auth e-mail/senha, papéis, Localização, Administrativo,
 > Financeiro, SMTP por tenant, motor de Alertas, etc.), leia primeiro a seção
 > "## Estado atual (2026-06-21)" no FINAL deste arquivo.** As seções estruturais
 > abaixo (Auth, Schema, API, Workers) foram atualizadas, mas o changelog detalhado
 > de cada época fica no rodapé.
+
+---
+
+## 🗂 Índice rápido (Quick Reference)
+
+**Módulos & caminhos** (raiz do repo = `workpulse-deploy/`):
+
+| Módulo | Caminho | Stack |
+|---|---|---|
+| Backend / API | `server/main.py` | FastAPI single-file (~7,1k linhas), Postgres 15 (RDS), ECS Fargate |
+| Agente | `../workpulse-agent` | Rust — **versão atual 2.3.6** |
+| Service / updater (watchdog + auto-update) | `../workpulse-service` | Rust (lê o MESMO `agent.conf`) |
+| Dashboard cliente | `site/dashboard/` (`workforce.html` + `js/wp-*.js`) | HTML + Chart.js + Leaflet, sem build |
+| Console admin (plataforma) | `site/adm/` (`admin.html` + `js/admin.js`) | idem |
+| Site institucional | `site/` (`index.html`) | estático |
+| Infra | `infra/` (`main.tf`, `variables.tf`, `terraform.tfvars`) | Terraform (Route53/ACM/CloudFront/ALB/ECS/RDS) |
+
+**Deploy** (o usuário roda os `.ps1` no PowerShell — NUNCA os `.sh`):
+
+| O quê | Comando |
+|---|---|
+| Backend (container) | `scripts/redeploy.ps1` |
+| Site (S3+CloudFront) | `scripts/publicar-site.ps1` |
+| Backend + site | `scripts/redeploy-publicar.ps1` |
+| Infra | `scripts/apply-infra.ps1` (terraform) |
+| Agente (MSI/.deb) | `workpulse-agent/windows/build-msi.ps1 -Version X.Y.Z {-LicenseKey|-EnrollCode}` · `linux/build-deb.sh` |
+
+ECS tem **deployment circuit breaker**: deploy que sobe quebrado faz **rollback** sozinho (se "subi e não pegou", checar se a task nova ficou RUNNING).
+
+**Gotchas recorrentes** (já custaram tempo — leia CRITICAL #1 abaixo):
+- **Mirror do bash trunca arquivos grandes**: `py_compile`/`node --check` do arquivo INTEIRO falha no FIM (linha ~7xxx) = **falso alarme**. Validar por SLICE (extrair a função e compilar) ou `node --check` (arquivos pequenos ok). Fonte da verdade = ferramentas Read/Edit, não o bash.
+- **OneDrive**: a pasta é a BASE local do notebook; não baixa do OneDrive, só ENVIA p/ bkp. Não discutir cache de OneDrive. `rm` via bash falha "Operation not permitted" → usar `allow_cowork_file_delete`.
+- **Sem toolchain no sandbox**: sem `cargo`/`pydantic`/`psql`. Rust/Python compilam na máquina do usuário. Validar por slice/lógica isolada; confirmar APIs de crate na doc (docs.rs) antes de usar.
+- **Cache-busting do dashboard**: cada `js/wp-*.js` tem `?v=N` em `workforce.html` (fonte da verdade das versões). Bump ao alterar um JS.
+
+**Índice de features/incidentes** (detalhe no changelog ao final; mais recente primeiro):
+- 2026-07-16 — Apelido (alias) de IP na Localização (Admin Master); tabela `ip_aliases`, `/v1/ip-aliases`.
+- 2026-07-15 — Incidente 1 usuário: `/v1/ingest` 500 infinito. Diagnóstico: buffer LIMPO; era agente antigo/backlog desde 01/06 → resolvido reinstalando ZERADO (apagar `%APPDATA%\WorkPulse\Agent\`). `_strip_nul` (NUL em JSONB) fica como hardening.
+- 2026-07-10 — Agente 2.3.6: `log_level` no `agent.conf` (toggle debug s/ recompilar; RUST_LOG>arquivo>info); timestamp do log em horário LOCAL limpo; **instância única** (lock `agent.lock` via `fs2`); `Conectado a <host> — sincronizados N` em INFO.
+- 2026-07-03 — Agente 2.3.x: **log local em arquivo** (rotação diária, retenção ~7d, `tracing-appender`, writer não-bloqueante) + panic/crash log. Caderno de testes atualizado (`DOCS/Caderno_Testes_Agente_WorkPulse.docx`).
+- 2026-07-03 — Desconto de almoço no AFK (config nos Alertas, por dia local, só desconta se AFK do dia ≥ almoço); Consolidado no menu de Pessoas; paginação 3/pág no card de Departamentos (Visão Geral).
+- 2026-06-2x — Gestão de Departamentos (tela + atribuição em lote); Férias (rótulo de ausência); download do agente no Suporte; rollup `ingest_hour`; perf Alertas/Consolidada; `sync_interval_sec` configurável.
+- **Troca de domínio (on-premise/white-label)**: guia completo em `DOCS/WorkPulse_Guia_Troca_de_Dominio.md` (TL;DR: `infra/terraform.tfvars` → `public_domain`; agente/service via `server_url` no `agent.conf`; web via `wp-core.js`/`config.js`; nada recompila).
 
 ---
 
@@ -980,6 +1023,42 @@ duplicado / eventos em dobro. Além do WatchDog, tratar no próprio agente.
   balanceamento dá falso positivo por causa das strings multi-linha `\`-continuadas do bloco de
   heartbeat (pré-existentes); provado balance-neutro (stripped==full) e a 2.3.5 compila. Blocos
   novos conferidos à mão. Vai junto na build 2.3.6.
+
+### BUG /v1/ingest — 500 infinito por NUL ( ) no título (2026-07-15)
+SINTOMA: 1 usuário (de 100+) parou de sincronizar; agente saudável (conecta, licença/config OK),
+mas TODO POST `/v1/ingest` → `500 Internal Server Error`, com backoff crescente (2→4→…→256s). Log do
+agente (v2.3.6, já com log em arquivo) foi o que permitiu ver isso.
+- CAUSA: um evento com caractere **NUL (` `)** no título/app (alguns apps do Windows geram
+  títulos com byte nulo). O PostgreSQL **rejeita ` ` em JSONB e TEXT** → o INSERT do lote
+  estoura (exceção não tratada → 500). Como o agente só apaga o lote **após sucesso**, ele reenviava
+  o MESMO lote pra sempre → coleta travada só daquele usuário. Os outros 100 tinham lotes "limpos".
+- FIX (backend, `main.py`): helper `_strip_nul(v)` remove ` ` de strings recursivamente
+  (str/dict/list). Aplicado em `ingest` a: `user_id`, `device_id`, `login_user`, campos do device
+  (hostname/os_version/agent_version), e principalmente `Json(_strip_nul(e.data))` + `e.bucket`/`event_id`.
+- DEPLOY: só backend (`redeploy.ps1`).
+- ATUALIZAÇÃO (2026-07-15b): o fix de NUL **NÃO resolveu** este caso. Análise do buffer real da máquina
+  (`buffer_solange.db`, 127k eventos / 20MB, desde 01/06) mostrou o dado **100% limpo**: sem NUL, sem
+  surrogate solto, JSON válido, sem event_id duplicado no lote, colunas todas TEXT, ts nano igual ao de
+  todos. Ou seja, NÃO era dado envenenado. Único diferencial: eventos ANTIGOS de um agente que foi
+  atualizado ao longo do tempo — provável formato/comportamento antigo de request rejeitado pelo servidor
+  atual, travado desde 01/06 (buffer nunca drenou, cresceu). RESOLUÇÃO adotada pelo usuário: **remover o
+  agente + APAGAR a pasta de dados** `%APPDATA%\WorkPulse\Agent\` (a desinstalação do MSI NÃO apaga o
+  buffer!) + reinstalar 2.3.6 zerado. O `_strip_nul` fica como hardening defensivo (NUL em JSONB é 500
+  real para outros dados), mas não era a causa aqui. Se recorrer em agente NOVO/zerado → pegar o
+  traceback no CloudWatch (causa-raiz não foi isolada porque o dado estava limpo).
+
+### Apelido (alias) de IP na tela de Localização — Admin Master (2026-07-16)
+DEMANDA: em "Coletas → Localização", trocar o rótulo de geo de IPs conhecidos por um nome amigável
+(ex.: `200.236.217.18` → "Escritorio Asaptech" no lugar de "São Paulo, ..."). Modal só p/ Admin Master.
+- BACKEND (`main.py`): tabela `ip_aliases (tenant_id, ip, label, created_at, updated_at)` PK (tenant,ip)
+  — POR TENANT. Helper `_ip_aliases(tenant)` → {ip: label}. Endpoints: `GET /v1/ip-aliases`
+  (require_tenant_scope) e `PUT /v1/ip-aliases` (require_role admin_master; label vazio = remove;
+  `_strip_nul` no label; audit + `_cache_bust`). `/v1/locations` agora inclui `last_alias` (resumo) e
+  `alias` (detalhe) — a geo real continua em `last_geo`/`geo` (mapa/filtro seguem por geo).
+- FRONTEND (`wp-locations.js` v5): `_isLocAdmin()` (role admin_master|wp_admin), `_locLabel(alias,geo)`
+  (badge 🏢 se houver alias, senão geo), `_locAliasBtn(ip,label)` (lápis ✎ só p/ admin). Modal
+  `#ipAliasModal` no `workforce.html` com `openIpAliasModal/saveIpAlias/removeIpAlias/closeIpAliasModal`.
+  Aplica na lista (coluna Localização) e nos detalhes (por IP). Deploy: backend + site.
 
 ### Novos env knobs
 `WORKPULSE_INGEST_BUST_SEC` (60), `WORKPULSE_ADMIN_STATS_TTL` (45). Já existentes:

@@ -1395,6 +1395,22 @@ def public_key():
 # Ingestão de eventos
 # ===========================================================================
 
+def _strip_nul(v):
+    """Remove o caractere NUL (\\u0000) de strings, recursivamente. O PostgreSQL
+    NÃO aceita \\u0000 nem em TEXT nem em JSONB. Sem isso, um único evento com NUL
+    no título/app (alguns apps do Windows geram títulos com bytes nulos) fazia o
+    INSERT do lote inteiro estourar → 500. Como o agente só apaga o lote após
+    sucesso, ele reenviava o MESMO lote pra sempre (backoff crescente) — travando
+    a coleta só daquele usuário. Sanitizar aqui aceita o lote e destrava."""
+    if isinstance(v, str):
+        return v.replace("\x00", "")
+    if isinstance(v, dict):
+        return {k: _strip_nul(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_strip_nul(x) for x in v]
+    return v
+
+
 @app.post("/v1/ingest")
 def ingest(
     request:       Request,
@@ -1409,8 +1425,8 @@ def ingest(
     token  = parse_bearer(authorization)
     claims = validate_agent_token(token, x_tenant)
 
-    user_id   = payload.user_id or (x_device or payload.device)
-    device_id = x_device or payload.device
+    user_id   = _strip_nul(payload.user_id or (x_device or payload.device))
+    device_id = _strip_nul(x_device or payload.device)
     now_iso   = dt.datetime.now(dt.timezone.utc).isoformat()
 
     # Bloqueio do agente: se o Device foi excluído/bloqueado pelo Admin Master, descarta
@@ -1437,7 +1453,8 @@ def ingest(
                ON CONFLICT (tenant_id, user_id) DO UPDATE SET last_seen = EXCLUDED.last_seen""",
             (user_id, claims["tenant"], now_iso, now_iso),
         )
-        if payload.login_user:
+        _login_user = _strip_nul(payload.login_user)
+        if _login_user:
             c.execute(
                 """UPDATE users
                    SET login_user    = %s,
@@ -1446,7 +1463,7 @@ def ingest(
                            ELSE display_name
                        END
                    WHERE tenant_id = %s AND user_id = %s""",
-                (payload.login_user, payload.login_user, claims["tenant"], user_id),
+                (_login_user, _login_user, claims["tenant"], user_id),
             )
         c.execute(
             """INSERT INTO devices
@@ -1458,8 +1475,9 @@ def ingest(
                    os_version    = EXCLUDED.os_version,
                    agent_version = EXCLUDED.agent_version,
                    last_seen     = EXCLUDED.last_seen""",
-            (device_id, user_id, claims["tenant"], payload.device,
-             payload.os or x_os, payload.os_version, payload.agent_version, now_iso),
+            (device_id, user_id, claims["tenant"], _strip_nul(payload.device),
+             _strip_nul(payload.os or x_os), _strip_nul(payload.os_version),
+             _strip_nul(payload.agent_version), now_iso),
         )
         # Registra o IP público de conexão (X-Forwarded-For do ALB), agregado por dia local.
         _client_addr = _client_ip(request)
@@ -1479,9 +1497,9 @@ def ingest(
         rows = [
             (
                 claims["tenant"], user_id, device_id,
-                e.bucket, e.timestamp.isoformat(), e.duration,
-                psycopg2.extras.Json(e.data),
-                (e.event_id or None),
+                _strip_nul(e.bucket), e.timestamp.isoformat(), e.duration,
+                psycopg2.extras.Json(_strip_nul(e.data)),
+                (_strip_nul(e.event_id) or None),
             )
             for e in payload.events
         ]
@@ -4984,6 +5002,19 @@ _SCHEMA_STMTS.extend([
         resolved_at TEXT
     )
     """,
+    # Apelido (alias) de IP por tenant: substitui o rótulo de geo na tela de
+    # Localização (ex.: "Escritorio Asaptech" no lugar de "São Paulo, ...").
+    # Definido pelo Admin Master. É por-tenant (cada empresa nomeia os seus IPs).
+    """
+    CREATE TABLE IF NOT EXISTS ip_aliases (
+        tenant_id  TEXT NOT NULL,
+        ip         TEXT NOT NULL,
+        label      TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, ip)
+    )
+    """,
 ])
 
 
@@ -5084,6 +5115,55 @@ def _geo_label(g: dict | None) -> str:
     return ", ".join(parts)
 
 
+def _ip_aliases(tenant: str) -> dict:
+    """Mapa {ip: label} dos apelidos de IP do tenant (tela de Localização)."""
+    try:
+        with db() as c:
+            rows = c.execute(
+                "SELECT ip, label FROM ip_aliases WHERE tenant_id=%s", (tenant,)
+            ).fetchall()
+        return {r["ip"]: r["label"] for r in rows}
+    except Exception:
+        return {}
+
+
+class IpAliasIn(BaseModel):
+    ip:    str
+    label: str = ""
+
+
+@app.get("/v1/ip-aliases", dependencies=[Depends(require_tenant_scope)])
+def ip_aliases_get(tenant: str):
+    al = _ip_aliases(tenant)
+    return {"aliases": [{"ip": ip, "label": lbl} for ip, lbl in sorted(al.items())]}
+
+
+@app.put("/v1/ip-aliases")
+def ip_aliases_set(body: IpAliasIn, tenant: str, request: Request,
+                   ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
+    ip    = (body.ip or "").strip()
+    label = _strip_nul((body.label or "").strip())
+    if not ip:
+        raise HTTPException(status_code=400, detail="ip obrigatório")
+    now = _now_utc().isoformat()
+    with db() as c:
+        if label:
+            c.execute(
+                """INSERT INTO ip_aliases (tenant_id, ip, label, created_at, updated_at)
+                   VALUES (%s,%s,%s,%s,%s)
+                   ON CONFLICT (tenant_id, ip)
+                   DO UPDATE SET label = EXCLUDED.label, updated_at = EXCLUDED.updated_at""",
+                (tid, ip, label, now, now),
+            )
+        else:
+            # label vazio = remover o alias
+            c.execute("DELETE FROM ip_aliases WHERE tenant_id=%s AND ip=%s", (tid, ip))
+    audit(ctx.get("email"), "ip_alias.set", target=f"{tid}:{ip}", ip=_client_ip(request))
+    _cache_bust(tid)
+    return {"ok": True, "ip": ip, "label": label}
+
+
 @app.get("/v1/locations", dependencies=[Depends(require_tenant_scope)])
 def locations(tenant: str, request: Request, user_id: str | None = None,
               since: str | None = None, until: str | None = None, days: int | None = None):
@@ -5121,12 +5201,13 @@ def locations(tenant: str, request: Request, user_id: str | None = None,
 
     rows = [dict(r) for r in rows]
     geo = _geo_for_ips({r["ip"] for r in rows})
+    aliases = _ip_aliases(tenant)   # {ip: label} — substitui o rótulo de geo
 
     if user_id:
         items = []
         for r in rows:
             g = geo.get(r["ip"])
-            items.append({**r, "geo": _geo_label(g),
+            items.append({**r, "geo": _geo_label(g), "alias": aliases.get(r["ip"]),
                           "city": (g or {}).get("city"), "country": (g or {}).get("country"),
                           "org": (g or {}).get("org"),
                           "lat": (g or {}).get("lat"), "lon": (g or {}).get("lon")})
@@ -5156,7 +5237,7 @@ def locations(tenant: str, request: Request, user_id: str | None = None,
             "user_id": uid, "display_name": unames.get(uid, uid),
             "distinct_ips": len(a["ips"]), "days": len(a["days"]),
             "last_ip": a["last_ip"], "last_seen": a["last_seen"],
-            "last_geo": _geo_label(g),
+            "last_geo": _geo_label(g), "last_alias": aliases.get(a["last_ip"]),
             "last_city": (g or {}).get("city"), "last_country": (g or {}).get("country"),
             "last_lat": (g or {}).get("lat"), "last_lon": (g or {}).get("lon"),
         })

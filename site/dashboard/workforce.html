@@ -1557,6 +1557,31 @@
 
 <div id="toast" class="toast hide"></div>
 
+<!-- ===== Modal: apelido (alias) de IP — Admin Master ===== -->
+<div id="ipAliasModal" class="hide" style="position:fixed;inset:0;z-index:1000;background:rgba(10,15,35,.55);display:flex;align-items:center;justify-content:center;padding:20px">
+  <div style="background:var(--card,#fff);border:1px solid var(--border);border-radius:14px;max-width:440px;width:100%;padding:22px 22px 18px;box-shadow:0 20px 60px rgba(0,0,0,.3)">
+    <h3 style="margin:0 0 4px">Apelido do IP</h3>
+    <p style="margin:0 0 14px;font-size:13px;color:var(--text-dim)">Substitui a localização por um nome amigável na tela de Localização (ex.: “Escritorio Asaptech”). Vale para este IP em toda a equipe.</p>
+    <div style="font-size:12px;color:var(--text-dim);margin-bottom:4px">IP</div>
+    <div id="ipAliasIp" style="font-family:var(--mono,monospace);font-size:14px;background:var(--bg,#f4f6fb);border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-bottom:12px">—</div>
+    <style>
+      #ipAliasLabel{width:100%;box-sizing:border-box;margin-top:4px;padding:9px 11px;font-size:14px;
+        border:1px solid var(--border);border-radius:8px;background:var(--card,#fff);color:inherit;outline:none;
+        transition:border-color .15s,box-shadow .15s}
+      #ipAliasLabel:focus{border-color:#6c8cff;box-shadow:0 0 0 3px rgba(108,140,255,.18)}
+    </style>
+    <label style="font-size:12px;color:var(--text-dim)">Apelido</label>
+    <input id="ipAliasLabel" type="text" maxlength="60" placeholder="Escritorio Asaptech" onkeydown="if(event.key==='Enter')saveIpAlias();if(event.key==='Escape')closeIpAliasModal()">
+    <div style="display:flex;gap:8px;justify-content:space-between;align-items:center;margin-top:18px">
+      <button id="ipAliasRemove" class="ghost" onclick="removeIpAlias()" style="color:var(--danger,#e5484d);display:none">Remover apelido</button>
+      <div style="display:flex;gap:8px;margin-left:auto">
+        <button class="ghost" onclick="closeIpAliasModal()">Cancelar</button>
+        <button class="primary" onclick="saveIpAlias()">Salvar</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- ===== MÓDULOS JS (defer: executam após parse do DOM, em ordem) ===== -->
 <script src="js/wp-core.js?v=23" defer></script>
 <script src="js/wp-datepicker.js?v=17" defer></script>
@@ -1568,7 +1593,7 @@
 <script src="js/wp-internet.js?v=20" defer></script>
 <script src="js/wp-consolidado.js?v=10" defer></script>
 <script src="js/wp-jornada.js?v=25" defer></script>
-<script src="js/wp-locations.js?v=4" defer></script>
+<script src="js/wp-locations.js?v=5" defer></script>
 <script src="js/wp-settings.js?v=32" defer></script>
 <script src="js/wp-users.js?v=27" defer></script>
 <script src="js/wp-support.js?v=5" defer></script>

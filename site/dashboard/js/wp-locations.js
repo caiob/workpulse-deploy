@@ -5,6 +5,24 @@
 let _locInit = false;
 let _locData = null;
 
+// Só Admin Master (ou admin da plataforma) pode criar/editar apelidos de IP.
+function _isLocAdmin() {
+  return typeof state !== 'undefined' && (state.role === 'admin_master' || state.role === 'wp_admin');
+}
+// Rótulo da localização: usa o APELIDO do IP se houver, senão a geo.
+function _locLabel(alias, geo) {
+  if (alias) {
+    return `<span title="Apelido de IP" style="display:inline-flex;align-items:center;gap:5px;font-weight:600;color:#0e7490;background:#cffafe;border:1px solid #a5f3fc;border-radius:6px;padding:1px 8px">🏢 ${escHtml(alias)}</span>`;
+  }
+  return escHtml(geo || '—');
+}
+// Lápis de editar apelido (só admin). ip e label vão escapados p/ o onclick.
+function _locAliasBtn(ip, label) {
+  if (!_isLocAdmin() || !ip) return '';
+  const e = s => String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+  return ` <a href="#" title="Criar/editar apelido deste IP" onclick="openIpAliasModal('${e(ip)}','${e(label)}');return false" style="text-decoration:none;opacity:.55;font-size:13px">✎</a>`;
+}
+
 async function loadLocations() {
   if (!_locInit) {
     wpDP.init('locRange', { defaultDays: 7, onChange: loadLocations });
@@ -54,7 +72,7 @@ function locRenderTable() {
       <td>${avatar(u.display_name)} <strong>${escHtml(u.display_name)}</strong></td>
       <td class="num">${badge}</td>
       <td><code style="font-size:12px;color:var(--text-dim)">${escHtml(u.last_ip || '—')}</code></td>
-      <td>${escHtml(u.last_geo || '—')}</td>
+      <td>${_locLabel(u.last_alias, u.last_geo)}${_locAliasBtn(u.last_ip, u.last_alias)}</td>
       <td>${u.last_seen ? relTime(u.last_seen) : '—'}</td>
       <td><button class="ghost" onclick="locDrill('${uid}','${nm}')">detalhes</button></td>
     </tr>`;
@@ -72,7 +90,7 @@ async function locDrill(uid, name) {
     const rowsHtml = items.length ? items.map(it => `<tr>
       <td>${escHtml(it.day)}</td>
       <td><code style="font-size:12px;color:var(--text-dim)">${escHtml(it.ip)}</code></td>
-      <td>${escHtml(it.geo || '—')}</td>
+      <td>${_locLabel(it.alias, it.geo)}${_locAliasBtn(it.ip, it.alias)}</td>
       <td>${escHtml(it.org || '—')}</td>
       <td>${_locHM(it.first_seen)}–${_locHM(it.last_seen)}</td>
       <td class="num">${it.hits}</td>
@@ -181,4 +199,36 @@ function _locRenderMap() {
     bounds.push([g.lat, g.lon]);
   });
   if (bounds.length) _locMap.fitBounds(bounds, { padding: [50, 50], maxZoom: 7 });
+}
+
+
+// ── Modal de apelido (alias) de IP — Admin Master ─────────────────────
+function openIpAliasModal(ip, label) {
+  if (!_isLocAdmin()) { toast('Apenas o Admin Master pode definir apelidos de IP.'); return; }
+  const m = document.getElementById('ipAliasModal');
+  if (!m) return;
+  document.getElementById('ipAliasIp').textContent = ip;
+  const inp = document.getElementById('ipAliasLabel');
+  inp.value = label || '';
+  document.getElementById('ipAliasRemove').style.display = label ? '' : 'none';
+  m.classList.remove('hide');
+  setTimeout(() => inp.focus(), 50);
+}
+function closeIpAliasModal() {
+  const m = document.getElementById('ipAliasModal');
+  if (m) m.classList.add('hide');
+}
+async function saveIpAlias() {
+  const ip    = document.getElementById('ipAliasIp').textContent.trim();
+  const label = document.getElementById('ipAliasLabel').value.trim();
+  try {
+    await apiFetch('PUT', '/v1/ip-aliases?tenant=' + encodeURIComponent(state.tenant), { ip, label });
+    toast(label ? 'Apelido salvo.' : 'Apelido removido.');
+    closeIpAliasModal();
+    await loadLocations();
+  } catch (e) { toast('Erro: ' + e.message); }
+}
+function removeIpAlias() {
+  document.getElementById('ipAliasLabel').value = '';
+  saveIpAlias();
 }
