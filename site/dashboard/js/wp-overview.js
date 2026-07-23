@@ -113,10 +113,11 @@ function _renderDeptsOvPage() {
   const start = _deptsOvPage * _DEPTS_OV_PER;
   const rows = depts.slice(start, start + _DEPTS_OV_PER).map(d => {
     const pct = Math.round((d.active || 0) / total * 100);
+    const avg = (d.users || 0) > 0 ? (d.active || 0) / d.users : 0;
     return `<div class="dept-row">
       <div>
         <div class="name">${d.dept}</div>
-        <div class="meta">${d.users} pessoa${d.users === 1 ? '' : 's'}</div>
+        <div class="meta">${d.users} pessoa${d.users === 1 ? '' : 's'} · ${fmtH(avg)}h/pessoa</div>
       </div>
       <div class="right">
         <div class="hours">${fmtH(d.active)}h</div>

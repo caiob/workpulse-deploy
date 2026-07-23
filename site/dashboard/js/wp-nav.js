@@ -10,7 +10,7 @@
 //   status • tenant • [⚙ ▾ → Configurações / Sair]
 // =====================================================================
 
-const TABS = ['overview', 'people', 'departments', 'alerts', 'trends', 'events', 'internet', 'consolidado', 'jornada', 'localizacao', 'financeiro', 'admusuarios', 'admlicenca', 'admalertas', 'categorizacao', 'colaboradores', 'relatorios', 'suportetec', 'config'];
+const TABS = ['overview', 'people', 'departments', 'tempoativo', 'alerts', 'trends', 'events', 'internet', 'consolidado', 'jornada', 'localizacao', 'financeiro', 'admusuarios', 'admlicenca', 'admalertas', 'categorizacao', 'colaboradores', 'relatorios', 'suportetec', 'config'];
 
 // Mapeamento tab → grupo de dropdown (null = standalone)
 const TAB_GROUP = {
@@ -29,6 +29,7 @@ const TAB_GROUP = {
   colaboradores:'administrativo',
   relatorios:  'administrativo',
   suportetec:  'administrativo',
+  tempoativo:  'analises',
   alerts:      'analises',
   trends:      'analises',
 };
@@ -70,6 +71,7 @@ function switchTab(name) {
     overview:    loadOverview,
     people:      loadPeople,
     departments: loadDepartments,
+    tempoativo:  () => { if (typeof loadTempoAtivo === 'function') loadTempoAtivo(); },
     alerts:      loadAlerts,
     trends:      loadTrends,
     events:      () => (typeof openEvents === 'function' ? openEvents() : loadEvents()),
@@ -128,6 +130,7 @@ function switchTab(name) {
   wpDP.init('rangeDays',   { defaultDays: 1,  onChange: () => { loadOverview(); loadAlerts(); } });
   wpDP.init('peopleRange', { defaultDays: 1,  onChange: loadPeople });
   wpDP.init('trendDays',   { defaultDays: 30, onChange: loadTrends });
+  wpDP.init('taDays',      { defaultDays: 1,  onChange: () => { if (typeof loadTempoAtivo === 'function') loadTempoAtivo(); } });
   wpDP.init('evDays',      { defaultDays: 1,  onChange: () => (typeof applyEvents === 'function' ? applyEvents() : loadEvents()) });
   wpDP.init('intDays',     { defaultDays: 1,  onChange: () => (typeof applyInternet === 'function' ? applyInternet() : loadInternet()) });
   wpDP.init('consDays',    { defaultDays: 1,  onChange: () => (typeof applyConsolidado === 'function' ? applyConsolidado() : null) });

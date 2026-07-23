@@ -167,6 +167,7 @@
         Análises <span class="dd-arrow">▾</span>
       </button>
       <div class="nav-dropdown-menu">
+        <button data-tab="tempoativo">⏳ Tempo Ativo</button>
         <button data-tab="alerts">🔔 Alertas</button>
         <button data-tab="trends">📈 Tendências</button>
       </div>
@@ -342,15 +343,18 @@
       <div class="card span-8 no-bar">
         <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap">
           <div>
-            <h3 style="margin:0">Tempo ativo por colaborador</h3>
+            <h3 style="margin:0;cursor:pointer" onclick="switchTab('tempoativo')" title="Ver todos os colaboradores">Tempo ativo por colaborador</h3>
             <p id="usersChartSub" style="font-size:11px;color:var(--text-muted);margin:4px 0 0">Top 12 colaboradores com mais tempo ativo no período. Cada barra soma tempo ativo + AFK dentro da jornada.</p>
           </div>
-          <label style="font-size:12px;color:var(--text-muted);white-space:nowrap">Ordenar por
-            <select id="usersChartSort" onchange="drawUsersChart()" class="card-sel" style="margin-left:6px">
-              <option value="active">Tempo ativo</option>
-              <option value="afk">AFK na jornada</option>
-            </select>
-          </label>
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <label style="font-size:12px;color:var(--text-muted);white-space:nowrap">Ordenar por
+              <select id="usersChartSort" onchange="drawUsersChart()" class="card-sel" style="margin-left:6px">
+                <option value="active">Tempo ativo</option>
+                <option value="afk">AFK na jornada</option>
+              </select>
+            </label>
+            <button class="ghost" onclick="switchTab('tempoativo')" style="white-space:nowrap;font-size:12px;padding:5px 10px">Veja mais →</button>
+          </div>
         </div>
         <div style="height:260px;margin-top:8px"><canvas id="chartUsers"></canvas></div>
       </div>
@@ -432,6 +436,76 @@
       <div class="card span-5 no-bar">
         <h3>Resumo</h3>
         <div id="deptSummary" style="margin-top:12px"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── TEMPO ATIVO (Análise) ── -->
+  <style>
+    .ta-dept-btn{min-width:160px;text-align:left;background:var(--panel,#131b36);color:var(--text,#e6ebff);
+      border:1px solid var(--border,#26305a);border-radius:8px;padding:8px 10px;cursor:pointer;font-size:13px;
+      display:flex;align-items:center;justify-content:space-between;gap:8px}
+    .ta-dept-menu{position:absolute;top:calc(100% + 4px);left:0;z-index:40;min-width:220px;max-height:280px;
+      overflow-y:auto;background:var(--panel,#131b36);border:1px solid var(--border,#26305a);border-radius:10px;
+      box-shadow:0 12px 30px rgba(0,0,0,.45);padding:6px}
+    .ta-dept-menu .ta-dept-actions{display:flex;gap:8px;padding:4px 6px 8px;border-bottom:1px solid var(--border,#26305a);margin-bottom:4px}
+    .ta-dept-menu .ta-dept-actions button{flex:1;font-size:11px;padding:4px 6px;background:transparent;color:var(--accent,#6c8cff);
+      border:1px solid var(--border,#26305a);border-radius:6px;cursor:pointer}
+    .ta-dept-menu label{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:6px;cursor:pointer;
+      font-size:13px;color:var(--text,#e6ebff)}
+    .ta-dept-menu label:hover{background:var(--panel-2,rgba(108,140,255,.10))}
+    .ta-dept-menu input{width:auto;margin:0}
+  </style>
+  <section id="tab-tempoativo" class="hide">
+    <h1 class="page-title">Tempo <span class="em">ativo</span> por colaborador.</h1>
+    <p class="page-sub">Todos os colaboradores no período. Busque, ordene por tempo ativo ou AFK e filtre por departamento.</p>
+
+    <div class="toolbar">
+      <div id="taDays" title="Período"></div>
+      <div id="taDeptWrap" style="position:relative">
+        <button type="button" id="taDeptBtn" class="ta-dept-btn" title="Departamento" onclick="taDeptToggle(event)">Todos <span style="opacity:.6">▾</span></button>
+        <div id="taDeptMenu" class="ta-dept-menu hide"></div>
+      </div>
+      <select id="taSort" title="Ordenar por" onchange="taApply()">
+        <option value="active_desc">Maior tempo ativo</option>
+        <option value="active_asc">Menor tempo ativo</option>
+        <option value="afk_desc">Maior AFK</option>
+        <option value="afk_asc">Menor AFK</option>
+      </select>
+      <div style="flex:1">
+        <input id="taSearch" oninput="taApply()" placeholder="Buscar nome, e-mail ou departamento" style="width:100%;max-width:360px">
+      </div>
+      <button class="ghost" onclick="loadTempoAtivo()">↻ Atualizar</button>
+    </div>
+
+    <div class="grid">
+      <div class="card span-3"><h3>Tempo ativo total</h3>
+        <div class="stat" id="taKpiActive">—<small>h</small></div>
+        <div class="stat-trend" id="taKpiActiveSub">—</div>
+      </div>
+      <div class="card span-3"><h3>Tempo ativo médio</h3>
+        <div class="stat" id="taKpiActiveAvg">—<small>h</small></div>
+        <div class="stat-trend">média por colaborador no filtro</div>
+      </div>
+      <div class="card span-3"><h3>AFK média</h3>
+        <div class="stat" id="taKpiAfk">—<small>h</small></div>
+        <div class="stat-trend">média por colaborador no filtro</div>
+      </div>
+      <div class="card span-3"><h3>Aderência média</h3>
+        <div class="stat" id="taKpiAdh">—<small>%</small></div>
+        <div class="stat-trend">ativo / (ativo + AFK)</div>
+      </div>
+
+      <div class="card span-12 no-bar">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap">
+          <div>
+            <h3 style="margin:0">Tempo ativo + AFK por colaborador</h3>
+            <p id="taChartSub" style="font-size:11px;color:var(--text-muted);margin:4px 0 0">—</p>
+          </div>
+        </div>
+        <div id="taChartWrap" style="margin-top:10px;max-height:640px;overflow-y:auto">
+          <div id="taChartBox" style="position:relative"><canvas id="chartTempoAtivo"></canvas></div>
+        </div>
       </div>
     </div>
   </section>
@@ -1585,10 +1659,11 @@
 <!-- ===== MÓDULOS JS (defer: executam após parse do DOM, em ordem) ===== -->
 <script src="js/wp-core.js?v=23" defer></script>
 <script src="js/wp-datepicker.js?v=17" defer></script>
-<script src="js/wp-overview.js?v=22" defer></script>
+<script src="js/wp-overview.js?v=23" defer></script>
 <script src="js/wp-people.js?v=24" defer></script>
 <script src="js/wp-departments.js?v=17" defer></script>
 <script src="js/wp-analytics.js?v=25" defer></script>
+<script src="js/wp-tempoativo.js?v=5" defer></script>
 <script src="js/wp-events.js?v=19" defer></script>
 <script src="js/wp-internet.js?v=20" defer></script>
 <script src="js/wp-consolidado.js?v=10" defer></script>
@@ -1598,7 +1673,7 @@
 <script src="js/wp-users.js?v=27" defer></script>
 <script src="js/wp-support.js?v=5" defer></script>
 <script src="js/wp-reports.js?v=20" defer></script>
-<script src="js/wp-nav.js?v=32" defer></script>
+<script src="js/wp-nav.js?v=33" defer></script>
 <script src="js/wp-auth.js?v=23" defer></script>
 
 </body>
