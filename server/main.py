@@ -1411,6 +1411,40 @@ def _strip_nul(v):
     return v
 
 
+# Limite de bytes para os campos de JSONB que têm índice B-tree
+# (idx_events_title e idx_events_app). O Postgres rejeita entradas de índice
+# B-tree acima de ~2704 bytes com "index row size N exceeds btree version 4
+# maximum 2704 for index ...", o que derruba o INSERT do lote INTEIRO → 500.
+# Como o agente só apaga o lote após sucesso, ele reenvia o MESMO lote pra
+# sempre (backoff crescente) e trava a coleta só daquele usuário — exatamente
+# o mesmo sintoma do NUL. Ex. real: a URL de OIDC/AWS SSO
+# (oidc.us-east-1.amazonaws.com/authorize?...) vira título da aba do Chrome e
+# chega a >3200 bytes. 2000 dá folga segura abaixo do limite do índice.
+_INDEXED_MAX_BYTES = int(os.getenv("WORKPULSE_INDEXED_MAX_BYTES", "2000"))
+_INDEXED_KEYS = ("title", "app")
+
+
+def _cap_bytes(s, max_bytes: int = _INDEXED_MAX_BYTES):
+    """Trunca uma string para no máximo max_bytes em UTF-8, sem quebrar um
+    caractere multibyte no corte. Não-strings passam intactas."""
+    if not isinstance(s, str):
+        return s
+    b = s.encode("utf-8")
+    if len(b) <= max_bytes:
+        return s
+    return b[:max_bytes].decode("utf-8", "ignore")
+
+
+def _cap_indexed(data):
+    """Aplica o limite de bytes aos campos indexados (title, app) do evento,
+    para um valor gigante num único evento não estourar o índice B-tree e
+    derrubar o INSERT do lote. Aplicar DEPOIS do _strip_nul."""
+    if isinstance(data, dict):
+        return {k: (_cap_bytes(v) if k in _INDEXED_KEYS else v)
+                for k, v in data.items()}
+    return data
+
+
 @app.post("/v1/ingest")
 def ingest(
     request:       Request,
@@ -1498,7 +1532,7 @@ def ingest(
             (
                 claims["tenant"], user_id, device_id,
                 _strip_nul(e.bucket), e.timestamp.isoformat(), e.duration,
-                psycopg2.extras.Json(_strip_nul(e.data)),
+                psycopg2.extras.Json(_cap_indexed(_strip_nul(e.data))),
                 (_strip_nul(e.event_id) or None),
             )
             for e in payload.events

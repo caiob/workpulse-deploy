@@ -1092,14 +1092,17 @@
             <h3 style="margin:0;display:inline">Aplicativos Detectados</h3>
             <span id="appsCountLabel" style="font-size:12px;color:var(--text-dim);margin-left:6px"></span>
           </div>
-          <div id="appsPagination"></div>
+          <div style="display:flex;align-items:center;gap:8px">
+            <div id="appsPagination"></div>
+            <button class="ghost" onclick="loadAppsForConfig(true)" title="Recarregar (últimos 30 dias)" style="font-size:12px;padding:4px 8px">↻</button>
+          </div>
         </div>
         <p style="font-size:12px;color:var(--text-dim);margin:0 0 8px">Últimos 30 dias. Clique para pré-preencher a regra acima.</p>
         <div style="margin-bottom:8px;display:flex;gap:8px;align-items:center">
           <input id="appsFilter" oninput="filterApps()" placeholder="buscar aplicativo..."
             style="flex:1;box-sizing:border-box;background:var(--bg-2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:12px">
           <label style="font-size:12px;color:var(--text-dim);white-space:nowrap;display:flex;align-items:center;gap:4px;cursor:pointer">
-            <input type="checkbox" id="appsUncat" checked onchange="loadAppsForConfig()"> só não categorizados
+            <input type="checkbox" id="appsUncat" checked onchange="loadAppsForConfig(true)"> só não categorizados
           </label>
         </div>
         <div id="appsList"><p style="color:var(--text-muted);font-size:13px">Carregando...</p></div>
@@ -1111,14 +1114,17 @@
             <h3 style="margin:0;display:inline">Sites Detectados</h3>
             <span id="sitesCountLabel" style="font-size:12px;color:var(--text-dim);margin-left:6px"></span>
           </div>
-          <div id="sitesPagination"></div>
+          <div style="display:flex;align-items:center;gap:8px">
+            <div id="sitesPagination"></div>
+            <button class="ghost" onclick="loadSitesForConfig(true)" title="Recarregar (últimos 14 dias)" style="font-size:12px;padding:4px 8px">↻</button>
+          </div>
         </div>
         <p style="font-size:12px;color:var(--text-dim);margin:0 0 8px">Últimos 14 dias. Clique para pré-preencher a regra acima.</p>
         <div style="margin-bottom:8px;display:flex;gap:8px;align-items:center">
           <input id="sitesFilter" oninput="filterSites()" placeholder="buscar site..."
             style="flex:1;box-sizing:border-box;background:var(--bg-2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:12px">
           <label style="font-size:12px;color:var(--text-dim);white-space:nowrap;display:flex;align-items:center;gap:4px;cursor:pointer">
-            <input type="checkbox" id="sitesUncat" checked onchange="loadSitesForConfig()"> só não categorizados
+            <input type="checkbox" id="sitesUncat" checked onchange="loadSitesForConfig(true)"> só não categorizados
           </label>
         </div>
         <div id="sitesList"><p style="color:var(--text-muted);font-size:13px">Carregando...</p></div>
@@ -1669,7 +1675,7 @@
 <script src="js/wp-consolidado.js?v=10" defer></script>
 <script src="js/wp-jornada.js?v=25" defer></script>
 <script src="js/wp-locations.js?v=5" defer></script>
-<script src="js/wp-settings.js?v=32" defer></script>
+<script src="js/wp-settings.js?v=33" defer></script>
 <script src="js/wp-users.js?v=27" defer></script>
 <script src="js/wp-support.js?v=5" defer></script>
 <script src="js/wp-reports.js?v=20" defer></script>

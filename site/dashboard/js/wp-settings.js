@@ -7,6 +7,11 @@
 let _allRules     = [];   // todas as regras (cache pós-load)
 let _allApps      = [];   // apps não-browser (cache)
 let _allSites     = [];   // sites detectados (cache)
+// Flags de cache: apps (30d) e sites (14d) são agregações pesadas. Carregamos
+// UMA vez e reusamos ao reentrar na aba; refetch só no botão ↻ ou ao trocar o
+// filtro "só não categorizados". Também guardamos o estado de 'uncat' usado.
+let _appsLoaded   = false; let _appsUncatState  = null;
+let _sitesLoaded  = false; let _sitesUncatState = null;
 let _appsFiltered = [];   // resultado do filtro de apps
 let _sitesFiltered= [];   // resultado do filtro de sites
 let _depts        = [];   // [{id, name, user_count, users:[...]}]
@@ -179,13 +184,25 @@ function quickRule(pattern, field) {
 /* ──────────────────────────────────────────────────────────────────
    APLICATIVOS DETECTADOS
    ────────────────────────────────────────────────────────────────── */
-async function loadAppsForConfig() {
-  try {
-    const uncat = document.getElementById('appsUncat')?.checked ? '&uncat=1' : '';
-    const data = await api('/v1/productivity/apps?tenant=' + encodeURIComponent(state.tenant) + '&days=30' + uncat);
-    _allApps      = (data.apps || []).filter(a => !a.is_browser);
+async function loadAppsForConfig(force = false) {
+  const uncatOn = !!document.getElementById('appsUncat')?.checked;
+  // Reusa o cache ao reentrar na aba (só refaz a query se forçado ou se o
+  // filtro "só não categorizados" mudou) — evita a agregação de 30 dias.
+  if (!force && _appsLoaded && _appsUncatState === uncatOn) {
     _appsFiltered = _allApps;
-    _appsPage     = 0;
+    _renderAppsPage();
+    return;
+  }
+  const el = document.getElementById('appsList');
+  if (el) el.innerHTML = '<p style="color:var(--text-muted);font-size:13px">Carregando...</p>';
+  try {
+    const uncat = uncatOn ? '&uncat=1' : '';
+    const data = await api('/v1/productivity/apps?tenant=' + encodeURIComponent(state.tenant) + '&days=30' + uncat);
+    _allApps       = (data.apps || []).filter(a => !a.is_browser);
+    _appsFiltered  = _allApps;
+    _appsPage      = 0;
+    _appsLoaded    = true;
+    _appsUncatState = uncatOn;
     _renderAppsPage();
   } catch (e) { toast('Erro ao carregar apps: ' + e.message); }
 }
@@ -240,13 +257,24 @@ function renderAppsList(apps) {
 /* ──────────────────────────────────────────────────────────────────
    SITES DETECTADOS
    ────────────────────────────────────────────────────────────────── */
-async function loadSitesForConfig() {
-  try {
-    const uncat = document.getElementById('sitesUncat')?.checked ? '&uncat=1' : '';
-    const data = await api('/v1/productivity/internet?tenant=' + encodeURIComponent(state.tenant) + '&days=14&detail=0' + uncat);
-    _allSites      = data.sites || [];
+async function loadSitesForConfig(force = false) {
+  const uncatOn = !!document.getElementById('sitesUncat')?.checked;
+  // Reusa o cache ao reentrar na aba (refaz só se forçado ou se 'uncat' mudou).
+  if (!force && _sitesLoaded && _sitesUncatState === uncatOn) {
     _sitesFiltered = _allSites;
-    _sitesPage     = 0;
+    _renderSitesPage();
+    return;
+  }
+  const el = document.getElementById('sitesList');
+  if (el) el.innerHTML = '<p style="color:var(--text-muted);font-size:13px">Carregando...</p>';
+  try {
+    const uncat = uncatOn ? '&uncat=1' : '';
+    const data = await api('/v1/productivity/internet?tenant=' + encodeURIComponent(state.tenant) + '&days=14&detail=0' + uncat);
+    _allSites       = data.sites || [];
+    _sitesFiltered  = _allSites;
+    _sitesPage      = 0;
+    _sitesLoaded    = true;
+    _sitesUncatState = uncatOn;
     _renderSitesPage();
   } catch (e) { toast('Erro ao carregar sites: ' + e.message); }
 }
