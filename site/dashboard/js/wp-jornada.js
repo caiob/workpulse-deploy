@@ -327,10 +327,10 @@ function _jorDrawHoursChart(jornadas) {
         legend:  { labels: { color: ct.label, font: { size: 11 }, boxWidth: 12 } },
         tooltip: {
           callbacks: {
-            label: c => ' ' + c.dataset.label + ': ' + c.parsed.y.toFixed(1) + 'h',
+            label: c => ' ' + c.dataset.label + ': ' + _jorDur(c.parsed.y * 3600),
             footer: items => {
               const total = items.reduce((s, i) => s + i.parsed.y, 0);
-              return 'Total (coletado + sem coleta): ' + total.toFixed(1) + 'h';
+              return 'Total (coletado + sem coleta): ' + _jorDur(total * 3600);
             },
           },
         },

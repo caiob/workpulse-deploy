@@ -229,6 +229,131 @@ async function loadLicense() {
   } catch (e) {
     sum.innerHTML = '<span style="color:var(--danger)">Erro ao carregar licença: ' + escHtml(e.message) + '</span>';
   }
+  // A página Configurações também carrega a fonte de dados de RH.
+  if (typeof loadDirectoryConfig === 'function') loadDirectoryConfig();
+}
+
+/* ──────────────────────────────────────────────────────────────────
+   FONTE DE DADOS DE RH (Convenia hoje; Google em breve) — Admin Master
+   ────────────────────────────────────────────────────────────────── */
+function dirProviderChange() {
+  const prov = (document.getElementById('dirProvider') || {}).value;
+  const tw = document.getElementById('dirConveniaTokenWrap');
+  if (tw) tw.style.display = (prov === 'convenia') ? '' : 'none';
+}
+
+function _dirRenderStatus(cfg) {
+  const el = document.getElementById('dirStatus');
+  if (!el) return;
+  if (!cfg || !cfg.last_sync) { el.textContent = 'Nunca sincronizado.'; return; }
+  const when = new Date(cfg.last_sync).toLocaleString('pt-BR',
+    { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  const st = cfg.last_status || '';
+  const err = /^erro/i.test(st);
+  el.innerHTML = `Última sincronização: ${when}` +
+    (st ? ` — <span style="color:${err ? 'var(--danger)' : 'var(--accent,#34d399)'}">${escHtml(st)}</span>` : '');
+}
+
+async function loadDirectoryConfig() {
+  const sel = document.getElementById('dirProvider');
+  if (!sel) return;
+  try {
+    const cfg = await api('/v1/tenant-directory/config?tenant=' + encodeURIComponent(state.tenant));
+    sel.value = cfg.provider || 'none';
+    const auto = document.getElementById('dirAutoSync');
+    if (auto) auto.checked = cfg.auto_sync !== false;
+    const tokState = document.getElementById('dirTokenState');
+    const tokInput = document.getElementById('dirConveniaToken');
+    if (cfg.has_token) {
+      if (tokState) tokState.textContent = '· token salvo (deixe em branco p/ manter)';
+      if (tokInput) tokInput.placeholder = '•••••••• (mantém o atual)';
+    } else {
+      if (tokState) tokState.textContent = '';
+      if (tokInput) tokInput.placeholder = 'cole o token…';
+    }
+    dirProviderChange();
+    _dirRenderStatus(cfg);
+  } catch (e) {
+    const st = document.getElementById('dirStatus');
+    if (st) st.innerHTML = '<span style="color:var(--danger)">Erro ao carregar configuração: ' + escHtml(e.message) + '</span>';
+  }
+}
+
+async function saveDirectoryConfig() {
+  const provider  = (document.getElementById('dirProvider') || {}).value || 'none';
+  const auto_sync = !!(document.getElementById('dirAutoSync') || {}).checked;
+  const token     = (document.getElementById('dirConveniaToken') || {}).value || '';
+  const body = { provider, auto_sync };
+  if (token.trim()) body.convenia_token = token.trim();   // só envia se digitou
+  try {
+    await apiFetch('PUT', '/v1/tenant-directory/config?tenant=' + encodeURIComponent(state.tenant), body);
+    const tokInput = document.getElementById('dirConveniaToken');
+    if (tokInput) tokInput.value = '';                    // não deixa o token na tela
+    toast('Fonte de dados salva.');
+    loadDirectoryConfig();
+  } catch (e) { toast('Erro ao salvar: ' + (e.message || '')); }
+}
+
+async function syncDirectoryNow() {
+  const st = document.getElementById('dirStatus');
+  if (st) st.textContent = 'Sincronizando… (pode levar alguns segundos)';
+  try {
+    const r = await apiFetch('POST', '/v1/tenant-directory/sync?tenant=' + encodeURIComponent(state.tenant), {});
+    if (r && r.status === 'skipped') toast('Nenhuma fonte configurada.');
+    else toast(`Sincronizado: ${r.matched || 0} colaboradores atualizados.`);
+    loadDirectoryConfig();
+  } catch (e) {
+    toast('Falha na sincronização: ' + (e.message || ''));
+    loadDirectoryConfig();
+  }
+}
+
+// Parseia o textarea do DE-PARA de fotos em pares {key, url}. Aceita:
+//   "nome ; url" / "email, url" / "nome<TAB>url"  OU  nome numa linha e url na seguinte.
+function _parsePhotoMap(text) {
+  const lines = (text || '').split('\n').map(s => s.trim()).filter(Boolean);
+  const items = [];
+  let pendingKey = null;
+  for (const line of lines) {
+    const m = line.match(/https?:\/\/\S+/);
+    if (m) {
+      const url = m[0];
+      let key = line.slice(0, m.index).replace(/[\s,;|\t-]+$/, '').trim();
+      if (!key) key = pendingKey;
+      // Empurra mesmo sem key: o backend casa pelo UUID embutido no link.
+      items.push({ key: key || '', url });
+      pendingKey = null;
+    } else {
+      pendingKey = line;   // linha só com nome; o link vem na próxima
+    }
+  }
+  return items;
+}
+
+async function importPhotos() {
+  const ta      = document.getElementById('photoMapInput');
+  const status  = document.getElementById('photoMapStatus');
+  const unmatch = document.getElementById('photoMapUnmatched');
+  const copy    = !!(document.getElementById('photoStoreCopy') || {}).checked;
+  const items   = _parsePhotoMap(ta ? ta.value : '');
+  if (unmatch) unmatch.textContent = '';
+  if (!items.length) { toast('Cole ao menos uma linha com nome/e-mail e link.'); return; }
+  if (status) status.textContent = copy
+    ? `Baixando e importando ${items.length} foto(s)…`
+    : `Importando ${items.length} link(s)…`;
+  try {
+    const r = await apiFetch('POST',
+      '/v1/tenant-directory/photos?tenant=' + encodeURIComponent(state.tenant),
+      { items, store_copy: copy });
+    if (status) status.textContent = `${r.matched || 0} de ${r.total || items.length} casados.`;
+    toast(`Fotos importadas: ${r.matched || 0} colaboradores.`);
+    if (r.unmatched && r.unmatched.length && unmatch) {
+      unmatch.textContent = 'Não encontrados (confira nome/e-mail): ' + r.unmatched.join(' · ');
+    }
+  } catch (e) {
+    if (status) status.textContent = '';
+    toast('Falha ao importar fotos: ' + (e.message || ''));
+  }
 }
 
 async function licAssign(userId, allocated) {

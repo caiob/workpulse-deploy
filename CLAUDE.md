@@ -1,7 +1,7 @@
 # CLAUDE.md — WorkPulse
 
 Guidance for AI agents (Claude Code / Cowork) working on WorkPulse.
-**Read this fully before changing anything.** Last updated: 2026-07-16.
+**Read this fully before changing anything.** Last updated: 2026-07-24.
 
 > **Para o estado atual (auth e-mail/senha, papéis, Localização, Administrativo,
 > Financeiro, SMTP por tenant, motor de Alertas, etc.), leia primeiro a seção
@@ -44,6 +44,76 @@ ECS tem **deployment circuit breaker**: deploy que sobe quebrado faz **rollback*
 - **Cache-busting do dashboard**: cada `js/wp-*.js` tem `?v=N` em `workforce.html` (fonte da verdade das versões). Bump ao alterar um JS.
 
 **Índice de features/incidentes** (detalhe no changelog ao final; mais recente primeiro):
+- 2026-07-24 — **Aba Análises → "Organograma"** (`tab-organograma`, `js/wp-orgchart.js`) +
+  endpoint `GET /v1/org-chart`. Árvore hierárquica interativa (foto/iniciais, nome, cargo,
+  departamento com cor por depto, legenda) montada casando `manager` (texto vindo da
+  Convenia) com `display_name` de outro colaborador do mesmo tenant. Interação: clique na
+  foto/nome abre a Ficha do Colaborador (reusa `openProfileModal`); clique no chevron
+  expande/recolhe os liderados daquele nó (estado independente por nó, não é acordeão);
+  busca por nome/cargo/depto expande o caminho até os resultados e centraliza o primeiro
+  match; controle "Níveis exibidos" (2/3/4/Todos) recalcula a profundidade padrão; zoom
+  +/−/reset via `transform:scale` no canvas; "Expandir tudo"/"Recolher tudo". Layout usa o
+  padrão CSS clássico de organograma via `<ul>/<li>` (conectores por `::before/::after`,
+  robusto a qualquer número de irmãos/largura de card) — sem lib externa. **Regra de raiz**
+  (decidida com o Caio 2026-07-24): a Convenia é fonte de verdade do campo Gestor; quem tem
+  gestor vinculado vira filho dele; quem NÃO tem gestor (vazio ou sem correspondência) só
+  aparece como raiz se tiver ≥1 liderado — sem nenhuma relação (nem gestor nem liderado),
+  fica de fora do organograma (nota "`N` não exibidos" no topo da página explica isso).
+  Escopo de visibilidade igual às demais abas de Análises (`_scope_for` — Líder vê só o
+  próprio ramo). **Sem migração de schema** (reusa `users.manager/photo_url/cargo/team/
+  department` já existentes). **Precisa `redeploy.ps1` (backend, novo endpoint) +
+  `publicar-site.ps1` (frontend).**
+- 2026-07-24 — **Ficha do Colaborador (modal) + Fonte de dados de RH (Convenia)**. (1) Modal
+  reutilizável `openProfileModal(userId,name)` — `js/wp-profile-modal.js` + CSS `.wp-modal-*`;
+  mostra Foto, Nome, E-mail, Máquina, Gestor, Departamento; loading assíncrono, cache de sessão,
+  fallback client-side; ligado no menu `openPersonMenu` ("👤 Ver ficha"). (2) Endpoint
+  `GET /v1/collaborator/profile`; colunas `users.manager` e `users.photo_url` (ALTER idempotente).
+  (3) Integração RH por tenant: tabela `directory_config` (provider convenia|google|none,
+  convenia_token, auto_sync, last_sync/status); endpoints `GET/PUT /v1/tenant-directory/config` +
+  `POST /v1/tenant-directory/sync` (todos `require_role("admin_master")`); adapter Convenia
+  **`GET /api/v3/employees`** (header `token`, stdlib urllib, base `WORKPULSE_CONVENIA_BASE`),
+  upsert por e-mail; **worker diário** `_directory_sync_worker` (carga noturna, `auto_sync`).
+  Google fica como "em breve". Guia: `../DOCS/FICHA_COLABORADOR_SYNC.md`. **Precisa `redeploy.ps1`
+  (backend) + `publicar-site.ps1`.** Campos Convenia confirmados no histórico da API v3: gestor=
+  `supervisor{name,last_name}`, depto=`department{name}`, e-mail=`email`; envelope Laravel
+  (`next_page_url`). **Convenia NÃO expõe foto via API**, MAS a foto tem link público no S3
+  (`storage-api.rh.live.convenia.com.br/<UUID-empresa>/Colaboradores/<id-API>/Foto de perfil/photo_*.png`).
+  **Confirmado (JSON real, 115 colab.):** `id` da API É o UUID da pasta da foto; **sem campo de
+  foto**; envelope Laravel, todos numa página. Campos: `id`, `name`, `last_name`, `email`,
+  `supervisor{name,last_name}`, `department{name}`. **Vínculo = e-mail** (`users.email` = email prof).
+  **Fotos:** S3 nega list anônimo (`AccessDenied`) → não dá p/ montar o link pela API. Extração é pelo
+  **painel web** (`app.convenia.com.br/colaboradores`, rolar até o fim, coletar `<img>` do bucket) —
+  ver **`../DOCS/CONVENIA_EXTRAIR_FOTOS.md`** (script de console pronto). Sync grava `users.convenia_id`;
+  `POST /v1/tenant-directory/photos` extrai o UUID de `Colaboradores/<uuid>/` de cada link e casa por
+  `convenia_id` → **cola a lista de links** (arquivo `../convenia_fotos_links.txt`, 115 gerados em 2026-07-24).
+  `store_copy` baixa data-URI. Diag: `GET /v1/tenant-directory/convenia-sample`.
+
+  ⚠️ **403 "Forbidden" no sync (funciona no Postman, falha no servidor):** o urllib manda UA
+  `Python-urllib/…` que o WAF da Convenia bloqueia. `_convenia_get` agora envia `User-Agent`
+  explícito e, em HTTPError, inclui o corpo da resposta na msg (diag de IP/permissão). Campo "UUID da
+  empresa" foi **removido** da tela (era p/ o S3-list, que não funciona); `_convenia_resolve_photo`
+  ficou órfã (mantida, mas não chamada — sync não faz mais 115 requests S3 inúteis).
+  **Estado atual (2026-07-24):** aguardando `redeploy.ps1` p/ o fix do UA; depois sync → importar fotos.
+- 2026-07-24 — **Campos Cargo + Time na ficha.** Convenia `job{name}`=Cargo, `team{name}`=Time (Time =
+  subdivisão do departamento; confirmado no JSON de exemplo da doc). Colunas `users.cargo`/`users.team`;
+  mapeados no fetch + upsert; retornados em `/collaborator/profile`. Modal: **Cargo aparece abaixo da
+  foto** (no lugar do departamento); corpo lista Gestor, Departamento, Time. ⚠️ Precisa **adicionar
+  Cargo e Time aos campos do token** na Convenia (senão a API não devolve `job`/`team`) e re-sincronizar.
+- 2026-07-24 — **Renome**: aba Administrativo "Licenciamento" (`tab-admlicenca`) → **"Configurações"**
+  (id interno mantido); menu da conta "Configurações" → **"Ajustes"** (`tab-config`, título tb).
+  A nova página Configurações recebeu o card **Fonte de dados (RH)** (Admin Master).
+- 2026-07-24 — **Aba Análises → "Tempo Ativo"** (`tab-tempoativo`, `js/wp-tempoativo.js`): todos os
+  colaboradores no período, busca, ordenação (maior/menor ativo e AFK), **multi-select de
+  departamento**, KPIs (ativo total/médio, AFK média, aderência média) e gráfico horizontal
+  clicável (abre a ficha). Entrada pelo card "Tempo ativo por colaborador" da Visão Geral (título
+  clicável + botão "Veja mais"). Rótulo 🏖 Férias no gráfico. Tooltip em hh:mm (`fmtHM`).
+- 2026-07-24 — **Perf Categorização**: apps (30d) e sites (14d) detectados agora têm **cache**
+  (`_appsLoaded`/`_sitesLoaded` em wp-settings.js) — não refazem a agregação pesada a cada
+  entrada na aba / `switchTab`; refetch só no botão ↻ ou ao trocar "só não categorizados".
+- 2026-07-24 — **Gestão de Departamentos (UI)**: membros viraram lista vertical compacta de
+  **altura fixa** (rolável) com filtro sempre visível; cards L/R do mesmo tamanho
+  (`align-items:stretch` + `margin-top:auto` no bloco de adicionar). Visão Geral: card
+  "Distribuição por departamento" agora mostra **média h/pessoa** por linha.
 - 2026-07-16 — Apelido (alias) de IP na Localização (Admin Master); tabela `ip_aliases`, `/v1/ip-aliases`.
 - 2026-07-15 — Incidente 1 usuário: `/v1/ingest` 500 infinito. Diagnóstico: buffer LIMPO; era agente antigo/backlog desde 01/06 → resolvido reinstalando ZERADO (apagar `%APPDATA%\WorkPulse\Agent\`). `_strip_nul` (NUL em JSONB) fica como hardening.
 - 2026-07-10 — Agente 2.3.6: `log_level` no `agent.conf` (toggle debug s/ recompilar; RUST_LOG>arquivo>info); timestamp do log em horário LOCAL limpo; **instância única** (lock `agent.lock` via `fs2`); `Conectado a <host> — sincronizados N` em INFO.
@@ -461,6 +531,13 @@ sends PDF reports via AWS SES for each enabled config whose `frequency` matches
 the current day (daily=every day, weekly=Monday, monthly=1st). PDF is generated
 with **reportlab**. Env vars: `WORKPULSE_FROM_EMAIL`, `WORKPULSE_SES_REGION`.
 
+`_directory_sync_worker()` (asyncio task, `lifespan`) — carga **diária** (1x/dia) da
+fonte de RH. `_do_directory_sync_all()` itera `directory_config` com `provider<>'none'
+AND auto_sync` e chama `_run_directory_sync(tid)` por tenant (erros isolados vão p/
+`last_status`). Convenia: `_convenia_fetch_employees` (`GET /api/v3/employees`, header
+`token`, urllib) → `_directory_upsert` (casa por e-mail, COALESCE em `manager`/`photo_url`/
+`department`). Sync manual: `POST /v1/tenant-directory/sync`. Env: `WORKPULSE_CONVENIA_BASE`.
+
 ---
 
 ## Database Schema
@@ -471,7 +548,8 @@ with **reportlab**. Env vars: `WORKPULSE_FROM_EMAIL`, `WORKPULSE_SES_REGION`.
 | `report_configs` | Configurações de relatórios automáticos por tenant: `name`, `recipients` (JSON), `frequency`, `sections` (JSON), `user_filter` (JSON), `enabled` |
 | `report_history` | Log de envios: `config_id`, `sent_at`, `status` (ok/error), `error_msg` |
 | `licenses` | Ed25519-signed tokens. `revoked` flag |
-| `users` | `(tenant_id, user_id)` — `user_id` = hostname. `display_name`, `login_user`, `department`, `role` |
+| `users` | `(tenant_id, user_id)` — `user_id` = hostname. `display_name`, `login_user`, `department`, `role`, **`manager`, `photo_url`** (preenchidos pela fonte de RH) |
+| `directory_config` | Fonte de RH por tenant (Admin Master): `provider` (convenia\|google\|none), `convenia_token`, `auto_sync`, `last_sync`, `last_status` |
 | `devices` | One row per device (hostname + OS metadata) |
 | `events` | Raw activity. `bucket` ∈ {window, afk}. `data_json JSONB` = `{app,title}` or `{status}` |
 | `productivity_rules` | Per-tenant pattern rules; evaluated in `created_at` order, first match wins |
@@ -492,7 +570,9 @@ Key indexes: `idx_events_tenant_bucket_ts`, JSONB expression indexes
 `GET /productivity/events_summary`, `GET /workforce/overview`,
 `GET /workforce/timeseries`, `GET|POST /productivity/rules`,
 `DELETE /productivity/rules/{id}`, `GET /productivity/internet`,
-`GET /productivity/apps`, `GET|POST /departments`, `DELETE /departments/{name}`
+`GET /productivity/apps`, `GET|POST /departments`, `DELETE /departments/{name}`,
+`GET /org-chart` (lista enxuta p/ Análises → Organograma: nome, e-mail, depto, manager-texto,
+cargo, team, photo_url, on_vacation; respeita escopo de Líder via `_scope_for`)
 **Admin-only:** `POST /license/issue`, `POST /license/revoke`,
 `POST /admin/tenant-token`, `GET /admin/tenants`, `GET /admin/licenses`,
 `GET /admin/stats`, `GET /admin/audit`, `GET /admin/data-summary`,
@@ -500,6 +580,11 @@ Key indexes: `idx_events_tenant_bucket_ts`, JSONB expression indexes
 **Tenant-scoped (Reports):** `GET /reports`, `POST /reports`,
 `PUT /reports/{id}`, `DELETE /reports/{id}`, `POST /reports/{id}/send`,
 `GET /reports/{id}/history`
+**Ficha / RH:** `GET /collaborator/profile?user_id=` (tenant-scoped) — nome, e-mail,
+departamento, hostname, manager, photo_url. **Admin Master:** `GET|PUT /tenant-directory/config`
+(inclui `convenia_company_id` p/ fotos), `POST /tenant-directory/sync`, `POST /tenant-directory/photos`
+(DE-PARA manual de fotos: `{items:[{key,url}], store_copy}`), `GET /tenant-directory/convenia-sample`
+(diagnóstico: estrutura do 1º colaborador da Convenia — keys, `id`, campos foto). Fonte de RH: Convenia hoje, Google em breve.
 **Public:** `GET /healthz`, `GET /license/pubkey`
 
 When adding an endpoint: add the Pydantic model, the route with the right
@@ -539,7 +624,10 @@ site/dashboard/
     wp-jornada.js         Aba Jornada de Trabalho (loadJornada, computeJornadas)
     wp-settings.js        Aba Configurações (regras, apps, depts, colaboradores)
     wp-reports.js         Relatórios + conta de e-mail SMTP do tenant (CRUD, preview, histórico)
-    wp-users.js           Usuários do painel (CRUD, papéis, escopo do Líder), Licença, Financeiro
+    wp-users.js           Usuários do painel (CRUD, papéis, escopo do Líder), Licença, Financeiro, Fonte de dados RH (loadDirectoryConfig/save/sync)
+    wp-tempoativo.js      Aba Análises → Tempo Ativo (todos os colaboradores; busca/ordenação/multi-depto; gráfico clicável → ficha)
+    wp-orgchart.js        Aba Análises → Organograma (árvore casando `manager`↔`display_name`; expand/collapse por nó, busca, zoom, legenda por depto; clique abre a ficha)
+    wp-profile-modal.js   Modal reutilizável Ficha do Colaborador — openProfileModal(userId,name); drop-in em qualquer página
     wp-locations.js       Coletas → Localização (IPs públicos + geo + mapa Leaflet)
     wp-analytics.js       Aba Alertas (5 sinais via /v1/alerts/today) + Tendências + config de Alertas
     wp-nav.js             Navegação por tabs + dropdowns (switchTab, TABS, TAB_GROUP, loaders)
@@ -549,12 +637,15 @@ site/dashboard/
 #### Navegação (topbar)
 
 ```
-[Visão Geral]  [Coletas ▾]            [Análises ▾]     [⚙ ▾]
-               Pessoas                 Alertas          Configurações
-               Departamentos           Tendências       Sair
-               Eventos
-               Internet
+[Visão Geral]  [Coletas ▾]            [Análises ▾]     [Administrativo ▾]   [⚙ ▾]
+               Pessoas                 Tempo Ativo      … Configurações       Ajustes
+               Departamentos           Organograma        (ex-Licenciamento)  Sair
+               Eventos                 Alertas
+               Internet                Tendências
                Jornada de Trabalho
+
+Nota: "Configurações" é a página do Admin Master (Administrativo, id interno `tab-admlicenca`);
+"Ajustes" (⚙ menu de conta, `tab-config`) são as preferências pessoais/tema.
 ```
 
 #### Features adicionadas em 2026-05-26

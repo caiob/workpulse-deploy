@@ -167,6 +167,7 @@ function openPersonMenu(ev, uid, name) {
   m.className = 'person-menu';
   m.innerHTML = `
     <div class="pm-head">${escHtml(name)}</div>
+    <button onclick="_closePersonMenu();openProfileModal('${su}','${sn}')">👤 Ver ficha</button>
     <button onclick="goToUserPage('events','${su}','${sn}')">⚡ Aplicativos</button>
     <button onclick="goToUserPage('internet','${su}','${sn}')">🌐 Internet</button>
     <button onclick="goToUserPage('consolidado','${su}','${sn}')">📋 Consolidado</button>

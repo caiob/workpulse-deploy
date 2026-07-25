@@ -363,6 +363,17 @@ function _deptFilterOpts(deptId, q) {
   });
 }
 
+// Filtra os membros JÁ existentes de um depto (client-side, sem re-render).
+function _deptFilterMembers(deptId, q) {
+  const box = document.getElementById('deptMembers_' + deptId);
+  if (!box) return;
+  const t = (q || '').trim().toLowerCase();
+  box.querySelectorAll('.dept-user-chip').forEach(chip => {
+    const show = !t || (chip.dataset.name || '').includes(t);
+    chip.style.display = show ? '' : 'none';
+  });
+}
+
 function renderDeptsSection() {
   const el = document.getElementById('deptsList');
   if (!el) return;
@@ -378,15 +389,23 @@ function renderDeptsSection() {
 
   const cards = slice.map(dept => {
     const safeName = dept.name.replace(/'/g, "\\'").replace(/"/g, '&quot;');
-    const userChips = (dept.users || []).map(u => {
+    const members  = (dept.users || []);
+    const userChips = members.map(u => {
       const label   = u.display_name || u.login_user || cleanUserId(u.user_id);
       const safeUid = (u.user_id || '').replace(/'/g, "\\'");
-      return `<span class="dept-user-chip">
+      const dataN   = label.toLowerCase().replace(/"/g, '&quot;');
+      return `<span class="dept-user-chip" data-name="${dataN}">
         ${avatar(label)}
-        <span>${label}</span>
+        <span class="duc-name" title="${label}">${label}</span>
         <button title="Remover do departamento" onclick="removeUserFromDept('${safeUid}','${safeName}')">×</button>
       </span>`;
     }).join('');
+    // Filtro dos membros atuais — sempre no mesmo lugar (posição consistente).
+    // Desabilitado quando o depto está vazio.
+    const memberFilter = `<input type="search" class="dept-members-filter"
+        placeholder="🔎 filtrar membros deste departamento..."
+        ${members.length ? '' : 'disabled'}
+        oninput="_deptFilterMembers(${dept.id}, this.value)">`;
 
     // Candidatos = todos os colaboradores que NÃO estão neste depto (inclui sem
     // depto e os de outros, p/ poder mover). O rótulo mostra o depto atual.
@@ -411,7 +430,8 @@ function renderDeptsSection() {
           <button class="del-btn" onclick="deleteDept('${safeName}')">Excluir</button>
         </div>
       </div>
-      <div class="dept-users-list">${userChips || '<span style="color:var(--text-muted);font-size:12px">Nenhum colaborador neste departamento.</span>'}</div>
+      ${memberFilter}
+      <div class="dept-users-list" id="deptMembers_${dept.id}">${userChips || '<span class="dept-users-empty">Nenhum colaborador neste departamento.</span>'}</div>
       <div class="dept-add-user" style="align-items:flex-start;flex-wrap:wrap;gap:8px">
         <div style="flex:1;min-width:200px;display:flex;flex-direction:column;gap:6px">
           <input type="search" placeholder="🔎 filtrar colaborador..." oninput="_deptFilterOpts(${dept.id}, this.value)"
@@ -428,7 +448,7 @@ function renderDeptsSection() {
     </div>`;
   }).join('');
 
-  const grid = `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(440px,1fr));gap:16px;align-items:start">${cards}</div>`;
+  const grid = `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(440px,1fr));gap:16px;align-items:stretch">${cards}</div>`;
   let pager = '';
   if (pages > 1) {
     const nav = (label, page, disabled) =>

@@ -624,7 +624,11 @@ button.cat-btn:hover { background: rgba(108,140,255,.12); }
 .dept-mgmt-card {
   background: var(--bg-2); border: 1px solid var(--border-soft);
   border-radius: 10px; padding: 16px; margin-bottom: 14px;
+  display: flex; flex-direction: column;
 }
+/* Empurra o bloco de adicionar colaborador para a base, alinhando cards
+   lado a lado mesmo quando um tem mais membros que o outro. */
+.dept-mgmt-card .dept-add-user { margin-top: auto; }
 .dept-mgmt-card .dept-header {
   display: flex; align-items: center; justify-content: space-between;
   margin-bottom: 10px;
@@ -637,18 +641,39 @@ button.cat-btn:hover { background: rgba(108,140,255,.12); }
   background: var(--panel-soft); padding: 2px 8px; border-radius: 12px;
 }
 .dept-mgmt-card .dept-actions { display: flex; gap: 6px; }
-.dept-users-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+/* Membros do departamento: lista vertical compacta e rolável com ALTURA FIXA,
+   para que todos os cards fiquem do mesmo tamanho independente do nº de pessoas
+   (antes os chips quebravam em várias linhas e o card crescia sem controle). */
+.dept-members-filter {
+  width: 100%; box-sizing: border-box; margin-top: 10px; margin-bottom: 6px;
+  font-size: 12px; padding: 6px 10px; border: 1px solid var(--border);
+  border-radius: 8px; background: var(--bg-2); color: var(--text);
+}
+.dept-users-list {
+  display: flex; flex-direction: column; gap: 0; margin-top: 0;
+  height: 150px; overflow-y: auto;
+  border: 1px solid var(--border-soft); border-radius: 10px;
+  padding: 4px; background: var(--panel);
+}
 .dept-user-chip {
-  display: inline-flex; align-items: center; gap: 6px;
-  background: var(--panel-soft); border: 1px solid var(--border-soft);
-  border-radius: 20px; padding: 4px 10px 4px 6px;
-  font-size: 12px; color: var(--text);
+  display: flex; align-items: center; gap: 7px;
+  padding: 3px 8px; border-radius: 6px;
+  font-size: 12.5px; color: var(--text);
+}
+.dept-user-chip:hover { background: var(--panel-soft); }
+.dept-user-chip .avatar {
+  width: 22px; height: 22px; min-width: 22px; font-size: 9px;
+}
+.dept-user-chip .duc-name {
+  flex: 1; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
 }
 .dept-user-chip button {
   background: none; border: none; color: var(--text-muted);
-  cursor: pointer; padding: 0; font-size: 13px; line-height: 1;
+  cursor: pointer; padding: 0 2px; font-size: 15px; line-height: 1; flex-shrink: 0;
 }
 .dept-user-chip button:hover { color: var(--danger); }
+.dept-users-empty { color: var(--text-muted); font-size: 12px; padding: 8px; }
 .dept-add-user {
   display: flex; gap: 6px; align-items: center; margin-top: 10px;
   padding-top: 10px; border-top: 1px solid var(--border-soft);
@@ -1369,3 +1394,195 @@ body.theme-light .acct-dropdown {
   .toolbar { padding: 10px; }
 }
 
+
+/* =====================================================================
+   Modal reutilizável — Ficha do Colaborador (wp-profile-modal.js)
+   Drop-in: qualquer página chama openProfileModal(userId, name).
+   ===================================================================== */
+.wp-modal-overlay {
+  position: fixed; inset: 0; z-index: 2000;
+  background: rgba(6, 10, 26, .62); backdrop-filter: blur(3px);
+  display: flex; align-items: center; justify-content: center; padding: 20px;
+  animation: wpModalFade .14s ease-out;
+}
+@keyframes wpModalFade { from { opacity: 0 } to { opacity: 1 } }
+.wp-modal-card {
+  width: 100%; max-width: 420px;
+  background: var(--panel); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, .5);
+  overflow: hidden; animation: wpModalPop .16s ease-out;
+}
+@keyframes wpModalPop { from { transform: translateY(8px) scale(.98); opacity: .6 } to { transform: none; opacity: 1 } }
+.wp-modal-head {
+  display: flex; align-items: center; gap: 14px;
+  padding: 20px; border-bottom: 1px solid var(--border-soft);
+  background: linear-gradient(180deg, var(--panel-2), var(--panel));
+  position: relative;
+}
+.wp-modal-photo {
+  width: 64px; height: 64px; min-width: 64px; border-radius: 50%;
+  object-fit: cover; border: 2px solid var(--border);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 22px; font-weight: 700; color: #fff;
+  background: linear-gradient(135deg, #6c8cff, #34d399);
+}
+.wp-modal-photo.lg { font-size: 22px; }
+.wp-modal-title { flex: 1; min-width: 0; }
+.wp-modal-title h3 { margin: 0; font-size: 17px; line-height: 1.2; }
+.wp-modal-title .wp-modal-dept {
+  display: inline-block; margin-top: 6px; font-size: 11px;
+  color: var(--text-dim); background: var(--panel-soft);
+  padding: 2px 9px; border-radius: 12px;
+}
+.wp-modal-close {
+  position: absolute; top: 12px; right: 12px;
+  background: none; border: none; color: var(--text-muted);
+  font-size: 22px; line-height: 1; cursor: pointer; padding: 2px 6px; border-radius: 8px;
+}
+.wp-modal-close:hover { color: var(--text); background: var(--panel-soft); }
+.wp-modal-body { padding: 8px 20px 18px; }
+.wp-modal-row {
+  display: flex; align-items: flex-start; gap: 12px;
+  padding: 11px 0; border-bottom: 1px solid var(--border-soft);
+}
+.wp-modal-row:last-child { border-bottom: none; }
+.wp-modal-row .wp-modal-label {
+  width: 116px; min-width: 116px; font-size: 12px; color: var(--text-muted);
+  display: flex; align-items: center; gap: 6px;
+}
+.wp-modal-row .wp-modal-value {
+  flex: 1; min-width: 0; font-size: 13.5px; color: var(--text);
+  word-break: break-word;
+}
+.wp-modal-value.muted { color: var(--text-muted); font-style: italic; }
+.wp-modal-foot {
+  padding: 10px 20px 16px; font-size: 11px; color: var(--text-muted);
+  border-top: 1px solid var(--border-soft);
+}
+.wp-modal-skeleton {
+  height: 13px; border-radius: 6px;
+  background: linear-gradient(90deg, var(--panel-soft) 25%, var(--panel-2) 37%, var(--panel-soft) 63%);
+  background-size: 400% 100%; animation: wpSkel 1.2s ease-in-out infinite;
+}
+@keyframes wpSkel { 0% { background-position: 100% 0 } 100% { background-position: -100% 0 } }
+
+/* =====================================================================
+   ANÁLISES → ORGANOGRAMA (wp-orgchart.js)
+   Árvore hierárquica interativa: foto/iniciais, nome, cargo, departamento
+   (cor por depto). Clique no cartão abre a Ficha; clique no chevron
+   expande/recolhe os liderados. Conector CSS clássico via <ul>/<li>.
+   ===================================================================== */
+.oc-note {
+  font-size: 12px; color: var(--text-muted); margin: -10px 0 14px 2px;
+}
+.oc-legend {
+  display: flex; flex-wrap: wrap; gap: 8px 14px;
+  padding: 10px 14px; margin-bottom: 14px;
+  background: var(--panel-soft); border: 1px solid var(--border-soft);
+  border-radius: 10px;
+}
+.oc-legend-item { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--text-dim); }
+.oc-legend .oc-dot { width: 9px; height: 9px; }
+
+.oc-wrap {
+  position: relative;
+  background: linear-gradient(180deg, var(--panel) 0%, var(--panel-2) 100%);
+  border: 1px solid var(--border-soft); border-radius: var(--radius);
+  box-shadow: var(--shadow-soft);
+  overflow: hidden;
+}
+.oc-zoom {
+  position: absolute; right: 14px; bottom: 14px; z-index: 5;
+  display: flex; align-items: center; gap: 4px;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 10px; padding: 5px; box-shadow: var(--shadow-soft);
+}
+.oc-zoom button {
+  width: 26px; height: 26px; border-radius: 7px; border: 1px solid var(--border);
+  background: var(--bg-2); color: var(--text); cursor: pointer; font-size: 14px; line-height: 1;
+}
+.oc-zoom button:hover { background: var(--panel-soft); }
+.oc-zoom-lbl { font-size: 11px; color: var(--text-dim); width: 38px; text-align: center; }
+
+.oc-scroll {
+  overflow: auto;
+  max-height: calc(100vh - 300px);
+  min-height: 380px;
+  padding: 30px 36px 46px;
+}
+#ocCanvas { display: inline-block; min-width: 100%; transform-origin: top center; transition: transform .15s ease; }
+
+/* ---------- Árvore (padrão CSS clássico de organograma via <ul>/<li>) ---------- */
+.oc-tree, .oc-tree ul {
+  list-style: none; margin: 0; padding: 26px 0 0; position: relative;
+  display: flex; justify-content: center;
+}
+.oc-tree.oc-roots { padding-top: 0; gap: 44px; }
+.oc-tree li {
+  position: relative; display: flex; flex-direction: column; align-items: center;
+  padding: 26px 12px 0;
+}
+.oc-tree.oc-roots > li { padding-top: 0; }
+.oc-tree li::before, .oc-tree li::after {
+  content: ''; position: absolute; top: 0; right: 50%;
+  border-top: 2px solid var(--border); width: 50%; height: 26px;
+}
+.oc-tree li::after { right: auto; left: 50%; border-left: 2px solid var(--border); }
+.oc-tree li:only-child::after, .oc-tree li:only-child::before { display: none; }
+.oc-tree li:only-child { padding-top: 0; }
+.oc-tree li:first-child::before, .oc-tree li:last-child::after { border: 0 none; }
+.oc-tree li:last-child::before { border-right: 2px solid var(--border); border-radius: 0 6px 0 0; }
+.oc-tree li:first-child::after { border-radius: 6px 0 0 0; }
+.oc-tree.oc-roots > li::before, .oc-tree.oc-roots > li::after { display: none; }
+.oc-tree ul::before {
+  content: ''; position: absolute; top: 0; left: 50%;
+  border-left: 2px solid var(--border); width: 0; height: 26px;
+}
+.oc-tree > li > ul::before { display: none; } /* a linha já sai do card acima */
+.oc-tree li > .oc-card { margin-bottom: 0; }
+.oc-tree li > ul { margin-top: 0; }
+
+/* ---------- Cartão ---------- */
+.oc-card {
+  width: 202px; background: var(--bg-2); border: 1px solid var(--border);
+  border-radius: 12px; padding: 12px 12px 10px; box-shadow: var(--shadow-soft);
+  position: relative; z-index: 1;
+}
+.oc-card.root { border-color: var(--primary); box-shadow: 0 0 0 1px var(--primary), var(--shadow-soft); }
+.oc-card.match { box-shadow: 0 0 0 2px var(--accent); }
+.oc-card-top { display: flex; align-items: center; gap: 9px; cursor: pointer; border-radius: 8px; padding: 2px; }
+.oc-card-top:hover { background: var(--panel-soft); }
+.oc-photo {
+  width: 42px; height: 42px; min-width: 42px; border-radius: 50%;
+  object-fit: cover; border: 2px solid var(--border);
+}
+.oc-photo-fallback {
+  display: flex; align-items: center; justify-content: center;
+  font-size: 14px; font-weight: 700; color: #fff;
+  background: linear-gradient(135deg, var(--primary), var(--accent));
+}
+.oc-card-info { min-width: 0; }
+.oc-card-name {
+  font-size: 13px; font-weight: 700; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.oc-card-role {
+  font-size: 11.5px; color: var(--text-dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px;
+}
+.oc-card-dept {
+  display: flex; align-items: center; gap: 6px; margin-top: 9px;
+  font-size: 10.5px; color: var(--text-dim);
+  background: var(--panel-soft); border-radius: 8px; padding: 4px 8px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.oc-dot { width: 8px; height: 8px; min-width: 8px; border-radius: 50%; }
+.oc-toggle {
+  display: flex; align-items: center; justify-content: center; gap: 4px;
+  width: 100%; margin-top: 8px; padding: 4px 0;
+  background: transparent; border: 1px dashed var(--border); border-radius: 8px;
+  color: var(--text-dim); font-size: 11px; cursor: pointer;
+}
+.oc-toggle:hover { background: var(--panel-soft); color: var(--text); border-style: solid; }
+.oc-toggle-arrow { font-size: 10px; }

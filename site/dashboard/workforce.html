@@ -11,7 +11,7 @@
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
-<link rel="stylesheet" href="css/workforce.css?v=26">
+<link rel="stylesheet" href="css/workforce.css?v=30">
 <link rel="icon" type="image/jpeg" href="../assets/logo-workpulse.jpeg">
 </head>
 <body>
@@ -168,6 +168,7 @@
       </button>
       <div class="nav-dropdown-menu">
         <button data-tab="tempoativo">⏳ Tempo Ativo</button>
+        <button data-tab="organograma">🧬 Organograma</button>
         <button data-tab="alerts">🔔 Alertas</button>
         <button data-tab="trends">📈 Tendências</button>
       </div>
@@ -186,7 +187,7 @@
         <button data-tab="colaboradores">👥 Colaboradores</button>
         <button data-tab="relatorios">📧 Relatórios</button>
         <button data-tab="admalertas">🔔 Alertas</button>
-        <button data-tab="admlicenca" data-role="admin_master">📄 Licenciamento</button>
+        <button data-tab="admlicenca" data-role="admin_master">⚙️ Configurações</button>
         <button data-tab="suportetec" data-role="suporte_admin">🛠 Suporte Técnico</button>
       </div>
     </div>
@@ -270,7 +271,7 @@
             <circle cx="12" cy="12" r="3"/>
             <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
           </svg>
-          Configurações
+          Ajustes
         </button>
         <button class="acct-action acct-action-logout" onclick="logout()">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -506,6 +507,44 @@
         <div id="taChartWrap" style="margin-top:10px;max-height:640px;overflow-y:auto">
           <div id="taChartBox" style="position:relative"><canvas id="chartTempoAtivo"></canvas></div>
         </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── ORGANOGRAMA ── -->
+  <section id="tab-organograma" class="hide">
+    <h1 class="page-title">Como a <span class="em">equipe</span> se organiza.</h1>
+    <p class="page-sub">Organograma a partir dos dados de gestor da Convenia. Clique na foto/nome para abrir a ficha; clique no chevron para expandir os liderados.</p>
+
+    <div class="toolbar">
+      <div style="flex:1;min-width:200px">
+        <input id="ocSearch" oninput="ocSearchInput(this.value)" placeholder="Buscar por nome, cargo ou departamento" style="width:100%;max-width:360px">
+      </div>
+      <div><label>Níveis exibidos</label>
+        <select id="ocLevels" onchange="ocSetLevels(this)">
+          <option value="2">2 níveis</option>
+          <option value="3" selected>3 níveis</option>
+          <option value="4">4 níveis</option>
+          <option value="all">Todos</option>
+        </select>
+      </div>
+      <button class="ghost" onclick="ocExpandAll()">Expandir tudo</button>
+      <button class="ghost" onclick="ocCollapseAll()">Recolher tudo</button>
+      <button class="ghost" onclick="loadOrgChart()">↻ Atualizar</button>
+    </div>
+
+    <p class="oc-note" id="ocNote"></p>
+    <div class="oc-legend hide" id="ocLegend"></div>
+
+    <div class="oc-wrap">
+      <div class="oc-scroll">
+        <div id="ocCanvas"><div id="ocTreeWrap"></div></div>
+      </div>
+      <div class="oc-zoom">
+        <button type="button" onclick="ocZoom(-0.1)" title="Diminuir">−</button>
+        <span class="oc-zoom-lbl" id="ocZoomLbl">100%</span>
+        <button type="button" onclick="ocZoom(0.1)" title="Aumentar">+</button>
+        <button type="button" onclick="ocZoomReset()" title="Redefinir zoom">⤾</button>
       </div>
     </div>
   </section>
@@ -1463,7 +1502,7 @@
               <td style="text-align:center;color:var(--text-muted)">—</td>
             </tr>
             <tr>
-              <td>Financeiro, Licenciamento e Usuários do painel</td>
+              <td>Financeiro, Configurações e Usuários do painel</td>
               <td style="text-align:center;color:#16a34a">✓</td>
               <td style="text-align:center;color:var(--text-muted)">—</td>
               <td style="text-align:center;color:var(--text-muted)">—</td>
@@ -1490,7 +1529,7 @@
         </table>
       </div>
       <p style="font-size:11.5px;color:var(--text-dim);margin:12px 0 0">
-        <strong>Admin Master</strong> tem acesso total. <strong>Admin</strong> administra o operacional, mas não vê Financeiro/Licenciamento/Usuários nem exclui colaboradores.
+        <strong>Admin Master</strong> tem acesso total. <strong>Admin</strong> administra o operacional, mas não vê Financeiro/Configurações/Usuários nem exclui colaboradores.
         <strong>Supervisor</strong> acompanha os dados de toda a equipe (sem áreas administrativas). <strong>Líder</strong> é como o Supervisor, porém vê apenas os colaboradores atribuídos a ele pelo Admin Master.
         <strong>Suporte</strong> enxerga apenas a tela de Suporte Técnico — apoio à instalação e diagnóstico dos agentes — de todos os colaboradores, sem acesso ao restante do painel.
       </p>
@@ -1523,10 +1562,70 @@
     </div>
   </div>
 
-  <!-- ── ADMINISTRATIVO: Licenciamento ── -->
+  <!-- ── ADMINISTRATIVO: Configurações (Admin Master) ── -->
   <section id="tab-admlicenca" class="hide">
-    <h1 class="page-title"><span class="em">Licenciamento</span>.</h1>
-    <p class="page-sub">Plano, assentos em uso e solicitação de upgrade.</p>
+    <h1 class="page-title"><span class="em">Configurações</span>.</h1>
+    <p class="page-sub">Parâmetros administrativos do tenant — fonte de dados de RH, plano e assentos. Apenas Admin Master.</p>
+
+    <!-- Card: Fonte de dados de RH (somente Admin Master) -->
+    <div class="card no-bar" style="margin-bottom:18px" data-role="admin_master">
+      <h3>Fonte de dados (RH)</h3>
+      <p style="font-size:12px;color:var(--text-dim);margin:4px 0 14px">
+        De onde buscar <strong>foto</strong> e <strong>gestor</strong> dos colaboradores (casados por e-mail). A carga roda automaticamente 1x por dia; você também pode sincronizar na hora.
+      </p>
+      <div class="config-form" style="display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end">
+        <div>
+          <label>Fonte</label>
+          <select id="dirProvider" onchange="dirProviderChange()">
+            <option value="none">Nenhuma</option>
+            <option value="convenia">Convenia</option>
+            <option value="google" disabled>Google Workspace (em breve)</option>
+          </select>
+        </div>
+        <div id="dirConveniaTokenWrap" style="flex:1;min-width:260px">
+          <label>Token da API Convenia <span id="dirTokenState" style="font-size:11px;color:var(--text-muted)"></span></label>
+          <input id="dirConveniaToken" type="password" autocomplete="off" placeholder="cole o token…" style="width:100%;box-sizing:border-box">
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <label style="display:inline-flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;padding-top:2px">
+            <input type="checkbox" id="dirAutoSync" style="width:auto"> Sincronizar todo dia
+          </label>
+        </div>
+      </div>
+      <div style="margin-top:14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <button class="primary" onclick="saveDirectoryConfig()">Salvar</button>
+        <button class="ghost" onclick="syncDirectoryNow()">↻ Sincronizar agora</button>
+        <span id="dirStatus" style="font-size:12px;color:var(--text-dim)"></span>
+      </div>
+
+      <!-- DE-PARA de fotos (a Convenia não expõe foto via API) -->
+      <details style="margin-top:18px;border-top:1px solid var(--border-soft);padding-top:14px">
+        <summary style="cursor:pointer;font-size:13px;font-weight:600;color:var(--primary,#6c8cff)">
+          📷 Fotos por DE-PARA (fallback manual)
+        </summary>
+        <p style="font-size:12px;color:var(--text-dim);margin:10px 0 8px">
+          A foto não vem pela API da Convenia. Cole aqui a <strong>lista de links das fotos</strong>
+          (um por linha) — cada link já contém o <strong>UUID do colaborador</strong> (o mesmo `id`
+          da API), então o casamento é automático por UUID, sem precisar de nome. Rode o
+          <strong>Sincronizar agora</strong> antes (grava os UUIDs). Também aceita
+          <code>nome ; link</code> ou <code>e-mail ; link</code>.
+        </p>
+        <textarea id="photoMapInput" rows="6" placeholder="Caio Batalha ; https://s3.amazonaws.com/.../photo_602561419.png
+allan.assis@empresa.com ; https://s3.amazonaws.com/.../photo_680202048.png"
+          style="width:100%;box-sizing:border-box;resize:vertical;font-size:12px;font-family:monospace;background:var(--bg-2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px 10px"></textarea>
+        <div style="margin-top:10px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+          <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text-dim);cursor:pointer">
+            <input type="checkbox" id="photoStoreCopy" style="width:auto">
+            Guardar cópia (baixa a imagem — robusto se a Convenia mudar o link)
+          </label>
+          <button class="primary" style="font-size:12px;padding:6px 14px" onclick="importPhotos()">Importar fotos</button>
+          <span id="photoMapStatus" style="font-size:12px;color:var(--text-dim)"></span>
+        </div>
+        <div id="photoMapUnmatched" style="font-size:12px;color:#f59e0b;margin-top:8px"></div>
+      </details>
+    </div>
+
     <!-- Card: Licença (somente Admin Master) -->
     <div class="card no-bar" style="margin-bottom:18px" data-role="admin_master">
       <h3>Licença</h3>
@@ -1605,10 +1704,10 @@
     </div>
   </section>
 
-  <!-- ── CONFIGURAÇÕES ── -->
+  <!-- ── AJUSTES (preferências do usuário) ── -->
   <section id="tab-config" class="hide">
-    <h1 class="page-title"><span class="em">Configurações</span>.</h1>
-    <p class="page-sub">Produtividade, departamentos, colaboradores e preferências de aparência.</p>
+    <h1 class="page-title"><span class="em">Ajustes</span>.</h1>
+    <p class="page-sub">Preferências de aparência e da sua conta.</p>
 
     <!-- Card: Aparência / Tema -->
     <div class="card no-bar" style="margin-bottom:18px">
@@ -1666,20 +1765,22 @@
 <script src="js/wp-core.js?v=23" defer></script>
 <script src="js/wp-datepicker.js?v=17" defer></script>
 <script src="js/wp-overview.js?v=23" defer></script>
-<script src="js/wp-people.js?v=24" defer></script>
+<script src="js/wp-people.js?v=25" defer></script>
 <script src="js/wp-departments.js?v=17" defer></script>
 <script src="js/wp-analytics.js?v=25" defer></script>
 <script src="js/wp-tempoativo.js?v=5" defer></script>
+<script src="js/wp-profile-modal.js?v=2" defer></script>
+<script src="js/wp-orgchart.js?v=1" defer></script>
 <script src="js/wp-events.js?v=19" defer></script>
 <script src="js/wp-internet.js?v=20" defer></script>
 <script src="js/wp-consolidado.js?v=10" defer></script>
-<script src="js/wp-jornada.js?v=25" defer></script>
+<script src="js/wp-jornada.js?v=26" defer></script>
 <script src="js/wp-locations.js?v=5" defer></script>
-<script src="js/wp-settings.js?v=33" defer></script>
-<script src="js/wp-users.js?v=27" defer></script>
+<script src="js/wp-settings.js?v=35" defer></script>
+<script src="js/wp-users.js?v=32" defer></script>
 <script src="js/wp-support.js?v=5" defer></script>
 <script src="js/wp-reports.js?v=20" defer></script>
-<script src="js/wp-nav.js?v=33" defer></script>
+<script src="js/wp-nav.js?v=34" defer></script>
 <script src="js/wp-auth.js?v=23" defer></script>
 
 </body>

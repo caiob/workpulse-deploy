@@ -308,6 +308,28 @@ _SCHEMA_STMTS = [
     # Idempotência (Bug 1 / Fase B): UUID por evento enviado pelo agente novo. O
     # índice único parcial é criado CONCURRENTLY em init_db (não trava o ingest).
     "ALTER TABLE events ADD COLUMN IF NOT EXISTS event_id TEXT",
+    # Ficha do colaborador: gestor e foto vêm da fonte de RH (sync diário).
+    # Colunas nuláveis criadas já para o contrato do endpoint /profile.
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS manager    TEXT",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS photo_url  TEXT",
+    # UUID do colaborador na Convenia (= pasta da foto no S3) — casa fotos por UUID.
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS convenia_id TEXT",
+    # Cargo (job.name) e Time (team.name = subdivisão do departamento) — do RH.
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS cargo TEXT",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS team  TEXT",
+    # Configuração da fonte de dados de RH por tenant (Convenia hoje; Google em breve).
+    """
+    CREATE TABLE IF NOT EXISTS directory_config (
+        tenant_id     TEXT PRIMARY KEY,
+        provider      TEXT NOT NULL DEFAULT 'none',   -- 'convenia' | 'google' | 'none'
+        convenia_token TEXT,
+        auto_sync     BOOLEAN NOT NULL DEFAULT TRUE,
+        last_sync     TEXT,
+        last_status   TEXT
+    )
+    """,
+    # UUID da empresa na Convenia (constante) — usado p/ montar o link da foto no S3.
+    "ALTER TABLE directory_config ADD COLUMN IF NOT EXISTS convenia_company_id TEXT",
     "CREATE INDEX IF NOT EXISTS idx_daily_tenant_day    ON daily_summaries(tenant_id, day)",
     "CREATE INDEX IF NOT EXISTS idx_licenses_tenant     ON licenses(tenant_id)",
     "CREATE INDEX IF NOT EXISTS idx_audit_ts            ON audit_log(ts)",
@@ -960,6 +982,33 @@ async def _retention_worker() -> None:
         await asyncio.sleep(86400)
 
 
+def _do_directory_sync_all() -> None:
+    """Carga diária da fonte de RH: sincroniza todos os tenants com fonte
+    configurada e auto_sync ligado. Erros por tenant não derrubam o worker
+    (ficam registrados em directory_config.last_status)."""
+    try:
+        with db() as c:
+            rows = c.execute(
+                "SELECT tenant_id FROM directory_config "
+                "WHERE provider <> 'none' AND auto_sync = TRUE"
+            ).fetchall()
+        for r in rows:
+            try:
+                _run_directory_sync(r["tenant_id"])
+            except Exception as exc:
+                print(f"[directory_sync] {r['tenant_id']}: {exc}", flush=True)
+    except Exception as exc:
+        print(f"[directory_sync] worker error: {exc}", flush=True)
+
+
+async def _directory_sync_worker() -> None:
+    await asyncio.sleep(120)   # deixa o boot respirar
+    while True:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _do_directory_sync_all)
+        await asyncio.sleep(86400)   # 1x por dia
+
+
 # ---------------------------------------------------------------------------
 # ROLLUP (agregados) — compute, worker e helpers de leitura
 # ---------------------------------------------------------------------------
@@ -1349,6 +1398,7 @@ async def lifespan(app: FastAPI):
     task_rollup    = asyncio.create_task(_rollup_worker())
     task_dedup     = asyncio.create_task(_event_id_dedup_watcher())
     task_ihbf      = asyncio.create_task(_ingest_hour_backfill_task())
+    task_dirsync   = asyncio.create_task(_directory_sync_worker())
     yield
     task_retention.cancel()
     task_reports.cancel()
@@ -1356,7 +1406,8 @@ async def lifespan(app: FastAPI):
     task_rollup.cancel()
     task_dedup.cancel()
     task_ihbf.cancel()
-    for t in (task_retention, task_reports, task_alerts, task_rollup, task_dedup, task_ihbf):
+    task_dirsync.cancel()
+    for t in (task_retention, task_reports, task_alerts, task_rollup, task_dedup, task_ihbf, task_dirsync):
         try:
             await t
         except asyncio.CancelledError:
@@ -1676,6 +1727,76 @@ def list_users(tenant: str, request: Request):
         aset = set(allowed)
         out = [r for r in out if r["user_id"] in aset]
     return {"users": out}
+
+
+@app.get("/v1/org-chart", dependencies=[Depends(require_tenant_scope)])
+def org_chart(tenant: str, request: Request):
+    """Lista enxuta para montar o Organograma (Analises -> Organograma):
+    nome, cargo, departamento, foto e o NOME do gestor (texto vindo da
+    Convenia -- ver directory_config / _directory_upsert). O front-end monta
+    a arvore casando `manager` (texto) com `display_name` de outro
+    colaborador do mesmo tenant. Respeita o mesmo escopo de Lider das
+    demais abas de Analises (_scope_for -- Admin/Admin Master veem tudo,
+    Lider ve so o proprio ramo)."""
+    allowed, _stag = _scope_for(request, tenant)
+    cache_key = f"{tenant}:org_chart{_stag}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+    SC = " AND user_id = ANY(%s)" if allowed is not None else ""
+    A  = [allowed] if allowed is not None else []
+    with db() as c:
+        rows = c.execute(
+            f"""SELECT user_id, display_name, email, department, manager,
+                       cargo, team, photo_url, on_vacation
+                FROM users WHERE tenant_id=%s{SC} ORDER BY display_name""",
+            tuple([tenant, *A]),
+        ).fetchall()
+    out = {"people": [dict(r) for r in rows]}
+    _cache_set(cache_key, out)
+    return out
+
+
+@app.get("/v1/collaborator/profile", dependencies=[Depends(require_tenant_scope)])
+def collaborator_profile(tenant: str, user_id: str, request: Request):
+    """Ficha resumida de um colaborador para o modal reutilizável:
+    nome, e-mail, departamento, nome da máquina (hostname), gestor e foto.
+
+    Gestor (`manager`) e foto (`photo_url`) vêm do Google Directory via sync
+    noturno (fase 2); ficam nulos enquanto a integração não estiver configurada.
+    Nome, e-mail, departamento e máquina saem do que já coletamos hoje.
+    """
+    allowed = _lider_allowed_ids(request, tenant)
+    if allowed is not None and user_id not in set(allowed):
+        raise HTTPException(status_code=403, detail="colaborador fora do seu escopo")
+    with db() as c:
+        u = c.execute(
+            """SELECT user_id, display_name, email, department,
+                      manager, photo_url, cargo, team, last_seen
+               FROM users WHERE tenant_id = %s AND user_id = %s""",
+            (tenant, user_id),
+        ).fetchone()
+        if not u:
+            raise HTTPException(status_code=404, detail="colaborador não encontrado")
+        dev = c.execute(
+            """SELECT hostname FROM devices
+               WHERE tenant_id = %s AND user_id = %s
+               ORDER BY last_seen DESC LIMIT 1""",
+            (tenant, user_id),
+        ).fetchone()
+    return {
+        "tenant":       tenant,
+        "user_id":      u["user_id"],
+        "display_name": u["display_name"],
+        "email":        u["email"],
+        "department":   u["department"],
+        "manager":      u["manager"],
+        "photo_url":    u["photo_url"],
+        "cargo":        u["cargo"],
+        "team":         u["team"],
+        "hostname":     dev["hostname"] if dev else None,
+        "last_seen":    u["last_seen"],
+    }
 
 
 @app.get("/v1/users/{user_id}/summary", dependencies=[Depends(require_tenant_scope)])
@@ -4293,6 +4414,16 @@ class LicenseRequestIn(BaseModel):
     seats: int | None = None
     message: str | None = None
 
+class DirectoryConfigIn(BaseModel):
+    provider: str | None = None            # 'convenia' | 'google' | 'none'
+    convenia_token: str | None = None      # se vazio/omitido, mantém o token atual
+    convenia_company_id: str | None = None # UUID da empresa (p/ montar link da foto)
+    auto_sync: bool | None = None
+
+class PhotoMapIn(BaseModel):
+    items: list[dict] = []                 # [{key: email|nome, url: <foto>}]
+    store_copy: bool = False               # True = baixa a imagem e guarda cópia (data URI)
+
 def _norm_email(e: str) -> str:
     return (e or "").strip().lower()
 
@@ -4669,6 +4800,386 @@ def tenant_license_get(tenant: str, ctx: Annotated[dict, Depends(require_role("a
         "used": used,
         "available": max(0, seats - used),
     }
+
+
+# ===========================================================================
+# Fonte de dados de RH (Ficha do Colaborador) — Convenia hoje; Google em breve
+# ===========================================================================
+
+# API pública da Convenia — v3 é a atual (2026). Header de auth = "token"
+# (criado em Convenia → Configurações → API → Add new token).
+CONVENIA_BASE = os.getenv("WORKPULSE_CONVENIA_BASE", "https://public-api.convenia.com.br")
+
+def _convenia_get(token: str, path: str, params: dict | None = None) -> Any:
+    """GET autenticado na API pública da Convenia (stdlib, sem dependências novas).
+
+    Envia um User-Agent explícito: sem ele o urllib manda "Python-urllib/…", que
+    o WAF da Convenia bloqueia com 403 (o Postman passa por ter UA próprio). Em
+    erro HTTP, inclui o corpo da resposta na exceção para diagnosticar (IP,
+    permissão do token, etc.)."""
+    import urllib.parse
+    import urllib.request
+    import urllib.error
+    qs   = ("?" + urllib.parse.urlencode(params)) if params else ""
+    req  = urllib.request.Request(CONVENIA_BASE + path + qs, method="GET")
+    req.add_header("token", token)
+    req.add_header("Accept", "application/json")
+    req.add_header("User-Agent", "WorkPulse/1.0 (+https://workpulse.com.br)")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8", "replace")[:300]
+        except Exception:
+            pass
+        raise RuntimeError(f"HTTP {e.code} {e.reason} — {body}".strip()) from None
+
+
+def _convenia_fetch_employees(token: str) -> list[dict]:
+    """Baixa os funcionários da Convenia (paginado, envelope Laravel
+    {message,data,current_page,last_page,next_page_url,...}) e normaliza os
+    campos da ficha. Nomes de campo confirmados no histórico da API v3:
+      - gestor       → `supervisor` {id, name, last_name}
+      - departamento → `department` {id, name}
+      - e-mail prof. → `email`
+    ATENÇÃO: a API pública da Convenia NÃO expõe a foto do colaborador (não há
+    campo de foto/imagem em Listagem/Detalhe). `photo_url` fica None — a foto
+    vem de outra fonte (upload manual no WorkPulse ou Google, quando houver)."""
+    def pick(d: dict, *keys):
+        for k in keys:
+            v = d.get(k)
+            if v:
+                return v
+        return None
+
+    def person_name(d):
+        """Extrai 'Nome Sobrenome' de um objeto {name,last_name}/{full_name} ou string."""
+        if isinstance(d, dict):
+            full = " ".join(x for x in [d.get("name"), d.get("last_name")] if x).strip()
+            return full or d.get("full_name") or d.get("title")
+        return d
+
+    out: list[dict] = []
+    page = 1
+    while page <= 200:   # trava de segurança
+        data = _convenia_get(token, "/api/v3/employees", {"page": page})
+        rows = data.get("data") if isinstance(data, dict) else (data or [])
+        if not rows:
+            break
+        for e in rows:
+            name = person_name(e) or (
+                f"{e.get('name','')} {e.get('last_name','')}".strip() or None)
+            obj_name = lambda d: d.get("name") if isinstance(d, dict) else d
+            out.append({
+                "convenia_id": e.get("id") or e.get("uuid"),   # UUID p/ montar link da foto
+                "email":      _norm_email(pick(e, "email", "professional_email", "corporate_email") or ""),
+                "name":       name,
+                "photo_url":  None,   # resolvido depois via S3 (a API não traz foto)
+                "manager":    person_name(pick(e, "supervisor", "manager", "boss", "leader")),
+                "department": obj_name(pick(e, "department", "area", "sector") or {}),
+                "cargo":      obj_name(pick(e, "job", "role", "position") or {}),   # Cargo = job.name
+                "team":       obj_name(pick(e, "team") or {}),                      # Time = team.name
+            })
+        # Paginação (envelope Laravel): próxima página em next_page_url / last_page.
+        if isinstance(data, dict):
+            nxt  = data.get("next_page_url")
+            cur  = data.get("current_page")
+            last = data.get("last_page")
+            if nxt or (cur and last and int(cur) < int(last)):
+                page += 1
+                continue
+        break
+    return out
+
+
+# Bucket público onde a Convenia guarda as fotos de perfil.
+CONVENIA_S3 = os.getenv("WORKPULSE_CONVENIA_S3",
+                        "https://s3.amazonaws.com/storage-api.rh.live.convenia.com.br")
+
+def _convenia_resolve_photo(company_id: str, emp_id: str) -> str | None:
+    """Monta o link da foto de um colaborador listando a pasta dele no S3 da
+    Convenia (o nome do arquivo `photo_<n>.png` é imprevisível, por isso listamos).
+    Caminho: <company_id>/Colaboradores/<emp_id>/Foto de perfil/<arquivo>.
+    Retorna None se a listagem for negada ou não houver imagem (fallback silencioso)."""
+    if not company_id or not emp_id:
+        return None
+    import urllib.parse
+    import urllib.request
+    import xml.etree.ElementTree as ET
+    prefix = f"{company_id}/Colaboradores/{emp_id}/Foto de perfil/"
+    url = CONVENIA_S3 + "/?list-type=2&prefix=" + urllib.parse.quote(prefix, safe="")
+    try:
+        req = urllib.request.Request(url, method="GET")
+        req.add_header("User-Agent", "WorkPulse/1.0")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = resp.read().decode("utf-8", "replace")
+        root = ET.fromstring(body)
+    except Exception:
+        return None
+    # XML do S3 tem namespace; iteramos ignorando-o e pegamos as <Key> de imagem.
+    keys = [el.text for el in root.iter() if el.tag.endswith("}Key") or el.tag == "Key"]
+    imgs = [k for k in keys if k and k.lower().rsplit(".", 1)[-1] in ("png", "jpg", "jpeg", "webp")]
+    if not imgs:
+        return None
+    # quote preservando as barras da chave; espaços viram %20.
+    return CONVENIA_S3 + "/" + urllib.parse.quote(imgs[0], safe="/")
+
+
+def _directory_upsert(tid: str, people: list[dict]) -> dict:
+    """Casa por e-mail e grava manager/photo_url (só preenche o que veio)."""
+    matched = updated = 0
+    with db() as c:
+        for p in people:
+            if not p.get("email"):
+                continue
+            r = c.execute(
+                """UPDATE users
+                     SET manager     = COALESCE(%s, manager),
+                         photo_url    = COALESCE(%s, photo_url),
+                         department   = COALESCE(NULLIF(%s,''), department),
+                         convenia_id  = COALESCE(%s, convenia_id),
+                         cargo        = COALESCE(NULLIF(%s,''), cargo),
+                         team         = COALESCE(NULLIF(%s,''), team)
+                   WHERE tenant_id = %s AND lower(email) = %s""",
+                (p.get("manager"), p.get("photo_url"), p.get("department") or "",
+                 p.get("convenia_id"), p.get("cargo") or "", p.get("team") or "",
+                 tid, p["email"]),
+            )
+            n = r.rowcount or 0
+            if n:
+                matched += 1
+                updated += n
+    return {"matched": matched, "updated": updated, "source_count": len(people)}
+
+
+def _run_directory_sync(tid: str) -> dict:
+    """Executa a sincronização da fonte configurada para o tenant. Retorna o
+    resumo e grava last_sync/last_status em directory_config."""
+    with db() as c:
+        cfg = c.execute(
+            "SELECT provider, convenia_token, convenia_company_id "
+            "FROM directory_config WHERE tenant_id=%s",
+            (tid,),
+        ).fetchone()
+    if not cfg or (cfg["provider"] or "none") == "none":
+        return {"status": "skipped", "reason": "sem fonte configurada"}
+
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
+    try:
+        if cfg["provider"] == "convenia":
+            if not cfg["convenia_token"]:
+                raise ValueError("token da Convenia não configurado")
+            people = _convenia_fetch_employees(cfg["convenia_token"])
+            # Foto NÃO vem da Convenia (bucket S3 nega listagem). Grava nome/gestor/
+            # departamento/convenia_id; a foto é importada à parte pela lista de links.
+            res = _directory_upsert(tid, people)
+            status = f"ok · {res['matched']} casados / {res['source_count']} na fonte"
+            with db() as c:
+                c.execute(
+                    "UPDATE directory_config SET last_sync=%s, last_status=%s WHERE tenant_id=%s",
+                    (now, status, tid),
+                )
+            return {"status": "ok", **res, "last_sync": now}
+        if cfg["provider"] == "google":
+            raise ValueError("Google Workspace em breve")
+        raise ValueError(f"fonte inválida: {cfg['provider']}")
+    except Exception as exc:
+        status = f"erro: {exc}"
+        with db() as c:
+            c.execute(
+                "UPDATE directory_config SET last_sync=%s, last_status=%s WHERE tenant_id=%s",
+                (now, status, tid),
+            )
+        raise HTTPException(status_code=502, detail=status)
+
+
+@app.get("/v1/tenant-directory/config")
+def tenant_directory_get(tenant: str, ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
+    with db() as c:
+        cfg = c.execute(
+            "SELECT provider, convenia_token, convenia_company_id, auto_sync, last_sync, last_status "
+            "FROM directory_config WHERE tenant_id=%s", (tid,),
+        ).fetchone()
+    if not cfg:
+        return {"provider": "none", "has_token": False, "company_id": None,
+                "auto_sync": True, "last_sync": None, "last_status": None}
+    return {
+        "provider":    cfg["provider"] or "none",
+        "has_token":   bool(cfg["convenia_token"]),   # nunca devolve o token
+        "company_id":  cfg["convenia_company_id"],    # UUID da empresa (não é segredo)
+        "auto_sync":   bool(cfg["auto_sync"]),
+        "last_sync":   cfg["last_sync"],
+        "last_status": cfg["last_status"],
+    }
+
+
+@app.put("/v1/tenant-directory/config")
+def tenant_directory_put(body: DirectoryConfigIn, tenant: str,
+                         ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
+    provider = (body.provider or "none").strip().lower()
+    if provider not in ("none", "convenia", "google"):
+        raise HTTPException(status_code=400, detail="fonte inválida")
+    with db() as c:
+        c.execute(
+            """INSERT INTO directory_config (tenant_id, provider, auto_sync)
+               VALUES (%s, %s, %s)
+               ON CONFLICT (tenant_id) DO UPDATE SET
+                   provider  = EXCLUDED.provider,
+                   auto_sync = EXCLUDED.auto_sync""",
+            (tid, provider, True if body.auto_sync is None else bool(body.auto_sync)),
+        )
+        # Token só é gravado quando enviado não-vazio (evita apagar sem querer).
+        if body.convenia_token is not None and body.convenia_token.strip():
+            c.execute("UPDATE directory_config SET convenia_token=%s WHERE tenant_id=%s",
+                      (body.convenia_token.strip(), tid))
+        # UUID da empresa: aceita o UUID cru OU um link de foto (extrai o UUID).
+        if body.convenia_company_id is not None:
+            raw = body.convenia_company_id.strip()
+            m = _re.search(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                           r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", raw)
+            company = m.group(0) if m else raw
+            c.execute("UPDATE directory_config SET convenia_company_id=%s WHERE tenant_id=%s",
+                      (company or None, tid))
+    return {"status": "ok", "provider": provider}
+
+
+@app.post("/v1/tenant-directory/sync")
+def tenant_directory_sync(tenant: str,
+                          ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
+    return _run_directory_sync(tid)
+
+
+@app.get("/v1/tenant-directory/convenia-sample")
+def tenant_directory_convenia_sample(tenant: str,
+                                     ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    """Diagnóstico: chama a Convenia (1ª página) e devolve a ESTRUTURA do 1º
+    colaborador — lista de campos, o `id`, e quaisquer campos que pareçam foto —
+    sem expor dados sensíveis (salário/CPF etc.). Serve para confirmar se o `id`
+    da API é o mesmo UUID do link da foto e se há algum campo de imagem."""
+    tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
+    with db() as c:
+        cfg = c.execute(
+            "SELECT convenia_token FROM directory_config WHERE tenant_id=%s", (tid,)
+        ).fetchone()
+    if not cfg or not cfg["convenia_token"]:
+        raise HTTPException(status_code=400, detail="token da Convenia não configurado")
+    try:
+        data = _convenia_get(cfg["convenia_token"], "/api/v3/employees", {"page": 1})
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"falha ao chamar a Convenia: {exc}")
+
+    rows  = data.get("data") if isinstance(data, dict) else data
+    first = (rows[0] if rows else {}) if isinstance(rows, list) else {}
+    keys  = sorted(first.keys()) if isinstance(first, dict) else []
+    photo_terms = ("photo", "picture", "avatar", "image", "foto", "url", "file", "thumb")
+    photo_like = {k: first.get(k) for k in keys
+                  if any(t in k.lower() for t in photo_terms)}
+    return {
+        "total_on_page":     len(rows) if isinstance(rows, list) else 0,
+        "envelope_keys":     sorted(data.keys()) if isinstance(data, dict) else [],
+        "employee_keys":     keys,
+        "id_sample":         first.get("id") if isinstance(first, dict) else None,
+        "email_sample":      first.get("email") if isinstance(first, dict) else None,
+        "supervisor_sample": first.get("supervisor") if isinstance(first, dict) else None,
+        "department_sample": first.get("department") if isinstance(first, dict) else None,
+        "photo_like_fields": photo_like,
+    }
+
+
+def _strip_accents(s: str) -> str:
+    import unicodedata
+    return "".join(ch for ch in unicodedata.normalize("NFD", s or "")
+                   if unicodedata.category(ch) != "Mn")
+
+def _norm_name(s: str) -> str:
+    return " ".join(_strip_accents(s or "").lower().split())
+
+def _download_image_data_uri(url: str, cap: int = 3_000_000) -> str:
+    """Baixa a imagem e devolve como data URI (base64). Usado quando o admin
+    escolhe 'guardar cópia' — protege contra a URL da Convenia mudar/privar."""
+    import urllib.request
+    req = urllib.request.Request(url, method="GET")
+    req.add_header("User-Agent", "WorkPulse/1.0")
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        ct  = (resp.headers.get("Content-Type", "") or "").split(";")[0].strip().lower()
+        raw = resp.read(cap + 1)
+    if len(raw) > cap:
+        raise ValueError("imagem maior que o limite")
+    if not ct.startswith("image/"):
+        low = url.lower()
+        ct = ("image/jpeg" if (".jpg" in low or ".jpeg" in low)
+              else "image/webp" if ".webp" in low else "image/png")
+    return f"data:{ct};base64," + base64.b64encode(raw).decode("ascii")
+
+
+@app.post("/v1/tenant-directory/photos")
+def tenant_directory_photos(body: PhotoMapIn, tenant: str,
+                            ctx: Annotated[dict, Depends(require_role("admin_master"))]):
+    """DE-PARA de fotos: recebe pares {key (e-mail OU nome), url} e grava em
+    users.photo_url. Casa por e-mail (se o key tem '@') senão por nome
+    normalizado (sem acento, minúsculo). `store_copy=True` baixa e guarda a
+    imagem embutida (data URI) em vez de só apontar para a URL."""
+    tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
+    with db() as c:
+        users = c.execute(
+            "SELECT user_id, email, display_name, convenia_id FROM users WHERE tenant_id=%s", (tid,)
+        ).fetchall()
+    by_email, by_name, by_cid = {}, {}, {}
+    for u in users:
+        if u["email"]:        by_email[_norm_email(u["email"])] = u["user_id"]
+        if u["display_name"]: by_name.setdefault(_norm_name(u["display_name"]), u["user_id"])
+        if u["convenia_id"]:  by_cid[u["convenia_id"].lower()] = u["user_id"]
+
+    _UUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+    # UUID do colaborador = o que vem logo após "Colaboradores/" (não o da empresa).
+    _CID = _re.compile(r"Colaboradores/(" + _UUID + r")")
+    _ANY = _re.compile(_UUID)
+
+    matched = updated = 0
+    unmatched: list[str] = []
+    with db() as c:
+        for it in (body.items or []):
+            key = (it.get("key") or "").strip()
+            url = (it.get("url") or "").strip()
+            if not url:
+                continue
+            uid = None
+            # 1) casa pelo UUID do colaborador embutido no próprio link (mais robusto).
+            m = _CID.search(url)
+            cid = m.group(1) if m else None
+            if not cid:
+                # sem "Colaboradores/": pega o último UUID do link (heurística)
+                alls = _ANY.findall(url)
+                cid = alls[-1] if alls else None
+            if cid:
+                uid = by_cid.get(cid.lower())
+            # 2) fallback: e-mail ou nome informado como key.
+            if not uid and key:
+                uid = by_email.get(_norm_email(key)) if "@" in key else None
+                if not uid:
+                    uid = by_name.get(_norm_name(key))
+            if not uid:
+                unmatched.append(key or url)
+                continue
+            val = url
+            if body.store_copy:
+                try:
+                    val = _download_image_data_uri(url)
+                except Exception as exc:
+                    unmatched.append(f"{key} (falha ao copiar: {exc})")
+                    continue
+            r = c.execute("UPDATE users SET photo_url=%s WHERE tenant_id=%s AND user_id=%s",
+                          (val, tid, uid))
+            matched += 1
+            updated += r.rowcount or 0
+    return {"matched": matched, "updated": updated,
+            "unmatched": unmatched, "total": len(body.items or [])}
+
 
 @app.post("/v1/tenant-license/assign")
 def tenant_license_assign(body: SeatAssignIn, tenant: str, request: Request,
