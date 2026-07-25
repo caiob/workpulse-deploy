@@ -29,9 +29,9 @@ async function loadOverview() {
       const t = data.totals;
       document.getElementById('kpiOnline').innerHTML    = `${t.online_now || 0}<small>pessoas</small>`;
       document.getElementById('kpiOnlineSub').textContent = `${t.total_users || 0} cadastrados no período`;
-      document.getElementById('kpiActive').innerHTML    = `${fmtH(t.active_seconds)}<small>h</small>`;
-      document.getElementById('kpiActiveSub').textContent = `equivalente a ${Math.round((t.active_seconds || 0) / 3600 / (t.total_users || 1))}h por pessoa`;
-      document.getElementById('kpiToday').innerHTML     = `${fmtH(t.today_active_seconds)}<small>h</small>`;
+      document.getElementById('kpiActive').innerHTML    = `${fmtHM(t.active_seconds)}<small>h</small>`;
+      document.getElementById('kpiActiveSub').textContent = `equivalente a ${fmtHM((t.active_seconds || 0) / (t.total_users || 1))} por pessoa`;
+      document.getElementById('kpiToday').innerHTML     = `${fmtHM(t.today_active_seconds)}<small>h</small>`;
       const sumTotal = (t.active_seconds || 0) + (t.afk_seconds || 0);
       const adh      = sumTotal > 0 ? (t.active_seconds / sumTotal * 100) : 0;
       document.getElementById('kpiAdh').innerHTML       = `${adh.toFixed(0)}<small>%</small>`;
@@ -117,10 +117,10 @@ function _renderDeptsOvPage() {
     return `<div class="dept-row">
       <div>
         <div class="name">${d.dept}</div>
-        <div class="meta">${d.users} pessoa${d.users === 1 ? '' : 's'} · ${fmtH(avg)}h/pessoa</div>
+        <div class="meta">${d.users} pessoa${d.users === 1 ? '' : 's'} · ${fmtHM(avg)}/pessoa</div>
       </div>
       <div class="right">
-        <div class="hours">${fmtH(d.active)}h</div>
+        <div class="hours">${fmtHM(d.active)}h</div>
         <div class="pct">${pct}%</div>
       </div>
       <div class="dept-bar"><span style="width:${pct}%"></span></div>
@@ -169,7 +169,10 @@ function drawUsersChart() {
       responsive: true, maintainAspectRatio: false,
       plugins: { legend: { labels: { color: ct.legend, boxWidth: 12 } } },
       scales: {
-        x: { stacked: true, ticks: { color: ct.label }, grid: { display: false } },
+        x: { stacked: true, grid: { display: false },
+             ticks: { color: ct.label, autoSkip: false, maxRotation: 55, minRotation: 45,
+               // Limita nomes longos no eixo (o nome completo aparece no tooltip).
+               callback: function (v) { const l = this.getLabelForValue(v) || ''; return l.length > 16 ? l.slice(0, 15) + '…' : l; } } },
         y: { stacked: true, beginAtZero: true, ticks: { color: ct.label }, grid: { color: ct.grid } },
       }
     }

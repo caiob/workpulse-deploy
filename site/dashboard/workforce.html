@@ -11,7 +11,7 @@
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
-<link rel="stylesheet" href="css/workforce.css?v=30">
+<link rel="stylesheet" href="css/workforce.css?v=36">
 <link rel="icon" type="image/jpeg" href="../assets/logo-workpulse.jpeg">
 </head>
 <body>
@@ -514,7 +514,7 @@
   <!-- ── ORGANOGRAMA ── -->
   <section id="tab-organograma" class="hide">
     <h1 class="page-title">Como a <span class="em">equipe</span> se organiza.</h1>
-    <p class="page-sub">Organograma a partir dos dados de gestor da Convenia. Clique na foto/nome para abrir a ficha; clique no chevron para expandir os liderados.</p>
+    <p class="page-sub">Organograma com todos os colaboradores da Convenia. Clique na foto/nome para abrir a ficha; clique no chevron para expandir os liderados.</p>
 
     <div class="toolbar">
       <div style="flex:1;min-width:200px">
@@ -522,12 +522,16 @@
       </div>
       <div><label>Níveis exibidos</label>
         <select id="ocLevels" onchange="ocSetLevels(this)">
-          <option value="2">2 níveis</option>
-          <option value="3" selected>3 níveis</option>
+          <option value="2" selected>2 níveis</option>
+          <option value="3">3 níveis</option>
           <option value="4">4 níveis</option>
           <option value="all">Todos</option>
         </select>
       </div>
+      <label class="oc-hide-orphans" title="Some da tela quem não tem gestor vinculado na Convenia (fora o topo real da empresa), evitando caixas soltas por falta de cadastro">
+        <input type="checkbox" id="ocHideOrphans" checked onchange="ocToggleHideOrphans(this)">
+        Ocultar sem gestor
+      </label>
       <button class="ghost" onclick="ocExpandAll()">Expandir tudo</button>
       <button class="ghost" onclick="ocCollapseAll()">Recolher tudo</button>
       <button class="ghost" onclick="loadOrgChart()">↻ Atualizar</button>
@@ -537,7 +541,7 @@
     <div class="oc-legend hide" id="ocLegend"></div>
 
     <div class="oc-wrap">
-      <div class="oc-scroll">
+      <div class="oc-scroll" id="ocScroll">
         <div id="ocCanvas"><div id="ocTreeWrap"></div></div>
       </div>
       <div class="oc-zoom">
@@ -1764,13 +1768,13 @@ allan.assis@empresa.com ; https://s3.amazonaws.com/.../photo_680202048.png"
 <!-- ===== MÓDULOS JS (defer: executam após parse do DOM, em ordem) ===== -->
 <script src="js/wp-core.js?v=23" defer></script>
 <script src="js/wp-datepicker.js?v=17" defer></script>
-<script src="js/wp-overview.js?v=23" defer></script>
+<script src="js/wp-overview.js?v=25" defer></script>
 <script src="js/wp-people.js?v=25" defer></script>
 <script src="js/wp-departments.js?v=17" defer></script>
 <script src="js/wp-analytics.js?v=25" defer></script>
 <script src="js/wp-tempoativo.js?v=5" defer></script>
 <script src="js/wp-profile-modal.js?v=2" defer></script>
-<script src="js/wp-orgchart.js?v=1" defer></script>
+<script src="js/wp-orgchart.js?v=8" defer></script>
 <script src="js/wp-events.js?v=19" defer></script>
 <script src="js/wp-internet.js?v=20" defer></script>
 <script src="js/wp-consolidado.js?v=10" defer></script>

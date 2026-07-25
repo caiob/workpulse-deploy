@@ -1470,24 +1470,45 @@ body.theme-light .acct-dropdown {
 /* =====================================================================
    ANÁLISES → ORGANOGRAMA (wp-orgchart.js)
    Árvore hierárquica interativa: foto/iniciais, nome, cargo, departamento
-   (cor por depto). Clique no cartão abre a Ficha; clique no chevron
-   expande/recolhe os liderados. Conector CSS clássico via <ul>/<li>.
+   (cor por depto, ícone de agente instalado). Clique no cartão abre a
+   Ficha (ou um resumo local, se a pessoa não tiver agente); clique no
+   chevron expande/recolhe só aquele ramo. Ao expandir, os cards crescem
+   pro lado (empurram os irmãos) — o canvas rola horizontalmente; os
+   cards NUNCA comprimem (flex-shrink:0), pra não sobrepor. Conector CSS
+   clássico via <ul>/<li>. Uma raiz "primária" (nível 0 — normalmente o
+   CEO) sempre aparece; as demais raízes (gente sem gestor cadastrado por
+   engano) ficam ocultas por padrão (checkbox "Ocultar sem gestor").
    ===================================================================== */
 .oc-note {
   font-size: 12px; color: var(--text-muted); margin: -10px 0 14px 2px;
 }
 .oc-legend {
-  display: flex; flex-wrap: wrap; gap: 8px 14px;
+  display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center;
   padding: 10px 14px; margin-bottom: 14px;
   background: var(--panel-soft); border: 1px solid var(--border-soft);
   border-radius: 10px;
 }
 .oc-legend-item { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--text-dim); }
 .oc-legend .oc-dot { width: 9px; height: 9px; }
+.oc-legend-sep { width: 1px; height: 14px; background: var(--border); margin: 0 2px; }
+.oc-legend-agent { display: flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--text-dim); }
+.oc-legend-agent .oc-agent-dot {
+  width: 10px; height: 10px; border-radius: 50%; display: inline-block; border: 1px solid rgba(0,0,0,.15);
+}
+.oc-legend-agent .oc-agent-dot.yes { background: var(--accent); }
+.oc-legend-agent .oc-agent-dot.no  { background: var(--danger); }
+
+.oc-hide-orphans {
+  display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--text-dim);
+  cursor: pointer; user-select: none;
+}
+.oc-hide-orphans input { width: 15px; height: 15px; cursor: pointer; accent-color: var(--primary); }
 
 .oc-wrap {
   position: relative;
-  background: linear-gradient(180deg, var(--panel) 0%, var(--panel-2) 100%);
+  background:
+    radial-gradient(circle, var(--border-soft) 1px, transparent 1px) 0 0 / 22px 22px,
+    linear-gradient(180deg, var(--panel) 0%, var(--panel-2) 100%);
   border: 1px solid var(--border-soft); border-radius: var(--radius);
   box-shadow: var(--shadow-soft);
   overflow: hidden;
@@ -1509,24 +1530,30 @@ body.theme-light .acct-dropdown {
   overflow: auto;
   max-height: calc(100vh - 300px);
   min-height: 380px;
-  padding: 30px 36px 46px;
+  padding: 26px 30px 40px;
+  cursor: grab; touch-action: none; /* clicar-e-arrastar pra navegar, além da barra de rolagem */
 }
+.oc-scroll.oc-panning { cursor: grabbing; user-select: none; }
+.oc-scroll .oc-card-top, .oc-scroll .oc-toggle { cursor: pointer; } /* alvo clicável mantém o cursor de mão */
 #ocCanvas { display: inline-block; min-width: 100%; transform-origin: top center; transition: transform .15s ease; }
 
-/* ---------- Árvore (padrão CSS clássico de organograma via <ul>/<li>) ---------- */
+/* ---------- Árvore (padrão CSS clássico de organograma via <ul>/<li>) ----------
+   Fileira única sempre (sem "grade"/compressão): flex-shrink:0 nos cards
+   garante que, ao expandir, os irmãos são EMPURRADOS pro lado em vez de
+   comprimir/sobrepor. O canvas cresce e o .oc-scroll rola horizontalmente. */
 .oc-tree, .oc-tree ul {
-  list-style: none; margin: 0; padding: 26px 0 0; position: relative;
+  list-style: none; margin: 0; padding-top: 22px; position: relative;
   display: flex; justify-content: center;
 }
-.oc-tree.oc-roots { padding-top: 0; gap: 44px; }
+.oc-tree.oc-roots { padding-top: 0; gap: 40px; }
 .oc-tree li {
   position: relative; display: flex; flex-direction: column; align-items: center;
-  padding: 26px 12px 0;
+  flex-shrink: 0; padding: 22px 10px 0;
 }
 .oc-tree.oc-roots > li { padding-top: 0; }
 .oc-tree li::before, .oc-tree li::after {
   content: ''; position: absolute; top: 0; right: 50%;
-  border-top: 2px solid var(--border); width: 50%; height: 26px;
+  border-top: 2px solid var(--border); width: 50%; height: 22px;
 }
 .oc-tree li::after { right: auto; left: 50%; border-left: 2px solid var(--border); }
 .oc-tree li:only-child::after, .oc-tree li:only-child::before { display: none; }
@@ -1535,54 +1562,92 @@ body.theme-light .acct-dropdown {
 .oc-tree li:last-child::before { border-right: 2px solid var(--border); border-radius: 0 6px 0 0; }
 .oc-tree li:first-child::after { border-radius: 6px 0 0 0; }
 .oc-tree.oc-roots > li::before, .oc-tree.oc-roots > li::after { display: none; }
+/* Linha vertical do topo de QUALQUER <ul> de filhos até o card do pai
+   (inclusive sob as raízes — sem essa regra a árvore fica "flutuando",
+   sem conexão visível entre gerações). */
 .oc-tree ul::before {
   content: ''; position: absolute; top: 0; left: 50%;
-  border-left: 2px solid var(--border); width: 0; height: 26px;
+  border-left: 2px solid var(--border); width: 0; height: 22px;
 }
-.oc-tree > li > ul::before { display: none; } /* a linha já sai do card acima */
 .oc-tree li > .oc-card { margin-bottom: 0; }
 .oc-tree li > ul { margin-top: 0; }
 
 /* ---------- Cartão ---------- */
 .oc-card {
-  width: 202px; background: var(--bg-2); border: 1px solid var(--border);
-  border-radius: 12px; padding: 12px 12px 10px; box-shadow: var(--shadow-soft);
-  position: relative; z-index: 1;
+  width: 190px; flex-shrink: 0;
+  background: linear-gradient(180deg, var(--panel) 0%, var(--panel-2) 100%);
+  border: 1px solid var(--border); border-radius: 13px; padding: 11px 11px 9px;
+  box-shadow: var(--shadow-soft); position: relative; z-index: 1;
+  transition: transform .12s ease, box-shadow .12s ease;
 }
-.oc-card.root { border-color: var(--primary); box-shadow: 0 0 0 1px var(--primary), var(--shadow-soft); }
+.oc-card:hover { transform: translateY(-2px); box-shadow: 0 10px 24px rgba(0,0,0,.18); }
+.oc-card.root {
+  width: 208px; border-color: var(--primary);
+  box-shadow: 0 0 0 1px var(--primary), var(--shadow-soft);
+}
+.oc-card.root .oc-card-name { font-size: 14.5px; }
+.oc-card.root .oc-photo, .oc-card.root .oc-photo-fallback { width: 48px; height: 48px; min-width: 48px; }
 .oc-card.match { box-shadow: 0 0 0 2px var(--accent); }
+
+/* Selo "Nível 0" (raiz primária) / "Sem gestor" (demais raízes, provável
+   falta de cadastro no RH — só aparecem com o filtro desligado). */
+.oc-root-badge {
+  position: absolute; top: -10px; left: 50%; transform: translateX(-50%);
+  font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+  padding: 2px 9px; border-radius: 20px; white-space: nowrap; z-index: 2;
+  background: var(--primary); color: #fff; box-shadow: var(--shadow-soft);
+}
+.oc-root-badge.warn { background: var(--warn); color: #1a1200; }
+
 .oc-card-top { display: flex; align-items: center; gap: 9px; cursor: pointer; border-radius: 8px; padding: 2px; }
 .oc-card-top:hover { background: var(--panel-soft); }
+.oc-photo-wrap { position: relative; flex-shrink: 0; }
 .oc-photo {
-  width: 42px; height: 42px; min-width: 42px; border-radius: 50%;
-  object-fit: cover; border: 2px solid var(--border);
+  width: 40px; height: 40px; min-width: 40px; border-radius: 50%;
+  object-fit: cover; border: 2px solid var(--border); display: block;
 }
 .oc-photo-fallback {
   display: flex; align-items: center; justify-content: center;
-  font-size: 14px; font-weight: 700; color: #fff;
+  font-size: 13px; font-weight: 700; color: #fff;
   background: linear-gradient(135deg, var(--primary), var(--accent));
+  width: 40px; height: 40px; min-width: 40px; border-radius: 50%;
 }
+.oc-agent-badge {
+  position: absolute; right: -2px; bottom: -2px; width: 15px; height: 15px;
+  border-radius: 50%; display: flex; align-items: center; justify-content: center;
+  border: 2px solid var(--panel); background: var(--danger); color: #fff;
+}
+.oc-agent-badge.yes { background: var(--accent); }
 .oc-card-info { min-width: 0; }
 .oc-card-name {
-  font-size: 13px; font-weight: 700; color: var(--text);
+  font-size: 12.5px; font-weight: 700; color: var(--text);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .oc-card-role {
-  font-size: 11.5px; color: var(--text-dim);
+  font-size: 11px; color: var(--text-dim);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px;
 }
 .oc-card-dept {
-  display: flex; align-items: center; gap: 6px; margin-top: 9px;
-  font-size: 10.5px; color: var(--text-dim);
-  background: var(--panel-soft); border-radius: 8px; padding: 4px 8px;
+  display: flex; align-items: center; gap: 6px; margin-top: 8px;
+  font-size: 10.5px; font-weight: 600; border-radius: 8px; padding: 4px 8px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .oc-dot { width: 8px; height: 8px; min-width: 8px; border-radius: 50%; }
 .oc-toggle {
   display: flex; align-items: center; justify-content: center; gap: 4px;
-  width: 100%; margin-top: 8px; padding: 4px 0;
-  background: transparent; border: 1px dashed var(--border); border-radius: 8px;
-  color: var(--text-dim); font-size: 11px; cursor: pointer;
+  width: 100%; margin-top: 7px; padding: 4px 0;
+  background: transparent; border: 1px solid var(--border); border-radius: 20px;
+  color: var(--text-dim); font-size: 10.5px; cursor: pointer;
 }
-.oc-toggle:hover { background: var(--panel-soft); color: var(--text); border-style: solid; }
-.oc-toggle-arrow { font-size: 10px; }
+.oc-toggle:hover { background: var(--primary); color: #fff; border-color: var(--primary); }
+.oc-toggle-arrow {
+  font-size: 9px; display: inline-block;
+  transition: transform .22s cubic-bezier(.4,0,.2,1);
+}
+.oc-toggle.expanded .oc-toggle-arrow { transform: rotate(90deg); }
+
+/* ---------- Mini-ficha local (colaborador sem agente) ---------- */
+.oc-quick-foot {
+  padding: 10px 20px 16px; font-size: 11.5px; color: var(--text-muted);
+  border-top: 1px solid var(--border-soft); display: flex; align-items: center; gap: 7px;
+}

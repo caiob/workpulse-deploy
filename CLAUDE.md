@@ -44,6 +44,127 @@ ECS tem **deployment circuit breaker**: deploy que sobe quebrado faz **rollback*
 - **Cache-busting do dashboard**: cada `js/wp-*.js` tem `?v=N` em `workforce.html` (fonte da verdade das versões). Bump ao alterar um JS.
 
 **Índice de features/incidentes** (detalhe no changelog ao final; mais recente primeiro):
+- 2026-07-25 — **Organograma: animação ao expandir/recolher liderados.**
+  Antes, `_ocToggle()` só marcava/desmarcava o id em `_oc.expanded` e chamava `_ocRender()`,
+  que reconstrói o `innerHTML` da árvore INTEIRA do zero — por isso os cards apareciam/
+  sumiam secos, de uma vez, sem transição possível (nó destruído e recriado não anima).
+  Fix: `_ocToggle()` agora faz a operação **cirúrgica**, só no `<li>` daquele card:
+  ao expandir, insere apenas o `<ul>` de filhos daquele nó (via `_ocChildrenBlock`, já
+  existia) e anima cada `<li>` filho com a Web Animations API (`fade + translateY + scale`,
+  com stagger de 45ms entre um card e outro -- efeito de "cascata"); ao recolher, anima o
+  `<ul>` inteiro encolhendo/desaparecendo e só remove do DOM no `onfinish`. O resto da árvore
+  não é tocado (preserva scroll/pan e evita repaginar nós não relacionados). Ícone
+  ▸/▾ virou só `▸` que **rotaciona via CSS** (`.oc-toggle.expanded .oc-toggle-arrow`) em vez
+  de trocar de caractere -- mais suave. Respeita `prefers-reduced-motion` (pula a animação,
+  insere/remove direto). Ações em massa (Expandir/Recolher tudo, filtro de níveis, busca)
+  continuam usando `_ocRender()` completo -- não valia a pena animar dezenas de nós de uma
+  vez. **Só front, precisa `publicar-site.ps1`.**
+- 2026-07-24 — **Organograma: causa real da lentidão encontrada e corrigida (25,7 MB!).**
+  O Caio mandou o print da aba Rede do DevTools: `/v1/org-chart` sozinho vinha com **25,7 MB**
+  e levava **32,4s** -- muito maior que qualquer outra chamada da página. Causa: fotos
+  importadas com `store_copy=true` (`POST /v1/tenant-directory/photos`) ficam guardadas como
+  **data URI** (base64) em `users.photo_url`/`directory_people.photo_url`, cada uma
+  150-260KB; com ~90 pessoas com foto, o organograma embutia TODAS no mesmo JSON. Fix:
+  (1) novo endpoint **`GET /v1/tenant-directory/photo?tenant=&cid=`** que decodifica o data
+  URI e serve a imagem como um arquivo de verdade (`Content-Type` certo, `Cache-Control:
+  public, max-age=86400` -- o navegador baixa 1x só e reusa). (2) `org_chart()` agora manda
+  **essa URL de referência** no lugar do data URI bruto sempre que o valor guardado começa
+  com `data:` (link externo -- Convenia/S3 -- continua passando direto, já é leve). (3)
+  Frontend: 3 linhas em `loadOrgChart()` prefixam o path relativo (`/v1/tenant-directory/
+  photo?...`) com `state.url` (a API e o dashboard são domínios diferentes) -- resto do
+  código de foto (`_ocPhotoHtml` etc.) não mudou, já tratava qualquer URL igual. Resultado
+  esperado: JSON do organograma cai de MB pra poucos KB; as fotos viram ~90 requests
+  paralelos/cacheáveis, carregados sob demanda (`loading="lazy"` já existia no `<img>`).
+  **Precisa `redeploy.ps1` (endpoint novo) + `publicar-site.ps1`.**
+- 2026-07-24 — **Organograma v6: revertida a quebra em fileiras — fileira única sempre.**
+  Testando a v5 (fileiras de até 4) com os 10 liderados reais do CEO, o Caio reportou: (1)
+  3 fileiras (4+4+2) ficou ruim visualmente — pediu algo como 5+5 pra esse caso; (2) a linha
+  de conexão ENTRE fileiras aparecia quebrada; (3) ao expandir um card no MEIO de uma
+  fileira (ex.: "Fabio Shinji Hara", 2º de 4), a fileira de baixo não repaginava e ficava
+  com cards "ligados no nada". Isso é a SEGUNDA abordagem de quebra em múltiplas linhas que
+  quebra na prática (a primeira, em v2, era um modo de grade CSS que comprimia os cards).
+  Diagnosticar/corrigir esse tipo de bug de reflow/posicionamento com confiança exige testar
+  em navegador de verdade (não dá pra garantir 100% só por leitura de código+screenshot) —
+  o Caio topou "melhor funcionar que ficar todo estragado" e voltar pra fileira única sempre
+  caso não desse pra deixar 100%. **Decisão: fileira única sempre**, removido todo o código
+  de `.oc-rows`/chunking (`_ocChildrenBlock` voltou a ser uma função de ~5 linhas). Times
+  grandes (ex.: 10 liderados) ficam numa fileira larga só — navega com o pan (arrastar),
+  zoom (−/+) e a rolagem horizontal, todos já existentes. Se quiser tentar de novo o layout
+  em múltiplas linhas no futuro, fazer com acesso a um navegador real pra testar o reflow
+  ao expandir/recolher em cada posição da fileira antes de considerar pronto. **Sem mudança
+  de backend; só `publicar-site.ps1`.**
+- 2026-07-24 — **Organograma v5: bug do botão expandir/recolher, fileiras de até 4, diagnóstico
+  de lentidão.** Três ajustes depois de testar com 113 colaboradores reais:
+  (1) **BUG real corrigido** -- o pan (v4) chamava `setPointerCapture` em TODO `pointerdown`,
+  inclusive um clique comum, e isso quebrava o `click` delegado nos cards (o botão "N
+  liderados" e o clique pra abrir a ficha pararam de funcionar). Fix: só captura o ponteiro
+  DEPOIS de confirmar que é de fato um arraste (`moved===true`, dentro do `pointermove`) --
+  um clique normal (pointerdown+pointerup sem passar o limiar de 5px) nunca toca a captura,
+  então o clique chega normal no elemento. (2) **Fileiras de até 4**: nó com mais de 4
+  liderados agora quebra em várias fileiras de até 4 (`OC_ROW_MAX`) -- 6→4+2, 7→4+3, 8→4+4,
+  etc. -- em vez de uma fileira única e comprida. Cada fileira reaproveita a MESMA `<ul
+  class="oc-tree">` que já funciona bem sozinha (mesmos conectores, sem grade/compressão
+  nova); elas só empilham verticalmente (`.oc-rows{display:flex;flex-direction:column;
+  align-items:center}`) e o traço de entrada de cada fileira (regra já existente
+  `.oc-tree ul::before`) dá a impressão de tronco contínuo. (3) **Diagnóstico de lentidão
+  (~30s pra abrir)**: confirmado no código que `GET /v1/org-chart` NÃO chama a Convenia --
+  só lê `directory_people`/`users` local (cache de 300s). Adicionada instrumentação `_Perf`
+  no endpoint (mesmo padrão do resto do backend) pra medir escopo/query/build separadamente;
+  os logs `[perf] org_chart ...` aparecem no CloudWatch (`/aws/ecs/workpulse-prod-server`)
+  depois do redeploy. Hipótese mais provável (não confirmada): contenção do pool de conexões
+  (`ThreadedConnectionPool` max 10) sob carga de ingestão dos agentes -- o mesmo gargalo já
+  documentado na seção "Cache em escala" acima, só que afetando esta tela também. **Precisa
+  `redeploy.ps1` (perf log no backend) + `publicar-site.ps1` (JS/CSS).**
+- 2026-07-24 — **Organograma v4: clicar-e-arrastar pra navegar (pan).** `#ocScroll` (novo id no
+  container `.oc-scroll`) ganhou Pointer Events (`_ocWirePan` em `wp-orgchart.js`): mousedown/
+  touch inicia arraste, `setPointerCapture` mantém o gesto mesmo se o ponteiro sair da área,
+  `scrollLeft/scrollTop` seguem o movimento 1:1. Distingue clique de arraste por um limiar de
+  5px (`THRESH`) — abaixo disso ainda conta como clique normal no card/chevron; acima disso,
+  suprime o click seguinte (`_ocSuppressClick`) pra não abrir a ficha nem expandir sem querer
+  ao soltar. Cursor `grab`/`grabbing` (classe `.oc-panning`). Barra de rolagem nativa continua
+  funcionando em paralelo (scroll do mouse/trackpad, arrastar a barra) — o drag é um jeito A
+  MAIS de navegar, não substitui. **Sem mudança de backend; só `publicar-site.ps1`.**
+- 2026-07-24 — **Organograma v3: corrige sobreposição de cards + raiz órfã do CEO.** Testado
+  com dados reais (113 colaboradores) e o Caio reportou dois problemas da v2:
+  (1) **Cards sobrepostos** -- o modo "grade" (cluster) pra times com >4 liderados comprimia
+  os cards uns nos outros. Removido; voltou pra árvore clássica em fileira única SEMPRE
+  (`flex-shrink:0` nos cards garante que nunca comprimem) -- ao expandir, os cards empurram
+  os irmãos pro lado e o canvas cresce, com rolagem horizontal (`.oc-scroll{overflow:auto}`).
+  (2) **Nó "perdido" do lado do CEO** -- gente sem gestor cadastrado na Convenia (erro do RH,
+  não é o topo real da empresa) virava uma raiz separada flutuando ao lado do CEO de verdade.
+  Agora existe uma **raiz "primária"** (nível 0): escolhida pelo cargo (regex pega CEO/
+  Presidente/Fundador/Founder/Owner/Diretor(a) Presidente/Diretor(a) Geral) ou, na falta de
+  título reconhecível, por quem tem a maior estrutura abaixo (mais gente, direta+indireta).
+  Ela ganha o selo "Nível 0" no card. Checkbox **"Ocultar sem gestor"** no toolbar (ligado por
+  padrão) esconde as OUTRAS raízes (prováveis falhas de cadastro); desligando, elas aparecem
+  com o selo "⚠ Sem gestor" pra facilitar auditoria. Buscar por alguém que só existe numa
+  raiz oculta desliga o filtro automaticamente e revela o caminho até ele. Nota no topo da
+  página conta quantos estão ocultos pelo filtro. **Sem mudança de backend nesta rodada** --
+  só `js/wp-orgchart.js` e `css/workforce.css`; precisa só `publicar-site.ps1`.
+- 2026-07-24 — **Organograma v2: roster completo da Convenia (115) + ícone de agente + layout
+  em grade.** Ajustes pedidos pelo Caio depois da v1:
+  (1) **Nova tabela `directory_people`** -- `_directory_upsert` agora grava o roster INTEIRO
+  vindo da Convenia (upsert por `convenia_id`), não só quem já é `users` por e-mail. Sync
+  continua 1x/dia (worker existente) + botão "Sincronizar agora". (2) `GET /v1/org-chart`
+  reescrito p/ ler `directory_people` LEFT JOIN `users` (por `convenia_id`) -- devolve todo
+  mundo (hoje 115), com `has_agent` (true se casou com um `users`). (3) `POST
+  /v1/tenant-directory/photos` agora também casa/grava foto em `directory_people` (antes só
+  em `users`), cobrindo quem não tem agente. (4) **Frontend:** ícone (bolinha verde/vermelha
+  no canto da foto) indicando se a pessoa tem agente instalado; clique em quem NÃO tem agente
+  abre um resumo local (sem fetch, já que não há Ficha completa); clique em quem TEM agente
+  continua abrindo a Ficha normal. (5) **Bug de CSS corrigido:** a regra que devia desenhar a
+  linha vertical entre o card do gestor e a linha de filhos estava sendo anulada por outra
+  regra (`.oc-tree > li > ul::before{display:none}`) -- removida; a árvore ficava "flutuando"
+  sem conexão visual, isso que deixava o layout "pobre". (6) **Layout em grade para times
+  grandes:** nó com mais de 4 liderados (`OC_CLUSTER_THRESHOLD`) vira uma "caixa de time" com
+  grade de 3/4/5 colunas (ex.: 6 liderados = 2 linhas de 3) em vez de uma fileira única que
+  estourava a largura; cards dentro da grade ficam menores (`.oc-card.compact`) e o
+  espaçamento horizontal da árvore em geral foi reduzido. (7) **Navegação retrátil por
+  padrão:** "Níveis exibidos" agora abre com 2 (só raiz + 1º nível) em vez de 3, pra não
+  abrir tudo de uma vez; expandir further é sempre por clique no chevron de cada nó. (8)
+  Polimento visual: fundo em pontilhado sutil no canvas, hover com elevação no card, pill de
+  departamento com cor translúcida (`color-mix`), legenda com bolinhas de "com agente"/"sem
+  agente". **Precisa `redeploy.ps1` (nova tabela + endpoints) + `publicar-site.ps1`.**
 - 2026-07-24 — **Aba Análises → "Organograma"** (`tab-organograma`, `js/wp-orgchart.js`) +
   endpoint `GET /v1/org-chart`. Árvore hierárquica interativa (foto/iniciais, nome, cargo,
   departamento com cor por depto, legenda) montada casando `manager` (texto vindo da
@@ -550,6 +671,7 @@ AND auto_sync` e chama `_run_directory_sync(tid)` por tenant (erros isolados vã
 | `licenses` | Ed25519-signed tokens. `revoked` flag |
 | `users` | `(tenant_id, user_id)` — `user_id` = hostname. `display_name`, `login_user`, `department`, `role`, **`manager`, `photo_url`** (preenchidos pela fonte de RH) |
 | `directory_config` | Fonte de RH por tenant (Admin Master): `provider` (convenia\|google\|none), `convenia_token`, `auto_sync`, `last_sync`, `last_status` |
+| `directory_people` | Roster COMPLETO da fonte de RH (2026-07-24) -- TODOS os colaboradores da Convenia, inclusive quem NÃO tem agente instalado (nunca vira `users`). PK `(tenant_id, convenia_id)`. Gravado pelo mesmo sync que atualiza `users` (`_directory_upsert`). Alimenta `GET /v1/org-chart`. |
 | `devices` | One row per device (hostname + OS metadata) |
 | `events` | Raw activity. `bucket` ∈ {window, afk}. `data_json JSONB` = `{app,title}` or `{status}` |
 | `productivity_rules` | Per-tenant pattern rules; evaluated in `created_at` order, first match wins |
@@ -571,8 +693,10 @@ Key indexes: `idx_events_tenant_bucket_ts`, JSONB expression indexes
 `GET /workforce/timeseries`, `GET|POST /productivity/rules`,
 `DELETE /productivity/rules/{id}`, `GET /productivity/internet`,
 `GET /productivity/apps`, `GET|POST /departments`, `DELETE /departments/{name}`,
-`GET /org-chart` (lista enxuta p/ Análises → Organograma: nome, e-mail, depto, manager-texto,
-cargo, team, photo_url, on_vacation; respeita escopo de Líder via `_scope_for`)
+`GET /org-chart` (Análises → Organograma: roster COMPLETO de `directory_people`
+LEFT JOIN `users` por `convenia_id` -- devolve `id`/`user_id`/`has_agent`/nome/e-mail/
+depto/manager-texto/cargo/team/photo_url/on_vacation p/ TODOS os colaboradores da
+Convenia, não só quem tem agente; escopo de Líder via `_scope_for` + `_lider_dept_scope`)
 **Admin-only:** `POST /license/issue`, `POST /license/revoke`,
 `POST /admin/tenant-token`, `GET /admin/tenants`, `GET /admin/licenses`,
 `GET /admin/stats`, `GET /admin/audit`, `GET /admin/data-summary`,

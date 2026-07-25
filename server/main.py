@@ -330,6 +330,28 @@ _SCHEMA_STMTS = [
     """,
     # UUID da empresa na Convenia (constante) — usado p/ montar o link da foto no S3.
     "ALTER TABLE directory_config ADD COLUMN IF NOT EXISTS convenia_company_id TEXT",
+    # Roster COMPLETO da fonte de RH (Convenia hoje) — inclui gente sem agente
+    # instalado (não vira `users`). Alimenta o Organograma (Análises), que
+    # precisa mostrar todo mundo, não só quem tem WorkPulse rodando. Gravado
+    # pelo mesmo sync diário/manual que atualiza `users` (COALESCE por lá,
+    # upsert completo aqui). Chave = (tenant_id, convenia_id).
+    """
+    CREATE TABLE IF NOT EXISTS directory_people (
+        tenant_id     TEXT NOT NULL,
+        convenia_id   TEXT NOT NULL,
+        email         TEXT,
+        name          TEXT,
+        manager       TEXT,
+        department    TEXT,
+        cargo         TEXT,
+        team          TEXT,
+        photo_url     TEXT,
+        updated_at    TEXT,
+        PRIMARY KEY (tenant_id, convenia_id)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_dirpeople_tenant     ON directory_people(tenant_id)",
+    "CREATE INDEX IF NOT EXISTS idx_dirpeople_email       ON directory_people(tenant_id, lower(email))",
     "CREATE INDEX IF NOT EXISTS idx_daily_tenant_day    ON daily_summaries(tenant_id, day)",
     "CREATE INDEX IF NOT EXISTS idx_licenses_tenant     ON licenses(tenant_id)",
     "CREATE INDEX IF NOT EXISTS idx_audit_ts            ON audit_log(ts)",
@@ -1731,30 +1753,127 @@ def list_users(tenant: str, request: Request):
 
 @app.get("/v1/org-chart", dependencies=[Depends(require_tenant_scope)])
 def org_chart(tenant: str, request: Request):
-    """Lista enxuta para montar o Organograma (Analises -> Organograma):
-    nome, cargo, departamento, foto e o NOME do gestor (texto vindo da
-    Convenia -- ver directory_config / _directory_upsert). O front-end monta
-    a arvore casando `manager` (texto) com `display_name` de outro
-    colaborador do mesmo tenant. Respeita o mesmo escopo de Lider das
-    demais abas de Analises (_scope_for -- Admin/Admin Master veem tudo,
-    Lider ve so o proprio ramo)."""
+    """Lista para montar o Organograma (Analises -> Organograma): roster
+    COMPLETO da fonte de RH (`directory_people`, hoje Convenia) -- inclui
+    quem NAO tem agente WorkPulse instalado, nao so quem esta em `users`.
+    LEFT JOIN com `users` (por convenia_id) traz `user_id`/`has_agent`/
+    `on_vacation`/foto ja importada manualmente, quando existirem.
+
+    O front-end monta a arvore casando `manager` (texto vindo da Convenia)
+    com o nome de outro colaborador da mesma lista. `has_agent` decide o
+    icone (verde = tem agente, vermelho = so cadastro na Convenia); clique
+    so abre a Ficha completa (`/v1/collaborator/profile`) quando has_agent.
+
+    Escopo de Lider (mesma logica das demais abas de Analises, so que
+    aplicada em duas frentes porque gente sem agente nao tem `user_id` p/
+    casar com `_lider_allowed_ids`): permite a linha se o `user_id` estiver
+    na lista permitida OU o `department` estiver nos departamentos do Lider.
+    Admin/Admin Master (sem sessao de Lider) veem tudo, sem filtro."""
+    _perf = _Perf(f"org_chart tenant={tenant}")
     allowed, _stag = _scope_for(request, tenant)
+    dept_scope = _lider_dept_scope(request, tenant)
+    _perf.mark("scope")
     cache_key = f"{tenant}:org_chart{_stag}"
     cached = _cache_get(cache_key)
     if cached is not None:
+        _perf.mark("cache_hit")
+        _perf.done()
         return cached
-    SC = " AND user_id = ANY(%s)" if allowed is not None else ""
-    A  = [allowed] if allowed is not None else []
     with db() as c:
+        _perf.mark("connect")
         rows = c.execute(
-            f"""SELECT user_id, display_name, email, department, manager,
-                       cargo, team, photo_url, on_vacation
-                FROM users WHERE tenant_id=%s{SC} ORDER BY display_name""",
-            tuple([tenant, *A]),
+            """SELECT dp.convenia_id, dp.email, dp.name, dp.manager, dp.department,
+                      dp.cargo, dp.team, dp.photo_url AS dp_photo,
+                      u.user_id, u.photo_url AS u_photo, u.on_vacation
+               FROM directory_people dp
+               LEFT JOIN users u
+                 ON u.tenant_id = dp.tenant_id AND u.convenia_id = dp.convenia_id
+               WHERE dp.tenant_id = %s
+               ORDER BY dp.name""",
+            (tenant,),
         ).fetchall()
-    out = {"people": [dict(r) for r in rows]}
+        _perf.mark("query")
+
+    restricted   = allowed is not None
+    allowed_set  = set(allowed) if allowed is not None else set()
+    dept_set     = set(d for d in (dept_scope or []) if d)
+
+    import urllib.parse as _urlp
+
+    people = []
+    for r in rows:
+        uid = r["user_id"]
+        if restricted:
+            in_user_scope = uid is not None and uid in allowed_set
+            in_dept_scope = bool(r["department"]) and r["department"] in dept_set
+            if not (in_user_scope or in_dept_scope):
+                continue
+        # Foto: se o valor guardado é um data URI (base64 embutido, às vezes
+        # 150-260KB por pessoa), NÃO manda o base64 inteiro dentro do JSON do
+        # organograma -- com ~90 pessoas isso virou uma resposta de 25+MB e
+        # ~30s pra carregar (medido via DevTools). Manda uma URL de
+        # referência pro novo endpoint /v1/tenant-directory/photo, que serve
+        # cada foto como um request HTTP separado e cacheável pelo navegador
+        # (Cache-Control), carregado sob demanda (`loading="lazy"` no <img>
+        # do organograma). Link externo (Convenia/S3) já é leve -- passa direto.
+        photo_raw = r["u_photo"] or r["dp_photo"]
+        if photo_raw and photo_raw.startswith("data:"):
+            photo_out = (f"/v1/tenant-directory/photo?tenant={_urlp.quote(tenant)}"
+                         f"&cid={_urlp.quote(r['convenia_id'] or '')}")
+        else:
+            photo_out = photo_raw
+        people.append({
+            "id":           r["convenia_id"],
+            "user_id":      uid,
+            "has_agent":    uid is not None,
+            "display_name": r["name"],
+            "email":        r["email"],
+            "department":   r["department"],
+            "manager":      r["manager"],
+            "cargo":        r["cargo"],
+            "team":         r["team"],
+            "photo_url":    photo_out,
+            "on_vacation":  bool(r["on_vacation"]) if r["on_vacation"] is not None else False,
+        })
+    _perf.mark("build")
+    out = {"people": people}
     _cache_set(cache_key, out)
+    _perf.done()
     return out
+
+
+@app.get("/v1/tenant-directory/photo", dependencies=[Depends(require_tenant_scope)])
+def tenant_directory_photo(tenant: str, cid: str):
+    """Serve a foto de UM colaborador fora do payload do /v1/org-chart (ver
+    nota lá em cima). `cid` = convenia_id. Prioriza `users.photo_url`
+    (mesma prioridade do org-chart); cai pra `directory_people.photo_url`.
+    Só serve se o valor guardado for um data URI -- link externo (Convenia/
+    S3) nunca vem parar aqui (o org-chart passa ele direto, sem indireção).
+    `Cache-Control` de 1 dia: o navegador baixa a foto uma vez só."""
+    with db() as c:
+        row = c.execute(
+            """SELECT u.photo_url AS u_photo, dp.photo_url AS dp_photo
+               FROM directory_people dp
+               LEFT JOIN users u
+                 ON u.tenant_id = dp.tenant_id AND u.convenia_id = dp.convenia_id
+               WHERE dp.tenant_id = %s AND dp.convenia_id = %s""",
+            (tenant, cid),
+        ).fetchone()
+    photo = (row["u_photo"] or row["dp_photo"]) if row else None
+    if not photo or not photo.startswith("data:"):
+        raise HTTPException(status_code=404, detail="foto nao encontrada")
+    try:
+        header, b64data = photo.split(",", 1)
+        mime = header.split(":", 1)[1].split(";")[0] if ":" in header else "image/png"
+        raw = base64.b64decode(b64data)
+    except Exception:
+        raise HTTPException(status_code=422, detail="foto invalida (data URI malformado)")
+    from fastapi import Response as _FResponse
+    return _FResponse(
+        content=raw,
+        media_type=mime,
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
 
 
 @app.get("/v1/collaborator/profile", dependencies=[Depends(require_tenant_scope)])
@@ -4928,29 +5047,53 @@ def _convenia_resolve_photo(company_id: str, emp_id: str) -> str | None:
 
 
 def _directory_upsert(tid: str, people: list[dict]) -> dict:
-    """Casa por e-mail e grava manager/photo_url (só preenche o que veio)."""
+    """Casa por e-mail e grava manager/photo_url em `users` (só quem já tem
+    agente instalado; preenche só o que veio). Além disso grava o roster
+    INTEIRO em `directory_people` (upsert por convenia_id) -- inclui quem
+    ainda NÃO tem `users` (sem agente instalado). É a `directory_people` que
+    alimenta o Organograma (Análises), que precisa listar todo mundo da
+    Convenia, não só quem está sendo monitorado."""
     matched = updated = 0
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
     with db() as c:
         for p in people:
-            if not p.get("email"):
-                continue
-            r = c.execute(
-                """UPDATE users
-                     SET manager     = COALESCE(%s, manager),
-                         photo_url    = COALESCE(%s, photo_url),
-                         department   = COALESCE(NULLIF(%s,''), department),
-                         convenia_id  = COALESCE(%s, convenia_id),
-                         cargo        = COALESCE(NULLIF(%s,''), cargo),
-                         team         = COALESCE(NULLIF(%s,''), team)
-                   WHERE tenant_id = %s AND lower(email) = %s""",
-                (p.get("manager"), p.get("photo_url"), p.get("department") or "",
-                 p.get("convenia_id"), p.get("cargo") or "", p.get("team") or "",
-                 tid, p["email"]),
-            )
-            n = r.rowcount or 0
-            if n:
-                matched += 1
-                updated += n
+            if p.get("email"):
+                r = c.execute(
+                    """UPDATE users
+                         SET manager     = COALESCE(%s, manager),
+                             photo_url    = COALESCE(%s, photo_url),
+                             department   = COALESCE(NULLIF(%s,''), department),
+                             convenia_id  = COALESCE(%s, convenia_id),
+                             cargo        = COALESCE(NULLIF(%s,''), cargo),
+                             team         = COALESCE(NULLIF(%s,''), team)
+                       WHERE tenant_id = %s AND lower(email) = %s""",
+                    (p.get("manager"), p.get("photo_url"), p.get("department") or "",
+                     p.get("convenia_id"), p.get("cargo") or "", p.get("team") or "",
+                     tid, p["email"]),
+                )
+                n = r.rowcount or 0
+                if n:
+                    matched += 1
+                    updated += n
+            if p.get("convenia_id"):
+                c.execute(
+                    """INSERT INTO directory_people
+                         (tenant_id, convenia_id, email, name, manager, department,
+                          cargo, team, photo_url, updated_at)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                       ON CONFLICT (tenant_id, convenia_id) DO UPDATE SET
+                         email      = EXCLUDED.email,
+                         name       = EXCLUDED.name,
+                         manager    = EXCLUDED.manager,
+                         department = EXCLUDED.department,
+                         cargo      = EXCLUDED.cargo,
+                         team       = EXCLUDED.team,
+                         photo_url  = COALESCE(EXCLUDED.photo_url, directory_people.photo_url),
+                         updated_at = EXCLUDED.updated_at""",
+                    (tid, p["convenia_id"], p.get("email"), p.get("name"),
+                     p.get("manager"), p.get("department"), p.get("cargo"),
+                     p.get("team"), p.get("photo_url"), now),
+                )
     return {"matched": matched, "updated": updated, "source_count": len(people)}
 
 
@@ -5121,19 +5264,29 @@ def _download_image_data_uri(url: str, cap: int = 3_000_000) -> str:
 def tenant_directory_photos(body: PhotoMapIn, tenant: str,
                             ctx: Annotated[dict, Depends(require_role("admin_master"))]):
     """DE-PARA de fotos: recebe pares {key (e-mail OU nome), url} e grava em
-    users.photo_url. Casa por e-mail (se o key tem '@') senão por nome
-    normalizado (sem acento, minúsculo). `store_copy=True` baixa e guarda a
-    imagem embutida (data URI) em vez de só apontar para a URL."""
+    users.photo_url (quem tem agente) OU directory_people.photo_url (quem só
+    está cadastrado na Convenia, sem agente -- alimenta o Organograma).
+    Casa por e-mail (se o key tem '@') senão por nome normalizado (sem
+    acento, minúsculo). `store_copy=True` baixa e guarda a imagem embutida
+    (data URI) em vez de só apontar para a URL."""
     tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
     with db() as c:
         users = c.execute(
             "SELECT user_id, email, display_name, convenia_id FROM users WHERE tenant_id=%s", (tid,)
+        ).fetchall()
+        dpeople = c.execute(
+            "SELECT convenia_id, email, name FROM directory_people WHERE tenant_id=%s", (tid,)
         ).fetchall()
     by_email, by_name, by_cid = {}, {}, {}
     for u in users:
         if u["email"]:        by_email[_norm_email(u["email"])] = u["user_id"]
         if u["display_name"]: by_name.setdefault(_norm_name(u["display_name"]), u["user_id"])
         if u["convenia_id"]:  by_cid[u["convenia_id"].lower()] = u["user_id"]
+    dp_by_email, dp_by_name, dp_by_cid = {}, {}, {}
+    for d in dpeople:
+        if d["email"]:       dp_by_email[_norm_email(d["email"])] = d["convenia_id"]
+        if d["name"]:        dp_by_name.setdefault(_norm_name(d["name"]), d["convenia_id"])
+        if d["convenia_id"]: dp_by_cid[d["convenia_id"].lower()] = d["convenia_id"]
 
     _UUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
     # UUID do colaborador = o que vem logo após "Colaboradores/" (não o da empresa).
@@ -5148,7 +5301,6 @@ def tenant_directory_photos(body: PhotoMapIn, tenant: str,
             url = (it.get("url") or "").strip()
             if not url:
                 continue
-            uid = None
             # 1) casa pelo UUID do colaborador embutido no próprio link (mais robusto).
             m = _CID.search(url)
             cid = m.group(1) if m else None
@@ -5156,14 +5308,36 @@ def tenant_directory_photos(body: PhotoMapIn, tenant: str,
                 # sem "Colaboradores/": pega o último UUID do link (heurística)
                 alls = _ANY.findall(url)
                 cid = alls[-1] if alls else None
-            if cid:
-                uid = by_cid.get(cid.lower())
+
+            uid = by_cid.get(cid.lower()) if cid else None
             # 2) fallback: e-mail ou nome informado como key.
             if not uid and key:
                 uid = by_email.get(_norm_email(key)) if "@" in key else None
                 if not uid:
                     uid = by_name.get(_norm_name(key))
-            if not uid:
+
+            if uid:
+                val = url
+                if body.store_copy:
+                    try:
+                        val = _download_image_data_uri(url)
+                    except Exception as exc:
+                        unmatched.append(f"{key} (falha ao copiar: {exc})")
+                        continue
+                r = c.execute("UPDATE users SET photo_url=%s WHERE tenant_id=%s AND user_id=%s",
+                              (val, tid, uid))
+                matched += 1
+                updated += r.rowcount or 0
+                continue
+
+            # 3) sem agente instalado (não está em `users`): tenta casar em
+            #    directory_people, que é o que alimenta o Organograma.
+            dcid = dp_by_cid.get(cid.lower()) if cid else None
+            if not dcid and key:
+                dcid = dp_by_email.get(_norm_email(key)) if "@" in key else None
+                if not dcid:
+                    dcid = dp_by_name.get(_norm_name(key))
+            if not dcid:
                 unmatched.append(key or url)
                 continue
             val = url
@@ -5173,8 +5347,8 @@ def tenant_directory_photos(body: PhotoMapIn, tenant: str,
                 except Exception as exc:
                     unmatched.append(f"{key} (falha ao copiar: {exc})")
                     continue
-            r = c.execute("UPDATE users SET photo_url=%s WHERE tenant_id=%s AND user_id=%s",
-                          (val, tid, uid))
+            r = c.execute("UPDATE directory_people SET photo_url=%s WHERE tenant_id=%s AND convenia_id=%s",
+                          (val, tid, dcid))
             matched += 1
             updated += r.rowcount or 0
     return {"matched": matched, "updated": updated,
@@ -5865,6 +6039,26 @@ def _lider_allowed_ids(request: Request, tenant: str):
             ).fetchall()
         users.update(r["user_id"] for r in urows)
     return list(users)
+
+
+def _lider_dept_scope(request: Request, tenant: str):
+    """Departamentos explicitamente atribuídos a uma sessão de Líder. Usado
+    pelo Organograma para filtrar `directory_people` -- gente sem agente
+    instalado não tem `user_id`, então o filtro por usuário permitido
+    (`_lider_allowed_ids`) sozinho não alcança; o departamento sim.
+    Devolve None quando NÃO há restrição (mesma regra de `_lider_allowed_ids`)."""
+    sid = request.cookies.get(SESSION_COOKIE)
+    if not sid:
+        return None
+    u = _load_session_user(sid)
+    if not u or u.get("role") != "lider" or u.get("tenant_id") != tenant:
+        return None
+    with db() as c:
+        rows = c.execute(
+            "SELECT scope_value FROM lider_scope WHERE tenant_id=%s AND lider_id=%s AND scope_type='department'",
+            (tenant, u["id"]),
+        ).fetchall()
+    return [r["scope_value"] for r in rows]
 
 
 def _scope_for(request: Request, tenant: str):
