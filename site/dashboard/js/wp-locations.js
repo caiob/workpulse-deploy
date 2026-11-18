@@ -136,19 +136,43 @@ function locShowMap() {
   _locRenderMap();
 }
 
-// Mapa segue o tema: claro = Voyager (limpo/colorido), escuro = dark matter.
+// Tiles do OpenStreetMap (SEM API key). O CARTO basemaps passou a exigir chave
+// (aparecia "API KEY REQUIRED" nas tiles). No tema escuro, escurecemos as próprias
+// tiles com um filtro CSS (className) — os marcadores ficam em outro pane, então
+// não são afetados.
+function _locEnsureDarkCss() {
+  if (document.getElementById('locTilesDarkCss')) return;
+  const s = document.createElement('style');
+  s.id = 'locTilesDarkCss';
+  s.textContent = '.loc-tiles-dark{filter:invert(1) hue-rotate(180deg) brightness(.92) contrast(.9)}';
+  document.head.appendChild(s);
+}
+// Chave do CARTO basemaps. Preencha AQUI (ou defina window.WP_MAP_KEY em um
+// config.js) para usar os basemaps bonitos do CARTO (Voyager claro / Dark escuro).
+// Vazio = usa OpenStreetMap, que NÃO exige chave (fallback que sempre funciona).
+const _LOC_MAP_KEY = (typeof window !== 'undefined' && window.WP_MAP_KEY) || 'cb1_33jv_1_4137e533655fb92bb3b39f6b';
+
 function _locApplyTiles() {
   if (!_locMap || typeof L === 'undefined') return;
+  _locEnsureDarkCss();
   const light = document.body.classList.contains('theme-light');
-  const style = light ? 'voyager' : 'dark';
+  const style = (_LOC_MAP_KEY ? 'carto-' : 'osm-') + (light ? 'light' : 'dark');
   if (style === _locTileStyle && _locTile) return;
-  const url = light
-    ? 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png'
-    : 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
   if (_locTile) _locMap.removeLayer(_locTile);
-  _locTile = L.tileLayer(url, {
-    attribution: '© OpenStreetMap · © CARTO', subdomains: 'abcd', maxZoom: 19,
-  }).addTo(_locMap);
+
+  let url, opts;
+  if (_LOC_MAP_KEY) {
+    // CARTO com chave → estilo real claro/escuro (sem filtro CSS).
+    const base = light ? 'rastertiles/voyager' : 'dark_all';
+    url  = `https://{s}.basemaps.cartocdn.com/${base}/{z}/{x}/{y}.png?key=${encodeURIComponent(_LOC_MAP_KEY)}`;
+    opts = { attribution: '© OpenStreetMap · © CARTO', subdomains: 'abcd', maxZoom: 20 };
+  } else {
+    // OpenStreetMap (sem chave). No escuro, escurece as tiles via filtro CSS.
+    url  = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+    opts = { attribution: '© OpenStreetMap', subdomains: 'abc', maxZoom: 19,
+             className: light ? '' : 'loc-tiles-dark' };
+  }
+  _locTile = L.tileLayer(url, opts).addTo(_locMap);
   _locTile.bringToBack();
   _locTileStyle = style;
 }
