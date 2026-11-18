@@ -429,6 +429,7 @@ function renderTenantsLicenses() {
         <td>${relTime(t.last_activity)}</td>
         <td class="num" onclick="event.stopPropagation()">
           <span style="color:var(--text-dim);font-size:12px">${t.retention_days != null ? t.retention_days + 'd' : '90d ⚙'}</span>
+          <div style="color:var(--text-muted);font-size:10px" title="Evento detalhado mais antigo disponível no banco">${t.oldest_event ? 'desde ' + new Date(t.oldest_event).toLocaleDateString('pt-BR') : 'sem dados'}</div>
           <button class="ghost" style="margin-left:4px;font-size:11px;padding:2px 6px" onclick="setRetention('${t.id}', ${t.retention_days || 90})">✎</button>
         </td>
         <td onclick="event.stopPropagation()" style="white-space:nowrap"><button class="ghost" onclick="genTenantAccess('${t.id}')">gerar acesso</button> <button class="ghost" onclick="finOpen('${t.id}')">financeiro</button></td>
@@ -1237,4 +1238,50 @@ async function runSim() {
   } catch (e) {
     tb.innerHTML = `<tr><td colspan="3" class="empty">Erro: ${escHtml(e.message)}</td></tr>`;
   }
+}
+
+// ---------- Banco: sessões e travas (diagnóstico) — 2026-11-18 ----------
+function _dbaEsc(v) { return String(v == null ? '' : v).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function _dbaDur(s) { if (s == null) return '—'; s = +s; return s < 60 ? s + 's' : s < 3600 ? Math.floor(s/60) + 'min' : (s/3600).toFixed(1) + 'h'; }
+async function loadDbActivity() {
+  const box = document.getElementById('dbaBox');
+  if (!box) return;
+  box.innerHTML = '<p style="color:var(--text-muted)">Carregando…</p>';
+  try {
+    const all = document.getElementById('dbaAll')?.checked ? 'true' : 'false';
+    const d = await api('/v1/admin/db-activity?all=' + all);
+    const blockers = new Set();
+    (d.sessions || []).forEach(x => (x.blocked_by || []).forEach(p => blockers.add(p)));
+    const counts = (d.counts || []).map(c => `${_dbaEsc(c.state)}: <strong>${c.n}</strong>`).join(' · ');
+    const rows = (d.sessions || []).map(x => {
+      const isBlocker = blockers.has(x.pid);
+      const waiting   = (x.blocked_by || []).length > 0;
+      const bg = isBlocker ? 'background:#fee2e2' : waiting ? 'background:#fef3c7' : '';
+      return `<tr style="${bg}">
+        <td class="mono">${x.pid}${isBlocker ? ' <span class="badge danger" title="Bloqueia outras sessões">bloqueia</span>' : ''}</td>
+        <td>${_dbaEsc(x.state)}</td>
+        <td>${_dbaEsc([x.wait_event_type, x.wait_event].filter(Boolean).join(' / ') || '—')}</td>
+        <td class="mono">${_dbaDur(x.query_sec)}</td>
+        <td class="mono">${_dbaDur(x.xact_sec)}</td>
+        <td class="mono">${waiting ? _dbaEsc(x.blocked_by.join(', ')) : '—'}</td>
+        <td class="mono" style="font-size:11px">${_dbaEsc(x.client_addr || '')} ${_dbaEsc(x.application_name || '')}</td>
+        <td class="mono" style="font-size:11px;max-width:520px;white-space:pre-wrap;word-break:break-word">${_dbaEsc(x.query)}</td>
+        <td><button class="ghost" onclick="dbTerminate(${x.pid})">Encerrar</button></td>
+      </tr>`;
+    }).join('');
+    const locks = (d.heavy_locks || []).map(l => `${l.granted ? '🔒' : '⏳'} pid ${l.pid} · ${_dbaEsc(l.relname)} · ${_dbaEsc(l.mode)}`).join('<br>');
+    box.innerHTML = `
+      <div style="font-size:12px;margin-bottom:8px">Conexões no banco — ${counts || '—'}</div>
+      <table><thead><tr><th>PID</th><th>Estado</th><th>Esperando</th><th>Query há</th><th>Transação há</th><th>Bloqueada por</th><th>Origem</th><th>Query</th><th></th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="9" style="color:var(--text-muted)">Nenhuma sessão ativa.</td></tr>'}</tbody></table>
+      <div style="font-size:11px;color:var(--text-muted);margin-top:10px"><strong>Travas fortes em tabelas</strong> (🔒 concedida · ⏳ esperando):<br>${locks || 'nenhuma'}</div>`;
+  } catch (e) {
+    box.innerHTML = '<p style="color:var(--danger,#ef4444)">Falha: ' + _dbaEsc(e.message) + '</p>';
+  }
+}
+async function dbTerminate(pid) {
+  if (!confirm('Encerrar a sessão ' + pid + ' no PostgreSQL?\n\nA query dela é cancelada e a conexão fechada. Use na sessão que BLOQUEIA as outras.')) return;
+  try { await api('/v1/admin/db-activity/' + pid + '/terminate', { method: 'POST' }); }
+  catch (e) { alert('Falha: ' + e.message); }
+  loadDbActivity();
 }

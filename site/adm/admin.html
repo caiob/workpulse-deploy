@@ -468,6 +468,18 @@
       </div>
 
       <div class="card span-12">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+          <h3 style="margin:0">Banco — sessões e travas</h3>
+          <div style="display:flex;gap:10px;align-items:center">
+            <label style="font-size:12px;color:var(--text-muted)"><input type="checkbox" id="dbaAll" onchange="loadDbActivity()"> incluir ociosas</label>
+            <button class="ghost" onclick="loadDbActivity()">Atualizar</button>
+          </div>
+        </div>
+        <p style="font-size:11px;color:var(--text-muted);margin:6px 0 10px">O que está rodando no PostgreSQL agora (conexão própria, funciona mesmo com o pool esgotado). <strong>Bloqueada por</strong> = PIDs que seguram a trava que a sessão espera. Encerre só a sessão culpada (a que bloqueia as outras), em vez de reiniciar o RDS.</p>
+        <div id="dbaBox" style="overflow-x:auto"><p style="color:var(--text-muted)">Clique em Atualizar.</p></div>
+      </div>
+
+      <div class="card span-12">
         <h3>Builds do agente</h3>
         <p style="font-size:11px;color:var(--text-muted);margin:0 0 10px">Repositório de instaladores (.msi/.deb) com histórico. A WorkPulse sobe aqui; o arquivo fica numa bucket privada e o download é por link temporário. "Tornar última" marca a versão alvo por canal/SO.</p>
         <div style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap">
@@ -617,6 +629,6 @@
 
 <div id="toast" class="toast hide"></div>
 
-<script src="js/admin.js?v=20"></script>
+<script src="js/admin.js?v=22"></script>
 </body>
 </html>

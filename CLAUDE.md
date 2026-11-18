@@ -1,7 +1,7 @@
 # CLAUDE.md — WorkPulse
 
 Guidance for AI agents (Claude Code / Cowork) working on WorkPulse.
-**Read this fully before changing anything.** Last updated: 2026-07-24.
+**Read this fully before changing anything.** Last updated: 2026-11-18.
 
 > **Para o estado atual (auth e-mail/senha, papéis, Localização, Administrativo,
 > Financeiro, SMTP por tenant, motor de Alertas, etc.), leia primeiro a seção
@@ -32,6 +32,8 @@ Guidance for AI agents (Claude Code / Cowork) working on WorkPulse.
 | Backend (container) | `scripts/redeploy.ps1` |
 | Site (S3+CloudFront) | `scripts/publicar-site.ps1` |
 | Backend + site | `scripts/redeploy-publicar.ps1` |
+| Backend + site **com backup** (recomendado) | `scripts/redeploy-publicar-com-bkp.ps1` → retrato do que está no ar (tag `bkp-<ts>` no ECR + cópia do S3 em `../_deploy_bkps/<ts>/`) e depois o deploy normal |
+| **Rollback** | `scripts/restore-bkp.ps1 [-Backup <ts>] [-Only all\|backend\|site] [-List] [-Force]` — re-aponta `latest` no ECR + force-new-deployment (~3-5 min) e reenvia o site do backup; não toca nos arquivos locais nem desfaz dados |
 | Infra | `scripts/apply-infra.ps1` (terraform) |
 | Agente (MSI/.deb) | `workpulse-agent/windows/build-msi.ps1 -Version X.Y.Z {-LicenseKey|-EnrollCode}` · `linux/build-deb.sh` |
 
@@ -44,6 +46,78 @@ ECS tem **deployment circuit breaker**: deploy que sobe quebrado faz **rollback*
 - **Cache-busting do dashboard**: cada `js/wp-*.js` tem `?v=N` em `workforce.html` (fonte da verdade das versões). Bump ao alterar um JS.
 
 **Índice de features/incidentes** (detalhe no changelog ao final; mais recente primeiro):
+- 2026-11-18 — **Behavior (Análise de Comportamento) — L1 + chave de API.** Plano em `../PLANO_BEHAVIOR.md`.
+  Bloco novo antes do `# Entry point` em `main.py`: tabelas `api_keys` (chave `wpk_…`, só SHA-256 no banco,
+  escopo `behavior:read`, validade, last_used/ip, revoked) e `behavior_day_cache` (tenant, dia-LOCAL, payload JSONB).
+  Endpoints: `GET /v1/behavior/day?tenant=&day=YYYY-MM-DD[&refresh=1]` (varre events do dia LOCAL via cursor
+  nomeado/streaming, condensa por minuto em Python: início/fim/início efetivo, curva 24h ativo/AFK/não-trabalho,
+  trocas/h, maior pausa, top-3 blocos estáticos, classes vídeo/notícia/social/compras/jogos/reunião, categorias
+  das regras, top apps; dia passado = calcula 1x e guarda; hoje = recalcula se cache > `WORKPULSE_BEHAVIOR_TODAY_TTL`
+  (600s); `_BEHAVIOR_SEM` limita a 1 cálculo simultâneo p/ não disputar o pool) e `GET /v1/behavior/people`.
+  Auth `require_behavior_read`: `X-Api-Key` (escopo+tenant) OU sessão Admin/Admin Master/wp_admin OU X-Admin-Token
+  (Líder NÃO — expõe o tenant inteiro). Admin: `POST|GET /v1/admin/api-keys`, `DELETE /v1/admin/api-keys/{id}`
+  (require_admin, audit). Script `../behavior-lab/gerar-chave-api.ps1` (cria/lista/revoga e grava `.wp_api_key`).
+  Análise offline/detectores (L2) em `../behavior-lab/analisar.py`. **Precisa `redeploy.ps1`.**
+- 2026-11-18 — **Retenção de dados visível.** `GET /v1/tenant-retention` (tenant-scoped, cache
+  300s): `retention_days` efetivo (+ `is_default` = padrão `_DEFAULT_RETENTION_DAYS`=90),
+  `oldest_event`/`newest_event` (`ORDER BY ts LIMIT 1` → índice, 1 linha) e `oldest_summary_day`
+  (`daily_summaries`). Card "Retenção de dados" em Administrativo → Configurações (`loadRetention`
+  em wp-users v33, chamado por `loadLicense`). `/v1/admin/tenants` agora devolve `oldest_event` e a
+  coluna de retenção no `adm` mostra "desde DD/MM/AAAA" (admin.js v22). PUT de retenção agora faz
+  `_cache_bust(tenant)`.
+- 2026-11-18 — **Jornada 504 + diagnóstico do banco no Platform Admin.** `/v1/jornada` filtrava só
+  por `ts::timestamptz` (sem índice) → varria todo o histórico (~90d) da pessoa; com banco frio
+  (reboot do RDS) / backlog de ingestão passou de 60s → 504 no ALB. Fix: pré-filtro em TEXTO
+  `ts >= since_txt AND ts < until_txt` (folga −1/+2 dias, usa `idx_events_user_ts`) mantendo o
+  filtro exato; `statement_timeout=50s` na query. Novo: `GET /v1/admin/db-activity` (sessões,
+  quem bloqueia quem via `pg_blocking_pids`, travas fortes) + `POST /v1/admin/db-activity/{pid}/
+  terminate` (`require_admin`, conexão DEDICADA `_diag_db()` fora do pool — funciona com pool
+  esgotado). Card "Banco — sessões e travas" na aba Sistema do `adm` (admin.js v21). Reboot do
+  RDS (`aws rds reboot-db-instance --db-instance-identifier workpulse-prod-pg`) não foi necessário
+  — o problema era a query; prefira o card para matar só a sessão culpada.
+- 2026-11-18 — **INCIDENTE: "connection pool exhausted" após deploy (login 500 / CORS no front).**
+  Deploy do Estoque levou ~10 min p/ estabilizar e depois TODAS as rotas davam 500
+  (`psycopg2.pool.PoolError`). Causa provável: `init_db` roda `ALTER TABLE users ADD COLUMN IF NOT
+  EXISTS ...` em TODO boot — o Postgres pega ACCESS EXCLUSIVE mesmo quando a coluna já existe; na
+  fila atrás de uma query longa, ele trava toda consulta em `users` → as 10 conexões do pool presas.
+  Recuperação: `aws ecs stop-task` na task (ECS sobe outra limpa). **Fix (próximo deploy):**
+  (1) `init_db` pula ADD COLUMN/DROP CONSTRAINT já aplicados (consulta `information_schema.columns`
+  / `pg_constraint`) → boot normal sem trava; DDL real com `lock_timeout=5s` + 6 tentativas (nunca
+  fica na fila bloqueando). (2) `db()` espera até ~10s por conexão livre em vez de 500 imediato.
+  ⚠️ "Voltar a imagem anterior" NÃO resolve esse tipo de incidente (a antiga faz o mesmo ALTER).
+  **Descoberto depois:** o deploy das 13:32 NUNCA rodou — a task nova travou no boot, o circuit
+  breaker voltou p/ a imagem antiga e o `wait services-stable` deu OK → script mostrou "sucesso".
+  Sintoma: front novo + backend velho (`PATCH {in_stock}` → 422 "no fields to update"). Agora o
+  `redeploy.ps1` compara o digest da task RODANDO com o `latest` do ECR e sai com erro (exit 2) se
+  diferirem; o `redeploy-publicar-com-bkp.ps1` faz backup do digest RODANDO (não do `latest`).
+- 2026-11-18 — **Flag "📦 Estoque" (máquina com agente, sem usuário).** Para que máquina de
+  estoque sem coleta por muito tempo não pareça problema. Coluna `users.in_stock BOOLEAN DEFAULT
+  FALSE` (+ ALTER idempotente), **exclusiva com `on_vacation`** (PATCH liga uma → desliga a outra;
+  as duas `true` = 422). **Permissão:** só `admin_master`, `suporte` (e `wp_admin`) podem MUDAR
+  `in_stock` — o PATCH `/v1/users/{id}` checa via `_session_ctx` só quando o valor muda (o form de
+  Colaboradores reenvia o atual); outro papel → 403. **Efeitos:** fora da Visão Geral (mesmo
+  `vac_set` das férias + card top-12 do front), fora dos alertas Ausente e AFK, **removida do
+  Tempo Ativo** (filtro no front; férias continuam aparecendo lá). **Continua contando licença**
+  (decisão do Caio). **A flag NÃO sai sozinha** se a máquina voltar a coletar: o Suporte mostra
+  "📦 Estoque · coletando" (âmbar) quando ela está online. `in_stock` devolvido em `/v1/users`,
+  `/v1/team/summary`, `/v1/support/people`, `/v1/org-chart`. **Front:** checkbox de Férias virou o
+  select **"Situação"** (`#collabSituacao`: Em uso / 🏖 Férias / 📦 Estoque; opção Estoque
+  desabilitada p/ quem não pode); `state.stock` + `isStock()` + `canMarkStock()` em wp-core, e
+  `vacBadge()` mostra 📦 quando for estoque (cobre Pessoas/Colaboradores/Suporte/dropdowns); botão
+  "📦 Marcar como estoque / ↩ Remover do estoque" no detalhe do Suporte Técnico (`_supSetStock`).
+  Cache-bust: wp-core v24, wp-overview v26, wp-tempoativo v6, wp-settings v36, wp-support v6.
+  Backup pré-mudança em `../_backups_truncados/pre-estoque-20261118/`. **Deploy:
+  `redeploy-publicar.ps1`.**
+  **+ "Excluir e liberar p/ estoque" (mesmo dia):** `POST /v1/users/{id}/release-to-stock`
+  (`require_role("admin_master","suporte")`) — diferente do `DELETE /v1/users/{id}` (que remove a
+  linha e BLOQUEIA o agente): apaga as coletas (`_purge_user_events` — obrigatório, pois tudo é
+  chaveado pelo hostname e o próximo dono herdaria o histórico), zera os dados da pessoa em `users`
+  (nome/e-mail/depto/função/manager/foto/convenia_id/cargo/time), `on_vacation=FALSE`,
+  `in_stock=TRUE`, remove `lider_scope` do tipo user; **mantém** `devices`, `dash_seat_alloc` e o
+  agente ATIVO. Botão no detalhe do Suporte Técnico (`_supReleaseToStock`, confirmação digitando
+  LIBERAR). Reatribuir = Colaboradores → Editar → dados + Situação "Em uso". **Bugfix junto:**
+  `_purge_user_events` agora também apaga `agg_user_hour`/`agg_user_day` do usuário (antes o
+  "Limpar coletas"/"Excluir" deixavam o histórico vivo nos agregados). wp-support v7.
 - 2026-07-25 — **Organograma: animação ao expandir/recolher liderados.**
   Antes, `_ocToggle()` só marcava/desmarcava o id em `_oc.expanded` e chamava `_ocRender()`,
   que reconstrói o `innerHTML` da árvore INTEIRA do zero — por isso os cards apareciam/
@@ -1239,15 +1313,15 @@ duplicado / eventos em dobro. Além do WatchDog, tratar no próprio agente.
   heartbeat (pré-existentes); provado balance-neutro (stripped==full) e a 2.3.5 compila. Blocos
   novos conferidos à mão. Vai junto na build 2.3.6.
 
-### BUG /v1/ingest — 500 infinito por NUL ( ) no título (2026-07-15)
+### BUG /v1/ingest — 500 infinito por NUL () no título (2026-07-15)
 SINTOMA: 1 usuário (de 100+) parou de sincronizar; agente saudável (conecta, licença/config OK),
 mas TODO POST `/v1/ingest` → `500 Internal Server Error`, com backoff crescente (2→4→…→256s). Log do
 agente (v2.3.6, já com log em arquivo) foi o que permitiu ver isso.
-- CAUSA: um evento com caractere **NUL (` `)** no título/app (alguns apps do Windows geram
-  títulos com byte nulo). O PostgreSQL **rejeita ` ` em JSONB e TEXT** → o INSERT do lote
+- CAUSA: um evento com caractere **NUL (``)** no título/app (alguns apps do Windows geram
+  títulos com byte nulo). O PostgreSQL **rejeita `` em JSONB e TEXT** → o INSERT do lote
   estoura (exceção não tratada → 500). Como o agente só apaga o lote **após sucesso**, ele reenviava
   o MESMO lote pra sempre → coleta travada só daquele usuário. Os outros 100 tinham lotes "limpos".
-- FIX (backend, `main.py`): helper `_strip_nul(v)` remove ` ` de strings recursivamente
+- FIX (backend, `main.py`): helper `_strip_nul(v)` remove `` de strings recursivamente
   (str/dict/list). Aplicado em `ingest` a: `user_id`, `device_id`, `login_user`, campos do device
   (hostname/os_version/agent_version), e principalmente `Json(_strip_nul(e.data))` + `e.bucket`/`event_id`.
 - DEPLOY: só backend (`redeploy.ps1`).

@@ -77,6 +77,32 @@ if ($LASTEXITCODE -ne 0) { Write-Error "Falha ao atualizar o servico ECS."; exit
 
 Write-Host "  - Aguardando estabilizacao..."
 aws ecs wait services-stable --cluster $Cluster --services $Service
+$waitRc = $LASTEXITCODE
+
+# --- Confere se a task RODANDO usa a imagem nova -----------------------------
+# 'services-stable' tambem fica OK quando o circuit breaker VOLTA p/ a versao antiga
+# (incidente 2026-11-18: "sucesso" com a imagem antiga no ar). Compara os digests.
+$newDigest = (aws ecr describe-images --repository-name "workpulse-prod-server" --image-ids imageTag=latest `
+  --query "imageDetails[0].imageDigest" --output text).Trim()
+$taskArn = (aws ecs list-tasks --cluster $Cluster --service-name $Service --desired-status RUNNING `
+  --query "taskArns[0]" --output text).Trim()
+$runDigest = ""
+if ($taskArn -and $taskArn -ne "None") {
+  $runDigest = (aws ecs describe-tasks --cluster $Cluster --tasks $taskArn `
+    --query "tasks[0].containers[0].imageDigest" --output text).Trim()
+}
+if ($runDigest -ne $newDigest) {
+  Write-Host ""
+  Write-Host "============================================================" -ForegroundColor Red
+  Write-Host " FALHOU: o ECS NAO esta rodando a imagem nova." -ForegroundColor Red
+  Write-Host "   nova    : $newDigest" -ForegroundColor Red
+  Write-Host "   rodando : $runDigest" -ForegroundColor Red
+  Write-Host " Provavel rollback automatico (circuit breaker) ou wait expirado (rc=$waitRc)." -ForegroundColor Red
+  Write-Host " Veja: aws ecs describe-services --cluster $Cluster --services $Service --query 'services[0].events[0:15].message'" -ForegroundColor Red
+  Write-Host "============================================================" -ForegroundColor Red
+  exit 2
+}
+Write-Host "  - Confirmado: task rodando com a imagem nova ($runDigest)."
 
 Write-Host "`n============================================================"
 Write-Host " Servidor atualizado com sucesso (sem downtime)."

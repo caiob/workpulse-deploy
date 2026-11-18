@@ -181,7 +181,17 @@ class _PGConn:
 @contextmanager
 def db():
     assert _pool is not None, "Pool não inicializado — chame _init_pool() primeiro"
-    conn = _pool.getconn()
+    # Pool cheio: ESPERA até ~10s por uma conexão livre em vez de estourar 500 na hora
+    # (incidente 2026-11-18: rajada pós-deploy → "connection pool exhausted" em tudo).
+    conn = None
+    for _i in range(40):
+        try:
+            conn = _pool.getconn()
+            break
+        except psycopg2.pool.PoolError:
+            if _i == 39:
+                raise
+            time.sleep(0.25)
     try:
         yield _PGConn(conn)
     finally:
@@ -225,6 +235,7 @@ _SCHEMA_STMTS = [
         department   TEXT,
         role         TEXT,
         on_vacation  BOOLEAN NOT NULL DEFAULT FALSE,
+        in_stock     BOOLEAN NOT NULL DEFAULT FALSE,
         login_user   TEXT,
         first_seen   TEXT NOT NULL,
         last_seen    TEXT NOT NULL,
@@ -487,10 +498,42 @@ async def _event_id_dedup_watcher() -> None:
     print("[startup] dedup por event_id: ainda inativo apos 15min", flush=True)
 
 
+_ADD_COL_RE  = _re.compile(r"^\s*ALTER TABLE\s+(\w+)\s+ADD COLUMN IF NOT EXISTS\s+(\w+)", _re.I)
+_DROP_CON_RE = _re.compile(r"^\s*ALTER TABLE\s+\w+\s+DROP CONSTRAINT IF EXISTS\s+(\w+)", _re.I)
+
+
 def init_db() -> None:
+    """Aplica o schema. INCIDENTE 2026-11-18: 'ALTER TABLE ... IF NOT EXISTS' pega trava
+    ACCESS EXCLUSIVE MESMO quando não há nada a fazer; esperando na fila atrás de uma query
+    longa, ele trava TODA consulta em `users` e esgota o pool da task em produção. Agora:
+    (1) pula ADD COLUMN/DROP CONSTRAINT que já estão aplicados (sem trava nenhuma no boot
+    normal); (2) DDL real roda com lock_timeout=5s e até 6 tentativas — nunca fica na fila
+    bloqueando os outros; se não conseguir, a task nova falha e o circuit breaker volta."""
     with db() as c:
-        for stmt in _SCHEMA_STMTS:
-            c.execute(stmt)
+        cols = {(r["table_name"].lower(), r["column_name"].lower()) for r in c.execute(
+            "SELECT table_name, column_name FROM information_schema.columns "
+            "WHERE table_schema = ANY (current_schemas(false))").fetchall()}
+        cons = {r["conname"].lower() for r in c.execute("SELECT conname FROM pg_constraint").fetchall()}
+        c.execute("SET lock_timeout = '5s'")
+        try:
+            for stmt in _SCHEMA_STMTS:
+                m = _ADD_COL_RE.match(stmt)
+                if m and (m.group(1).lower(), m.group(2).lower()) in cols:
+                    continue
+                m = _DROP_CON_RE.match(stmt)
+                if m and m.group(1).lower() not in cons:
+                    continue
+                for _try in range(6):
+                    try:
+                        c.execute(stmt)
+                        break
+                    except psycopg2.errors.LockNotAvailable:
+                        if _try == 5:
+                            raise
+                        print(f"[init_db] lock ocupado, tentativa {_try + 1}/6: {stmt.strip()[:80]}", flush=True)
+                        time.sleep(5)
+        finally:
+            c.execute("SET lock_timeout = 0")
     _ensure_event_id_index()    # CONCURRENTLY, fora do loop (não pode em transação)
     _ensure_ts_index()          # idx_events_ts CONCURRENTLY (acelera o /v1/admin/stats)
     _refresh_event_id_dedup()   # liga o dedup se o índice já ficou válido
@@ -743,6 +786,7 @@ class UserUpdate(BaseModel):
     department:   str | None = None
     role:         str | None = None
     on_vacation:  bool | None = None
+    in_stock:     bool | None = None
 
 
 class LicenseIssueRequest(BaseModel):
@@ -1740,7 +1784,7 @@ def list_users(tenant: str, request: Request):
     with db() as c:
         rows = c.execute(
             """SELECT user_id, display_name, email, department, role,
-                      on_vacation, login_user, first_seen, last_seen
+                      on_vacation, in_stock, login_user, first_seen, last_seen
                FROM users WHERE tenant_id = %s ORDER BY last_seen DESC""",
             (tenant,),
         ).fetchall()
@@ -1784,7 +1828,7 @@ def org_chart(tenant: str, request: Request):
         rows = c.execute(
             """SELECT dp.convenia_id, dp.email, dp.name, dp.manager, dp.department,
                       dp.cargo, dp.team, dp.photo_url AS dp_photo,
-                      u.user_id, u.photo_url AS u_photo, u.on_vacation
+                      u.user_id, u.photo_url AS u_photo, u.on_vacation, u.in_stock
                FROM directory_people dp
                LEFT JOIN users u
                  ON u.tenant_id = dp.tenant_id AND u.convenia_id = dp.convenia_id
@@ -1834,6 +1878,7 @@ def org_chart(tenant: str, request: Request):
             "team":         r["team"],
             "photo_url":    photo_out,
             "on_vacation":  bool(r["on_vacation"]) if r["on_vacation"] is not None else False,
+            "in_stock":     bool(r["in_stock"]) if r["in_stock"] is not None else False,
         })
     _perf.mark("build")
     out = {"people": people}
@@ -1999,10 +2044,36 @@ def update_user(user_id: str, body: UserUpdate, tenant: str, request: Request):
         fields.append("department = %s"); values.append(body.department)
     if body.role is not None:
         fields.append("role = %s"); values.append(body.role)
+    if body.on_vacation and body.in_stock:
+        raise HTTPException(status_code=422, detail="Férias e Estoque são exclusivos")
     if body.on_vacation is not None:
         fields.append("on_vacation = %s"); values.append(bool(body.on_vacation))
+        if body.on_vacation and body.in_stock is None:
+            fields.append("in_stock = FALSE")       # férias → deixa de ser estoque
+    if body.in_stock is not None:
+        fields.append("in_stock = %s"); values.append(bool(body.in_stock))
+        if body.in_stock and body.on_vacation is None:
+            fields.append("on_vacation = FALSE")    # estoque → não está de férias
     if not fields:
         raise HTTPException(status_code=422, detail="no fields to update")
+    # Estoque: só Suporte / Admin Master (e Admin WorkPulse) podem MUDAR a flag.
+    # Só checa quando o valor muda — o form de Colaboradores reenvia o valor atual.
+    if body.in_stock is not None or body.on_vacation:
+        with db() as c:
+            cur_row = c.execute(
+                "SELECT in_stock FROM users WHERE tenant_id=%s AND user_id=%s", (tenant, user_id)
+            ).fetchone()
+        cur_stock = bool(cur_row["in_stock"]) if cur_row else False
+        new_stock = cur_stock
+        if body.in_stock is not None:
+            new_stock = bool(body.in_stock)
+        elif body.on_vacation:
+            new_stock = False
+        if new_stock != cur_stock:
+            ctx = _session_ctx(request, request.headers.get("x-admin-token"), tenant)
+            if not ctx or ctx["role"] not in ("admin_master", "suporte", "wp_admin"):
+                raise HTTPException(status_code=403,
+                                    detail="apenas Suporte ou Admin Master podem alterar o Estoque")
     values.extend([tenant, user_id])
     with db() as c:
         cur = c.execute(
@@ -2070,7 +2141,7 @@ def team_summary(tenant: str, request: Request, days: int = 7,
         # Metadados dos usuários (tabela pequena) + versão do agente.
         meta = c.execute(
             f"""SELECT u.user_id, u.display_name, u.email, u.department, u.last_seen,
-                       u.on_vacation,
+                       u.on_vacation, u.in_stock,
                        (SELECT d.agent_version FROM devices d
                         WHERE d.tenant_id = u.tenant_id AND d.user_id = u.user_id
                         ORDER BY d.last_seen DESC LIMIT 1) AS agent_version
@@ -2102,6 +2173,7 @@ def team_summary(tenant: str, request: Request, days: int = 7,
             "last_seen":     u["last_seen"],
             "agent_version": u["agent_version"],
             "on_vacation":   bool(u["on_vacation"]),
+            "in_stock":      bool(u["in_stock"]),
             "active":        act,
             "afk":           _afk_net.get(uid, afkv),    # AFK já com almoço descontado (por dia)
             "afk_in":        afk_in_map.get(uid, 0.0),   # AFK na Jornada (desconto aplicado na aba Jornada)
@@ -2229,6 +2301,7 @@ def jornada(
                    duration_sec
             FROM events
             WHERE tenant_id = %(tenant)s AND user_id = %(uid)s AND bucket = 'window'
+              AND ts >= %(since_txt)s AND ts < %(until_txt)s
               AND ts::timestamptz >= %(since)s::timestamptz
               AND ts::timestamptz <  %(until)s::timestamptz
         ),
@@ -2247,6 +2320,7 @@ def jornada(
             WHERE tenant_id = %(tenant)s AND user_id = %(uid)s AND bucket = 'afk'
               AND data_json->>'status' = 'afk'
               AND duration_sec <= {AFK_MAX_SEC}
+              AND ts >= %(since_txt)s AND ts < %(until_txt)s
               AND ts::timestamptz >= %(since)s::timestamptz
               AND ts::timestamptz <  %(until)s::timestamptz
         ),
@@ -2269,6 +2343,7 @@ def jornada(
             FROM events
             WHERE tenant_id = %(tenant)s AND user_id = %(uid)s AND bucket = 'afk'
               AND data_json->>'status' = 'sleep'
+              AND ts >= %(since_txt)s AND ts < %(until_txt)s
               AND ts::timestamptz >= %(since)s::timestamptz
               AND ts::timestamptz <  %(until)s::timestamptz
         ),
@@ -2289,6 +2364,7 @@ def jornada(
                        + (duration_sec || ' seconds')::interval AS lend
             FROM events
             WHERE tenant_id = %(tenant)s AND user_id = %(uid)s
+              AND ts >= %(since_txt)s AND ts < %(until_txt)s
               AND ts::timestamptz >= %(since)s::timestamptz
               AND ts::timestamptz <  %(until)s::timestamptz
               AND (bucket = 'window'
@@ -2323,10 +2399,29 @@ def jornada(
         LEFT JOIN gaps ON gaps.day = win.day
         ORDER BY win.day
     """
+    # PERF (2026-11-18): o filtro com ts::timestamptz não usa índice → varria TODO o
+    # histórico da pessoa (504 no ALB com banco frio/carregado). Pré-filtro em TEXTO
+    # (ISO-8601 UTC, lexicográfico = cronológico) com folga de 1 dia em cada ponta usa
+    # idx_events_user_ts (tenant,user,ts); o filtro exato por timestamptz continua valendo.
+    def _txt_bound(iso: str, delta_days: int, fallback: str) -> str:
+        try:
+            d = dt.datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+            if d.tzinfo is None:
+                d = d.replace(tzinfo=dt.timezone.utc)
+            return (d.astimezone(dt.timezone.utc) + dt.timedelta(days=delta_days)).strftime("%Y-%m-%d")
+        except Exception:
+            return fallback
     params = {"tz": REPORT_TZ, "tenant": tenant, "uid": user_id,
-              "since": since, "until": until}
+              "since": since, "until": until,
+              "since_txt": _txt_bound(since, -1, "0000"),
+              "until_txt": _txt_bound(until, +2, "9999")}
     with db() as c:
-        rows = c.execute(sql, params).fetchall()
+        # Nunca segura a conexão além do timeout do ALB (60s): erro claro em vez de 504.
+        c.execute("SET statement_timeout = '50s'")
+        try:
+            rows = c.execute(sql, params).fetchall()
+        finally:
+            c.execute("SET statement_timeout = 0")
 
     today_local = dt.datetime.now(
         ZoneInfo(REPORT_TZ)
@@ -2779,7 +2874,8 @@ def workforce_overview(tenant: str, request: Request, days: int = 7,
         urows = c.execute(
             f"""SELECT user_id, display_name,
                       COALESCE(department,'Sem departamento') AS dept, last_seen,
-                      COALESCE(on_vacation, FALSE) AS on_vacation
+                      COALESCE(on_vacation, FALSE) AS on_vacation,
+                      COALESCE(in_stock, FALSE) AS in_stock
                FROM users u WHERE u.tenant_id=%s{SCU}""",
             tuple([tenant, *A]),
         ).fetchall()
@@ -2788,7 +2884,8 @@ def workforce_overview(tenant: str, request: Request, days: int = 7,
 
     # Férias: colaboradores de férias NÃO entram na Visão Geral (ausência justificada
     # — para não diluir as médias/totais/contagens do time). Pulados em TODAS as somas.
-    vac_set = {u["user_id"] for u in urows if u["on_vacation"]}
+    # Estoque (máquina sem usuário) segue a MESMA regra: fora de todas as somas.
+    vac_set = {u["user_id"] for u in urows if u["on_vacation"] or u["in_stock"]}
 
     # ---- Agregações em memória (poucas centenas/milhares de linhas) ----
     active_total = afk_total = today_active = 0.0
@@ -2835,8 +2932,8 @@ def workforce_overview(tenant: str, request: Request, days: int = 7,
     overwork, underwork = [], []
     for u in urows:
         uid = u["user_id"]
-        if u["on_vacation"]:
-            continue                          # de férias → fora da Visão Geral
+        if u["on_vacation"] or u["in_stock"]:
+            continue                          # férias/estoque → fora da Visão Geral
         if u["last_seen"] and u["last_seen"] >= online_threshold:
             online += 1
         ua = active_by_user.get(uid, 0.0)
@@ -3281,7 +3378,39 @@ def admin_list_tenants():
                GROUP BY t.id, t.name, t.plan, t.status, t.created_at, t.retention_days
                ORDER BY t.created_at DESC""",
         ).fetchall()
-    return {"tenants": [dict(r) for r in rows]}
+        out = [dict(r) for r in rows]
+        # Dado mais antigo realmente disponível (ORDER BY ts LIMIT 1 → idx_events_tenant_ts,
+        # leitura de 1 linha do índice; barato mesmo com milhões de eventos).
+        for t in out:
+            r = c.execute("SELECT ts FROM events WHERE tenant_id=%s ORDER BY ts LIMIT 1", (t["id"],)).fetchone()
+            t["oldest_event"] = r["ts"] if r else None
+    return {"tenants": out}
+
+
+@app.get("/v1/tenant-retention", dependencies=[Depends(require_tenant_scope)])
+def tenant_retention(tenant: str):
+    """Retenção de dados do tenant (2026-11-18): regra configurada + período que REALMENTE
+    existe no banco. Eventos detalhados mais antigos que a retenção viram resumo diário
+    (daily_summaries) e são apagados pelo _retention_worker."""
+    ck = f"{tenant}:retention"
+    cached = _cache_get(ck)
+    if cached is not None:
+        return cached
+    with db() as c:
+        t = c.execute("SELECT retention_days FROM tenants WHERE id=%s", (tenant,)).fetchone()
+        old = c.execute("SELECT ts FROM events WHERE tenant_id=%s ORDER BY ts LIMIT 1", (tenant,)).fetchone()
+        new = c.execute("SELECT ts FROM events WHERE tenant_id=%s ORDER BY ts DESC LIMIT 1", (tenant,)).fetchone()
+        sm  = c.execute("SELECT MIN(day) AS d FROM daily_summaries WHERE tenant_id=%s", (tenant,)).fetchone()
+    days = t["retention_days"] if t and t["retention_days"] is not None else None
+    out = {
+        "retention_days": int(days) if days is not None else _DEFAULT_RETENTION_DAYS,
+        "is_default":     days is None,
+        "oldest_event":   old["ts"] if old else None,
+        "newest_event":   new["ts"] if new else None,
+        "oldest_summary_day": sm["d"] if sm else None,
+    }
+    _cache_set(ck, out)
+    return out
 
 
 @app.get("/v1/admin/licenses", dependencies=[Depends(require_admin)])
@@ -3413,6 +3542,7 @@ def set_tenant_retention(tenant_id: str, days: int = Query(..., ge=1, le=3650),
             raise HTTPException(status_code=404, detail="tenant not found")
     audit("admin", "tenant.retention", target=tenant_id, detail=f"retention_days={days}",
           ip=request.client.host if request.client else None)
+    _cache_bust(tenant_id)   # card "Retenção de dados" do painel do cliente
     return {"status": "updated", "tenant_id": tenant_id, "retention_days": days}
 
 
@@ -4342,7 +4472,7 @@ def support_people(tenant: str, request: Request):
     versão do agente e a máquina mais recente. Sem agregação pesada."""
     with db() as c:
         rows = c.execute(
-            """SELECT u.user_id, u.display_name, u.department, u.last_seen, u.on_vacation,
+            """SELECT u.user_id, u.display_name, u.department, u.last_seen, u.on_vacation, u.in_stock,
                       d.agent_version, d.hostname, d.os
                FROM users u
                LEFT JOIN LATERAL (
@@ -6782,7 +6912,7 @@ def _compute_day_alerts(tenant: str, settings: dict, risky: list, allowed=None) 
 
     with db() as c:
         users = {r["user_id"]: dict(r) for r in c.execute(
-            f"SELECT user_id, display_name, department, last_seen, on_vacation FROM users WHERE tenant_id=%s"
+            f"SELECT user_id, display_name, department, last_seen, on_vacation, in_stock FROM users WHERE tenant_id=%s"
             + (" AND user_id = ANY(%s)" if allowed is not None else ""),
             tuple([tenant, *([allowed] if allowed is not None else [])]),
         ).fetchall()}
@@ -6837,14 +6967,16 @@ def _compute_day_alerts(tenant: str, settings: dict, risky: list, allowed=None) 
             uid = r["user_id"]; sec = r["afk"] or 0
             if uid in started and sec >= thr:
                 u = users.get(uid, {})
+                if u.get("in_stock"):
+                    continue              # máquina de estoque → sem alerta de AFK
                 afk_list.append({"user_id": uid, "display_name": u.get("display_name"),
                                  "department": u.get("department"), "afk_minutes": round(sec / 60)})
         if now_local >= cutoff:
             for uid in sorted(expected):
                 if uid not in started:
                     u = users.get(uid, {})
-                    if u.get("on_vacation"):
-                        continue              # de férias → ausência justificada, não alerta
+                    if u.get("on_vacation") or u.get("in_stock"):
+                        continue              # férias/estoque → ausência justificada, não alerta
                     absent_list.append({"user_id": uid, "display_name": u.get("display_name"),
                                         "department": u.get("department"), "last_seen": u.get("last_seen")})
 
@@ -7275,6 +7407,10 @@ def _purge_user_events(tenant: str, user_id: str) -> None:
         c.execute("DELETE FROM events          WHERE tenant_id=%s AND user_id=%s", (tenant, user_id))
         c.execute("DELETE FROM daily_summaries WHERE tenant_id=%s AND user_id=%s", (tenant, user_id))
         c.execute("DELETE FROM client_ips      WHERE tenant_id=%s AND user_id=%s", (tenant, user_id))
+        # Agregados por usuário (rollup): sem isso o histórico apagado continuava
+        # aparecendo em team_summary/overview/alertas (o rollup só refaz ontem+hoje).
+        c.execute("DELETE FROM agg_user_hour   WHERE tenant_id=%s AND user_id=%s", (tenant, user_id))
+        c.execute("DELETE FROM agg_user_day    WHERE tenant_id=%s AND user_id=%s", (tenant, user_id))
     _cache_bust(tenant)
 
 
@@ -7310,6 +7446,112 @@ def delete_user_full(user_id: str, tenant: str, request: Request,
     _cache_bust(tid)
     audit(ctx.get("email"), "user.delete", target=user_id, detail=f"tenant={tid};block={block}", ip=_client_ip(request))
     return {"ok": True, "blocked": bool(block)}
+
+
+@app.post("/v1/users/{user_id}/release-to-stock")
+def release_user_to_stock(user_id: str, tenant: str, request: Request,
+                          ctx: Annotated[dict, Depends(require_role("admin_master", "suporte"))]):
+    """Excluir colaborador e LIBERAR a máquina p/ estoque (2026-11-18, Suporte + Admin Master).
+    Diferente do DELETE: o agente NÃO é bloqueado e o registro da máquina (users/devices/
+    licença) fica. Apaga as coletas (senão o próximo dono herdaria o histórico, já que tudo é
+    chaveado pelo hostname), limpa os dados da pessoa e marca in_stock=TRUE. Para reatribuir:
+    Editar → preencher nome/e-mail → Situação "Em uso"."""
+    tid = ctx["tenant"] if ctx["role"] != "wp_admin" else tenant
+    with db() as c:
+        if not c.execute("SELECT 1 FROM users WHERE tenant_id=%s AND user_id=%s", (tid, user_id)).fetchone():
+            raise HTTPException(status_code=404, detail="user not found")
+    _purge_user_events(tid, user_id)
+    with db() as c:
+        c.execute(
+            """UPDATE users SET display_name=NULL, email=NULL, department=NULL, role=NULL,
+                   manager=NULL, photo_url=NULL, convenia_id=NULL, cargo=NULL, team=NULL,
+                   on_vacation=FALSE, in_stock=TRUE
+               WHERE tenant_id=%s AND user_id=%s""",
+            (tid, user_id),
+        )
+        c.execute("DELETE FROM lider_scope WHERE tenant_id=%s AND scope_type='user' AND scope_value=%s",
+                  (tid, user_id))
+    _cache_bust(tid)
+    audit(ctx.get("email"), "user.release_to_stock", target=user_id, detail=f"tenant={tid}", ip=_client_ip(request))
+    return {"ok": True, "in_stock": True}
+
+
+# ===========================================================================
+# Diagnóstico do banco (Platform Admin) — 2026-11-18, após incidente de travas.
+# Lista as sessões do Postgres (o que está rodando / esperando trava / quem bloqueia
+# quem) e permite encerrar UMA sessão específica, sem reboot do RDS.
+# ===========================================================================
+@contextmanager
+def _diag_db():
+    """Conexão DEDICADA (fora do pool): o diagnóstico tem que funcionar justamente
+    quando o pool estiver esgotado."""
+    conn = psycopg2.connect(_build_dsn())
+    try:
+        yield _PGConn(conn)
+    finally:
+        conn.close()
+
+
+@app.get("/v1/admin/db-activity", dependencies=[Depends(require_admin)])
+def admin_db_activity(all: bool = False):
+    with _diag_db() as c:
+        c.execute("SET statement_timeout = '10s'")
+        try:
+            rows = c.execute(
+                """SELECT pid, usename, application_name,
+                          host(client_addr) AS client_addr, state,
+                          wait_event_type, wait_event,
+                          EXTRACT(EPOCH FROM (now() - query_start))::int AS query_sec,
+                          EXTRACT(EPOCH FROM (now() - xact_start))::int  AS xact_sec,
+                          EXTRACT(EPOCH FROM (now() - backend_start))::int AS conn_sec,
+                          pg_blocking_pids(pid) AS blocked_by,
+                          LEFT(query, 400) AS query
+                   FROM pg_stat_activity
+                   WHERE datname = current_database()
+                     AND pid <> pg_backend_pid()
+                     AND (%s OR state IS DISTINCT FROM 'idle')
+                   ORDER BY query_start NULLS LAST""",
+                (bool(all),),
+            ).fetchall()
+            locks = c.execute(
+                """SELECT l.pid, c.relname, l.mode, l.granted
+                   FROM pg_locks l JOIN pg_class c ON c.oid = l.relation
+                   WHERE l.mode IN ('AccessExclusiveLock','ExclusiveLock','ShareLock',
+                                    'ShareRowExclusiveLock')
+                     AND c.relkind = 'r'
+                   ORDER BY l.granted, c.relname"""
+            ).fetchall()
+            counts = c.execute(
+                """SELECT COALESCE(state,'?') AS state, COUNT(*) AS n FROM pg_stat_activity
+                   WHERE datname = current_database() GROUP BY 1 ORDER BY 2 DESC"""
+            ).fetchall()
+        finally:
+            c.execute("SET statement_timeout = 0")
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["blocked_by"] = list(d.get("blocked_by") or [])
+        out.append(d)
+    return {"sessions": out, "heavy_locks": [dict(r) for r in locks],
+            "counts": [dict(r) for r in counts],
+            "pool": {"maxconn": 10}}
+
+
+@app.post("/v1/admin/db-activity/{pid}/terminate", dependencies=[Depends(require_admin)])
+def admin_db_terminate(pid: int, request: Request):
+    with _diag_db() as c:
+        if pid == c.execute("SELECT pg_backend_pid() AS p").fetchone()["p"]:
+            raise HTTPException(status_code=400, detail="não dá para encerrar a própria sessão")
+        row = c.execute(
+            "SELECT LEFT(query,200) AS q FROM pg_stat_activity WHERE pid=%s AND datname=current_database()",
+            (pid,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="sessão não encontrada")
+        ok = c.execute("SELECT pg_terminate_backend(%s) AS ok", (pid,)).fetchone()["ok"]
+    audit("admin", "db.terminate", target=str(pid), detail=(row["q"] or "")[:200],
+          ip=request.client.host if request.client else None)
+    return {"ok": bool(ok), "pid": pid}
 
 
 @app.get("/v1/blocked-devices")
@@ -7383,6 +7625,9 @@ _SCHEMA_STMTS.extend([
     "ALTER TABLE agent_config_tenant ADD COLUMN IF NOT EXISTS update_health_grace_min INTEGER",
     # Rótulo de Férias (ausência justificada): liga/desliga manual por colaborador.
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS on_vacation BOOLEAN NOT NULL DEFAULT FALSE",
+    # Máquina de ESTOQUE (2026-11-18): agente instalado, sem usuário → fica fora da Visão
+    # Geral/Tempo Ativo/alertas. Exclusiva com on_vacation. Marcação: Suporte + Admin Master.
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS in_stock BOOLEAN NOT NULL DEFAULT FALSE",
     # Auto-registra como DEPARTAMENTO qualquer nome já atribuído a um colaborador
     # (ex.: digitado no Editar antes de existir a tela de gestão) — assim a tela de
     # Departamentos mostra tudo sem precisar recriar. Idempotente (ON CONFLICT).
@@ -8372,6 +8617,573 @@ def admin_dup_report(tenant: str, since: str | None = None, until: str | None = 
             "afk_gt_1h": r["afk_gt_1h"],
         })
     return {"tenant": tenant, "since": since, "until": until, "users": out}
+
+
+# ===========================================================================
+# BEHAVIOR (Análise de Comportamento) — L1: métricas por pessoa/dia  (2026-11-18)
+# ---------------------------------------------------------------------------
+# Plano: ../PLANO_BEHAVIOR.md. Endpoints SÓ LEITURA, calculados NO SERVIDOR
+# (Postgres faz a varredura; Python condensa por minuto/hora). Resultado por
+# (tenant, dia-LOCAL) fica guardado em behavior_day_cache: dia passado = calculado
+# 1x e reaproveitado; hoje = recalculado se o cache tiver > BEHAVIOR_TODAY_TTL.
+#
+# Acesso: sessão/X-Admin-Token (igual ao painel) OU chave de API de serviço
+# (header X-Api-Key, escopo "behavior:read"), emitida pelo Platform Admin em
+# /v1/admin/api-keys. A chave é guardada só como SHA-256; mostrada 1x na criação.
+# ===========================================================================
+_SCHEMA_STMTS.extend([
+    """
+    CREATE TABLE IF NOT EXISTS api_keys (
+        id           BIGSERIAL PRIMARY KEY,
+        tenant_id    TEXT,
+        name         TEXT NOT NULL,
+        key_prefix   TEXT NOT NULL,
+        key_hash     TEXT NOT NULL UNIQUE,
+        scopes       TEXT NOT NULL DEFAULT 'behavior:read',
+        created_at   TEXT NOT NULL,
+        created_by   TEXT,
+        expires_at   TEXT,
+        last_used_at TEXT,
+        last_ip      TEXT,
+        revoked      BOOLEAN NOT NULL DEFAULT FALSE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS behavior_hour_cache (
+        tenant_id   TEXT NOT NULL,
+        hour        TEXT NOT NULL,
+        payload     JSONB NOT NULL,
+        computed_at TEXT NOT NULL,
+        compute_ms  INTEGER,
+        PRIMARY KEY (tenant_id, hour)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS behavior_day_cache (
+        tenant_id   TEXT NOT NULL,
+        day         TEXT NOT NULL,
+        payload     JSONB NOT NULL,
+        computed_at TEXT NOT NULL,
+        compute_ms  INTEGER,
+        PRIMARY KEY (tenant_id, day)
+    )
+    """,
+])
+
+BEHAVIOR_TODAY_TTL = int(os.getenv("WORKPULSE_BEHAVIOR_TODAY_TTL", "600"))
+_BEHAVIOR_SEM = threading.Semaphore(int(os.getenv("WORKPULSE_BEHAVIOR_CONC", "1")))
+_APIKEY_TOUCH: dict[int, float] = {}
+
+_BH_NONWORK = [
+    ("video",   r"youtube|netflix|twitch|prime ?video|disney\+|globoplay|max\.com|hbo ?max|vimeo|kick\.com|crunchyroll|star\+"),
+    ("noticia", r"\bg1\b|globo\.com|\buol\b|folha|estad[aã]o|terra\.com|\br7\b|\bcnn\b|metr[oó]poles|poder360|infomoney|valor econ|\bbbc\b|ge\.globo|lance!|\bespn\b"),
+    ("social",  r"instagram|facebook|tiktok|twitter|\bx\.com|^\(?\d*\)?\s*(home|in[ií]cio|p[aá]gina inicial|notifica[cç][oõ]es|explorar|explore) / x$|\son x:|\sno x:|/ x$|reddit|pinterest|threads|kwai|snapchat|tumblr|\bkoo\b"),
+    ("compras", r"mercado ?livre|shopee|amazon\.com|aliexpress|magazine ?luiza|magalu|americanas|shein|\btemu\b|\bolx\b"),
+    ("jogos",   r"steam|epic games|roblox|league of legends|valorant|minecraft|chess\.com|\bpoki\b"),
+    ("musica",  r"spotify|deezer|soundcloud"),
+]
+_BH_WORKHINT = [
+    ("reuniao", r"teams|zoom|google meet|meet\.google|\bmeet:|webex|whereby|gotomeeting|bluejeans|reuni[aã]o"),
+    ("ia",      r"claude|chatgpt|copilot|gemini|cursor\.exe|\bcursor\b"),
+    ("comunic", r"slack|outlook|gmail|telegram|e-?mail"),
+]
+_BH_NONWORK_RE = [(k, _re.compile(p, _re.I)) for k, p in _BH_NONWORK]
+_BH_WORK_RE = [(k, _re.compile(p, _re.I)) for k, p in _BH_WORKHINT]
+_BH_NONWORK_CLASSES = {"video", "noticia", "social", "compras", "jogos"}
+_BH_TT_CLASSES = {"video", "noticia", "social", "compras", "jogos", "musica", "whatsapp"}
+_BH_DAY_VER = 5   # bump ao mudar _bh_compose_day/_bh_finish2 -> recompõe dias do cache de horas
+_BH_HOUR_VER = 4  # bump ao mudar a classificação por hora -> horas antigas são recalculadas
+
+# Categorias de RISCO DE SEGURANÇA (app + título da janela). Um título pode cair em
+# uma classe de comportamento (vídeo, social...) E numa categoria de segurança.
+_BH_SECURITY = [
+    ("compartilhamento", r"wetransfer|mega\.nz|\bmega\.io|4shared|mediafire|sendspace|file\.io|gofile|pixeldrain|anonfiles|transfer\.sh|send-anywhere|filemail"),
+    ("acesso_remoto",    r"anydesk|teamviewer|rustdesk|chrome remote desktop|remotedesktop\.google|parsec|splashtop|ammyy|supremo remote"),
+    ("anonimizacao",     r"tor browser|torproject|\.onion|protonvpn|proton vpn|nordvpn|expressvpn|surfshark|hola vpn|windscribe|psiphon|ultrasurf|croxyproxy|hide\.me|proxysite"),
+    ("pirataria",        r"torrent|qbittorrent|utorrent|thepiratebay|1337x|rarbg|\byts\b|nyaa\.si|keygen|warez|crackeado|crack download"),
+    ("apostas",          r"bet365|betano|blaze\.com|sportingbet|stake\.com|pixbet|esportes da sorte|superbet|estrelabet|\bkto\b|novibet|cassino|casino online|fortune tiger|tigrinho|aviator game|\bbetnacional|f12\.bet|\bbet\.br"),
+    ("paste",            r"pastebin|ghostbin|hastebin|privatebin|controlc\.com|justpaste"),
+    ("ferramentas_ofensivas", r"metasploit|mimikatz|hashcat|john the ripper|sqlmap|cobalt strike|burp suite|bloodhound|crackmapexec|netexec|\bnmap\b|wireshark|kali linux"),
+    ("email_pessoal",    r"hotmail|outlook\.live|yahoo mail|protonmail|proton mail|tutanota|bol mail|\bbol\.com"),
+    ("ia_externa",       r"chatgpt|chat\.openai|gemini\.google|deepseek|perplexity|copilot\.microsoft|poe\.com|\bgrok\b"),
+]
+_BH_SECURITY_RE = [(k, _re.compile(p, _re.I)) for k, p in _BH_SECURITY]
+
+
+_BH_BROWSER_RE = _re.compile(r"chrome|msedge|microsoftedge|firefox|brave|opera|vivaldi|safari|iexplore|arc\.exe|^arc$|whale|yandex", _re.I)
+# sufixo que o navegador põe no título ("... - Google Chrome", "... e mais 2 páginas - Perfil 1 — Microsoft Edge")
+_BH_BSUFFIX_RE = _re.compile(
+    r"(\s+(e mais|and)\s+\d+\s+(p[aá]ginas?|pages?|guias?|tabs?).*$)|"
+    r"(\s+[-—–]\s+(google chrome|microsoft\s*edge|mozilla firefox|firefox|brave|opera|vivaldi|safari)\s*$)", _re.I)
+_BH_SEARCH_RE = _re.compile(r"\s[-—–]\s(pesquisa google|google search|pesquisar|bing|duckduckgo|yahoo search|pesquisa)$", _re.I)
+_BH_COUNTER_RE = _re.compile(r"^\(\d+\+?\)\s*|\s*\(\d+\+?\)\s*$")
+_BH_WA_RE = _re.compile(r"whatsapp", _re.I)
+
+
+def _bh_is_browser(app: str) -> bool:
+    return bool(_BH_BROWSER_RE.search(app or ""))
+
+
+def _bh_page_title(title: str) -> str:
+    """Título da ABA do navegador, sem o sufixo do navegador/perfil e sem contador '(3)'."""
+    t = (title or "").strip()
+    for _ in range(2):
+        t = _BH_BSUFFIX_RE.sub("", t).strip()
+    return _BH_COUNTER_RE.sub("", t).strip()
+
+
+def _bh_target(app: str, title: str) -> str:
+    """Onde procurar SITE/APP de lazer, WhatsApp e risco:
+    - navegador -> o título da aba (é ali que está o site: 'WhatsApp', 'Instagram', 'YouTube'...);
+      página de busca ('whatsapp - Pesquisa Google') não conta como uso do site;
+    - app desktop -> só o nome do executável (WhatsApp.exe, Spotify.exe, AnyDesk.exe...),
+      para um canal do Slack ou assunto de e-mail com 'facebook' no nome não virar rede social.
+      Apps UWP (ApplicationFrameHost) usam o título, que é o nome do app."""
+    al = (app or "").lower()
+    if _bh_is_browser(al):
+        t = _bh_page_title(title)
+        return "" if _BH_SEARCH_RE.search(t) else t
+    if "applicationframehost" in al or al in ("", "unknown"):
+        return (title or "")[:60]
+    return _re.sub(r"\.(exe|app)$", "", al)
+
+
+def _bh_security(app: str, title: str, tenant_patterns: list) -> list:
+    s = _bh_target(app, title)
+    out = [k for k, rx in _BH_SECURITY_RE if s and rx.search(s)]
+    low = (_bh_page_title(title) if _bh_is_browser(app) else f"{app} {title}").lower()
+    for pat in tenant_patterns:
+        if pat and pat in low:
+            out.append("lista_tenant")
+            break
+    return out
+
+
+def _bh_classify(app: str, title: str) -> str:
+    tg = _bh_target(app, title)
+    if tg:
+        if _BH_WA_RE.search(tg):
+            return "whatsapp"
+        for k, rx in _BH_NONWORK_RE:
+            if rx.search(tg):
+                return k
+    s = f"{app} {title}"
+    for k, rx in _BH_WORK_RE:
+        if rx.search(s):
+            return k
+    return ""
+
+
+def _apikey_hash(key: str) -> str:
+    return _hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
+def _apikey_check(key: str, tenant: str, scope: str, ip: str | None) -> bool:
+    if not key or not key.startswith("wpk_"):
+        return False
+    with db() as c:
+        row = c.execute(
+            "SELECT id, tenant_id, scopes, expires_at, revoked FROM api_keys WHERE key_hash=%s",
+            (_apikey_hash(key),),
+        ).fetchone()
+        if not row or row["revoked"]:
+            return False
+        if row["expires_at"] and row["expires_at"] < dt.datetime.now(dt.timezone.utc).isoformat():
+            return False
+        if row["tenant_id"] and row["tenant_id"] != tenant:
+            return False
+        if scope not in [s.strip() for s in (row["scopes"] or "").split(",")]:
+            return False
+        now = time.monotonic()
+        if now - _APIKEY_TOUCH.get(row["id"], 0) > 300:
+            _APIKEY_TOUCH[row["id"]] = now
+            c.execute("UPDATE api_keys SET last_used_at=%s, last_ip=%s WHERE id=%s",
+                      (dt.datetime.now(dt.timezone.utc).isoformat(), ip, row["id"]))
+    return True
+
+
+def require_behavior_read(
+    request: Request,
+    tenant: str,
+    x_api_key: Annotated[str | None, Header()] = None,
+    x_admin_token: Annotated[str | None, Header()] = None,
+) -> None:
+    if x_api_key:
+        if _apikey_check(x_api_key, tenant, "behavior:read", _client_ip(request)):
+            return
+        raise HTTPException(status_code=403, detail="chave de API invalida, expirada ou sem escopo para este tenant")
+    # Sem chave: mesma regra do painel (sessão do tenant / wp_admin / token admin).
+    require_tenant_scope(request, tenant, x_admin_token)
+    # Líder não usa este endpoint (expõe o tenant inteiro).
+    sid = request.cookies.get("wp_sess")
+    if sid:
+        u = _load_session_user(sid) or {}
+        if u.get("role") not in ("admin_master", "admin", "wp_admin"):
+            raise HTTPException(status_code=403, detail="apenas Admin/Admin Master")
+
+
+def _bh_tz():
+    return ZoneInfo(REPORT_TZ) if ZoneInfo else dt.timezone(dt.timedelta(hours=-3))
+
+
+def _bh_compute_hour(tenant: str, h0: dt.datetime, rules: list[dict], tpats: list | None = None) -> dict:
+    """Uma HORA UTC do tenant -> estado compacto por colaborador (minutos esparsos,
+    runs relevantes, AFKs, somas). 2 queries pequenas (window / afk) usando o índice
+    (tenant_id, bucket, ts) com limite em TEXTO."""
+    s_txt = h0.strftime("%Y-%m-%dT%H")
+    u_txt = (h0 + dt.timedelta(hours=1)).strftime("%Y-%m-%dT%H")
+    with db() as c:
+        c.execute("SET statement_timeout = '25s'")
+        try:
+            win = c._conn.cursor()
+            win.execute(
+                """SELECT user_id, EXTRACT(EPOCH FROM ts::timestamptz), duration_sec,
+                          COALESCE(data_json->>'app',''), LEFT(COALESCE(data_json->>'title',''),200)
+                   FROM events
+                   WHERE tenant_id=%s AND bucket='window' AND ts>=%s AND ts<%s AND duration_sec>0
+                   ORDER BY user_id, ts""", (tenant, s_txt, u_txt))
+            wrows = win.fetchall(); win.close()
+            afk = c._conn.cursor()
+            afk.execute(
+                f"""SELECT user_id, EXTRACT(EPOCH FROM ts::timestamptz), duration_sec
+                    FROM events
+                    WHERE tenant_id=%s AND bucket='afk' AND ts>=%s AND ts<%s
+                      AND duration_sec>0 AND duration_sec <= {AFK_MAX_SEC}
+                      AND data_json->>'status'='afk'""", (tenant, s_txt, u_txt))
+            arows = afk.fetchall(); afk.close()
+        finally:
+            c.execute("SET statement_timeout = 0")
+    users: dict[str, dict] = {}
+
+    def U(uid):
+        if uid not in users:
+            users[uid] = {"m": {}, "cls": {}, "cat": {}, "apps": {}, "runs": [], "afk": [], "sw": 0, "sec": {}, "tt": {}}
+        return users[uid]
+
+    def spread(st, e, dur, idx):
+        m = st["m"]; s = e; en = e + dur; k = int(s // 60)
+        while s < en:
+            seg = min(en, (k + 1) * 60) - s
+            v = m.get(k)
+            if v is None:
+                v = m[k] = [0.0, 0.0, 0.0, 0.0]   # act, afk, work, nonwork
+            v[idx] += seg
+            if idx >= 2:
+                v[0] += seg
+            s += seg; k += 1
+
+    for uid, e, dur in arows:
+        st = U(uid); e = float(e); dur = float(dur)
+        spread(st, e, dur, 1)
+        st["afk"].append([round(e), round(dur)])
+    cache: dict[tuple, tuple] = {}
+    last_uid = None; last_key = None; last_app = None
+    for uid, e, dur, app, title in wrows:
+        st = U(uid); e = float(e); dur = float(dur)
+        if uid != last_uid:
+            last_uid, last_key, last_app = uid, None, None
+        k = (app, title)
+        if k not in cache:
+            cl = _bh_classify(app, title)
+            ca = _apply_rules(_clean_title(title), app, rules)
+            cache[k] = (cl, ca, cl in _BH_NONWORK_CLASSES or (ca == "unproductive" and cl != "whatsapp"),
+                        _bh_security(app, title, tpats or []))
+        cl, ca, nonw, secs = cache[k]
+        for sc in secs:
+            ent = st["sec"].setdefault(sc, [0.0, []])
+            ent[0] += dur
+            ex = (title or app)[:90]
+            if ex and ex not in ent[1] and len(ent[1]) < 3:
+                ent[1].append(ex)
+        spread(st, e, dur, 3 if nonw else 2)
+        if cl:
+            st["cls"][cl] = st["cls"].get(cl, 0.0) + dur
+            if cl in _BH_TT_CLASSES:
+                tk = (_bh_page_title(title) if _bh_is_browser(app) else (app or "") + " · " + (title or ""))[:80]
+                tt = st["tt"].setdefault(cl, {})
+                tt[tk] = tt.get(tk, 0.0) + dur
+        st["cat"][ca] = st["cat"].get(ca, 0.0) + dur
+        al = app.lower()
+        st["apps"][al] = st["apps"].get(al, 0.0) + dur
+        key = al + "\x1f" + title.lower()
+        if last_app is not None and last_app != al:
+            st["sw"] += 1
+        if key == last_key and st["runs"]:
+            r = st["runs"][-1]; r[2] += dur; r[5] = round(e + dur)
+        else:
+            st["runs"].append([round(e), app, dur, title[:120], cl, round(e + dur), key])
+        last_key, last_app = key, al
+    # compacta: só runs >= 120s + 1º e último (p/ costurar entre horas)
+    for st in users.values():
+        rs = st["runs"]
+        keep = [r for i, r in enumerate(rs) if r[2] >= 120 or i == 0 or i == len(rs) - 1]
+        st["runs"] = [[r[0], r[1], round(r[2]), r[3], r[4], r[5], r[6]] for r in keep]
+        st["first_app"] = rs[0][1].lower() if rs else None
+        st["last_app"] = rs[-1][1].lower() if rs else None
+        st["m"] = {str(k): [round(x) for x in v] for k, v in st["m"].items()}
+        st["cls"] = {a: round(b) for a, b in st["cls"].items()}
+        st["cat"] = {a: round(b) for a, b in st["cat"].items()}
+        st["apps"] = {a: round(b) for a, b in st["apps"].items()}
+        st["sec"] = {a: [round(b[0]), b[1]] for a, b in st["sec"].items()}
+        st["tt"] = {c: {t: round(v) for t, v in sorted(d.items(), key=lambda x: -x[1])[:8] if v >= 5}
+                    for c, d in st["tt"].items()}
+    return {"users": users, "v": _BH_HOUR_VER}
+
+
+def _bh_compose_day(day: str, hours: list[dict]) -> dict:
+    """Junta as horas (UTC, em ordem) num dia LOCAL -> mesmo formato do v1."""
+    tz = _bh_tz()
+    d0 = dt.datetime.fromisoformat(day).replace(tzinfo=tz)
+    m0 = int(d0.timestamp() // 60); day0 = d0.timestamp()
+    acc: dict[str, dict] = {}
+    for hp in hours:
+        for uid, st in (hp or {}).get("users", {}).items():
+            a = acc.setdefault(uid, {"act": [0.0]*1440, "afk": [0.0]*1440, "wk": [0.0]*1440, "nw": [0.0]*1440,
+                                     "cls": {}, "cat": {}, "apps": {}, "runs": [], "afkruns": [], "sw": 0,
+                                     "last_app": None, "sec": {}, "tt": {}})
+            for k, v in st["m"].items():
+                i = int(k) - m0
+                if 0 <= i < 1440:
+                    a["act"][i] += v[0]; a["afk"][i] += v[1]; a["wk"][i] += v[2]; a["nw"][i] += v[3]
+            in_day = any(0 <= int(k) - m0 < 1440 for k in st["m"])
+            if not in_day:
+                continue
+            for dct in ("cls", "cat", "apps"):
+                for k, v in st[dct].items():
+                    a[dct][k] = a[dct].get(k, 0) + v
+            a["sw"] += st["sw"]
+            for c, d in (st.get("tt") or {}).items():
+                tt = a["tt"].setdefault(c, {})
+                for t, v in d.items():
+                    tt[t] = tt.get(t, 0) + v
+            for k, (sv, exs) in (st.get("sec") or {}).items():
+                ent = a["sec"].setdefault(k, [0.0, []])
+                ent[0] += sv
+                for ex in exs:
+                    if ex not in ent[1] and len(ent[1]) < 5:
+                        ent[1].append(ex)
+            if a["last_app"] and st.get("first_app") and a["last_app"] != st["first_app"]:
+                a["sw"] += 1
+            if st.get("last_app"):
+                a["last_app"] = st["last_app"]
+            a["afkruns"].extend(st["afk"])
+            for r in st["runs"]:
+                prev = a["runs"][-1] if a["runs"] else None
+                if (prev and prev[6] == r[6] and r[0] - prev[5] <= 120
+                        and not any(prev[5] <= x[0] <= r[0] for x in a["afkruns"])):
+                    prev[2] += r[2]; prev[5] = r[5]
+                else:
+                    a["runs"].append(list(r))
+    out = {}
+    for uid, a in acc.items():
+        o = _bh_finish2(a, day0)
+        if o.get("act", 0) > 0 or o.get("afk", 0) > 0:
+            out[uid] = o
+    return out
+
+
+def _bh_finish2(s: dict, day0: float) -> dict:
+    act, afk, wk, nw = s["act"], s["afk"], s["wk"], s["nw"]
+    A = sum(act)
+    o: dict = {"act": round(A / 60), "afk": round(sum(afk) / 60)}
+    if A < 60:
+        return o
+    mins = [i for i in range(1440) if act[i] > 0]
+    f, l = mins[0], mins[-1] + 1
+    # início do EXPEDIENTE: 1ª janela de 15 min com >= 5 min ativos a partir das 05:00
+    # (atividade de madrugada fica separada; não "puxa" o início do dia)
+    s5 = None
+    for st in range(max(f, 300), max(max(f, 300) + 1, l - 14)):
+        if sum(act[st:st + 15]) >= 300:
+            s5 = st
+            break
+    if s5 is None:
+        s5 = f
+    eff = None
+    for st in range(s5, max(s5 + 1, l - 14)):
+        a = sum(act[st:st + 15]); w = sum(wk[st:st + 15])
+        if a >= 600 and w >= 0.7 * a:
+            eff = st
+            break
+    # maior PAUSA = maior sequência de minutos sem atividade dentro do expediente
+    # (o AFK vem em fatias de ~10s; medir pela ausência de atividade é o que vale)
+    gap = cur = 0
+    for i in range(s5, l):
+        if act[i] < 5:
+            cur += 1; gap = max(gap, cur)
+        else:
+            cur = 0
+    brk = gap * 60
+    runs = [r for r in s["runs"] if 0 <= r[0] - day0 < 86400]
+    top = sorted(runs, key=lambda r: -r[2])[:3]
+    o.update({
+        "f": f, "s": s5, "l": l, "eff": eff,
+        "ai": round(sum(afk[f:l]) / 60), "nw": round(sum(nw) / 60),
+        "h":  [round(sum(act[h*60:(h+1)*60]) / 60) for h in range(24)],
+        "hn": [round(sum(nw[h*60:(h+1)*60]) / 60) for h in range(24)],
+        "ha": [round(sum(afk[h*60:(h+1)*60]) / 60) for h in range(24)],
+        "sw": round(s["sw"] / max(A / 3600, 0.5), 1),
+        "brk": round(brk / 60),
+        "runs": [{"at": round((r[0] - day0) / 60), "app": r[1], "min": round(r[2] / 60), "t": r[3], "c": r[4]}
+                 for r in top],
+        "cls": {k: round(v / 60) for k, v in s["cls"].items()},
+        "cat": {k: round(v / 60) for k, v in s["cat"].items()},
+        "apps": [[k, round(v / 60)] for k, v in sorted(s["apps"].items(), key=lambda x: -x[1])[:8]],
+        "sec": {k: {"min": round(v[0] / 60, 1), "ex": v[1]} for k, v in (s.get("sec") or {}).items()},
+        "tt": {c: [[t, round(v / 60, 1)] for t, v in sorted(d.items(), key=lambda x: -x[1])[:6]]
+               for c, d in (s.get("tt") or {}).items()},
+    })
+    return o
+
+
+@app.get("/v1/behavior/day", dependencies=[Depends(require_behavior_read)])
+def behavior_day(tenant: str, day: str, refresh: bool = False, budget_sec: int = Query(40, ge=5, le=50)):
+    """Métricas de comportamento de TODOS os colaboradores num dia LOCAL (YYYY-MM-DD).
+    Calcula POR HORA UTC (consultas pequenas) e guarda cada hora em behavior_hour_cache;
+    hora fechada há > 30 min = definitiva; hora recente = recalcula se cache > TTL.
+    Se faltar hora e o orçamento (budget_sec) acabar, devolve {pending:true,...}:
+    chame de novo que continua de onde parou."""
+    if not _re.fullmatch(r"\d{4}-\d{2}-\d{2}", day or ""):
+        raise HTTPException(status_code=400, detail="day = YYYY-MM-DD")
+    tz = _bh_tz()
+    now = dt.datetime.now(dt.timezone.utc)
+    today = now.astimezone(tz).date().isoformat()
+    if day > today:
+        raise HTTPException(status_code=400, detail="dia no futuro")
+    if not refresh and day < today:
+        with db() as c:
+            row = c.execute("SELECT payload, computed_at FROM behavior_day_cache WHERE tenant_id=%s AND day=%s",
+                            (tenant, day)).fetchone()
+        if row:
+            p = row["payload"] if isinstance(row["payload"], dict) else json.loads(row["payload"])
+            if p.get("v") == _BH_DAY_VER:
+                return {**p, "cached": True, "computed_at": row["computed_at"]}
+    d0 = dt.datetime.fromisoformat(day).replace(tzinfo=tz).astimezone(dt.timezone.utc)
+    start = (d0 - dt.timedelta(hours=3)).replace(minute=0, second=0, microsecond=0)   # AFK longo que entra no dia
+    end = min(d0 + dt.timedelta(days=1), now)
+    hrs = []
+    h = start
+    while h < end:
+        hrs.append(h); h += dt.timedelta(hours=1)
+    keys = [x.strftime("%Y-%m-%dT%H") for x in hrs]
+    with db() as c:
+        rows = c.execute("SELECT hour, payload, computed_at FROM behavior_hour_cache WHERE tenant_id=%s AND hour = ANY(%s)",
+                         (tenant, keys)).fetchall()
+        rules = [dict(r) for r in c.execute(
+            "SELECT * FROM productivity_rules WHERE tenant_id=%s ORDER BY created_at", (tenant,)).fetchall()]
+        tpats = [str(r["pattern"]).strip().lower() for r in c.execute(
+            "SELECT pattern FROM risky_sites WHERE tenant_id=%s", (tenant,)).fetchall() if r["pattern"]]
+    have = {r["hour"]: r for r in rows}
+    t0 = time.monotonic(); computed = 0; ms_total = 0
+    payloads: dict[str, dict] = {}
+    for hdt, k in zip(hrs, keys):
+        r = have.get(k)
+        final = hdt + dt.timedelta(hours=1) < now - dt.timedelta(minutes=30)
+        fresh = False
+        rp = (r["payload"] if r and isinstance(r["payload"], dict) else (json.loads(r["payload"]) if r else None))
+        if r and not refresh and (rp or {}).get("v") == _BH_HOUR_VER:
+            if final:
+                fresh = True
+            else:
+                fresh = (now - dt.datetime.fromisoformat(r["computed_at"])).total_seconds() < BEHAVIOR_TODAY_TTL
+        if fresh:
+            payloads[k] = rp
+            continue
+        if time.monotonic() - t0 > budget_sec:
+            continue
+        with _BEHAVIOR_SEM:
+            t1 = time.monotonic()
+            p = _bh_compute_hour(tenant, hdt, rules, tpats)
+            ms = int((time.monotonic() - t1) * 1000); ms_total += ms
+        with db() as c:
+            c.execute("""INSERT INTO behavior_hour_cache (tenant_id, hour, payload, computed_at, compute_ms)
+                         VALUES (%s,%s,%s,%s,%s)
+                         ON CONFLICT (tenant_id, hour) DO UPDATE SET payload=EXCLUDED.payload,
+                             computed_at=EXCLUDED.computed_at, compute_ms=EXCLUDED.compute_ms""",
+                      (tenant, k, psycopg2.extras.Json(p), dt.datetime.now(dt.timezone.utc).isoformat(), ms))
+        payloads[k] = p; computed += 1
+    missing = [k for k in keys if k not in payloads]
+    if missing:
+        return {"tenant": tenant, "day": day, "pending": True, "hours_total": len(keys),
+                "hours_done": len(keys) - len(missing), "computed_now": computed, "compute_ms": ms_total}
+    users = _bh_compose_day(day, [payloads[k] for k in keys])
+    payload = {"tenant": tenant, "day": day, "partial": day == today, "v": _BH_DAY_VER, "users": users}
+    if day < today:
+        with db() as c:
+            c.execute(
+                """INSERT INTO behavior_day_cache (tenant_id, day, payload, computed_at, compute_ms)
+                   VALUES (%s,%s,%s,%s,%s)
+                   ON CONFLICT (tenant_id, day) DO UPDATE SET payload=EXCLUDED.payload,
+                       computed_at=EXCLUDED.computed_at, compute_ms=EXCLUDED.compute_ms""",
+                (tenant, day, psycopg2.extras.Json(payload), now.isoformat(), ms_total))
+    return {**payload, "pending": False, "cached": False, "computed_at": now.isoformat(),
+            "computed_now": computed, "compute_ms": ms_total}
+
+
+@app.get("/v1/behavior/people", dependencies=[Depends(require_behavior_read)])
+def behavior_people(tenant: str):
+    """Roster p/ a análise: id, nome, depto, cargo, time, gestor, férias, último sinal."""
+    with db() as c:
+        rows = c.execute(
+            """SELECT user_id, display_name, department, cargo, team, manager,
+                      on_vacation, first_seen, last_seen
+               FROM users WHERE tenant_id=%s ORDER BY display_name""",
+            (tenant,),
+        ).fetchall()
+    return {"tenant": tenant, "people": [dict(r) for r in rows]}
+
+
+class ApiKeyIn(BaseModel):
+    tenant_id: str | None = None          # None = vale para todos os tenants
+    name: str
+    scopes: list[str] = Field(default_factory=lambda: ["behavior:read"])
+    days_valid: int = 90
+
+
+_APIKEY_SCOPES = {"behavior:read"}
+
+
+@app.post("/v1/admin/api-keys", dependencies=[Depends(require_admin)])
+def create_api_key(body: ApiKeyIn, request: Request):
+    bad = [s for s in body.scopes if s not in _APIKEY_SCOPES]
+    if bad or not body.scopes:
+        raise HTTPException(status_code=400, detail=f"escopos validos: {sorted(_APIKEY_SCOPES)}")
+    if not (1 <= body.days_valid <= 365):
+        raise HTTPException(status_code=400, detail="days_valid entre 1 e 365")
+    key = "wpk_" + secrets.token_urlsafe(32)
+    now = dt.datetime.now(dt.timezone.utc)
+    exp = (now + dt.timedelta(days=body.days_valid)).isoformat()
+    with db() as c:
+        row = c.execute(
+            """INSERT INTO api_keys (tenant_id, name, key_prefix, key_hash, scopes, created_at, created_by, expires_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+            (body.tenant_id, _strip_nul(body.name)[:100], key[:10], _apikey_hash(key),
+             ",".join(body.scopes), now.isoformat(), "admin_token", exp),
+        ).fetchone()
+    audit("admin", "apikey.create", target=str(row["id"]),
+          detail=f"tenant={body.tenant_id} scopes={body.scopes} exp={exp}", ip=_client_ip(request))
+    return {"id": row["id"], "key": key, "prefix": key[:10], "tenant_id": body.tenant_id,
+            "scopes": body.scopes, "expires_at": exp,
+            "aviso": "guarde a chave agora: ela nao sera mostrada de novo"}
+
+
+@app.get("/v1/admin/api-keys", dependencies=[Depends(require_admin)])
+def list_api_keys():
+    with db() as c:
+        rows = c.execute(
+            """SELECT id, tenant_id, name, key_prefix, scopes, created_at, expires_at,
+                      last_used_at, last_ip, revoked FROM api_keys ORDER BY id DESC"""
+        ).fetchall()
+    return {"keys": [dict(r) for r in rows]}
+
+
+@app.delete("/v1/admin/api-keys/{key_id}", dependencies=[Depends(require_admin)])
+def revoke_api_key(key_id: int, request: Request):
+    with db() as c:
+        c.execute("UPDATE api_keys SET revoked=TRUE WHERE id=%s", (key_id,))
+    audit("admin", "apikey.revoke", target=str(key_id), ip=_client_ip(request))
+    return {"ok": True, "id": key_id}
+
 
 
 # ---------------------------------------------------------------------------

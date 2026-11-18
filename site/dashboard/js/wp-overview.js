@@ -139,7 +139,7 @@ function _renderDeptsOvPage() {
 function drawUsersChart() {
   const afkOf = u => (u.afk_in != null ? u.afk_in : u.afk) || 0;
   const mode  = (document.getElementById('usersChartSort') || {}).value || 'active';
-  const sorted = (state.teamUsers || []).slice().sort(
+  const sorted = (state.teamUsers || []).filter(u => !u.in_stock).sort(   // estoque fora
     mode === 'afk'
       ? (a, b) => afkOf(b) - afkOf(a)
       : (a, b) => (b.active || 0) - (a.active || 0)

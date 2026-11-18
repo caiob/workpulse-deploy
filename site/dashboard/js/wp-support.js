@@ -29,6 +29,59 @@ function _supStatus(lastSeen) {
     <span style="width:8px;height:8px;border-radius:50%;background:${c};display:inline-block"></span>${online ? 'Online' : 'Offline'}</span>`;
 }
 
+// Estoque: máquina sem usuário. Se voltou a coletar (online), avisa — a flag NÃO sai
+// sozinha (decisão 2026-11-18); quem decide é o Suporte/Admin Master.
+function _supStockStatus(lastSeen) {
+  const online = (typeof _isOnline === 'function') && _isOnline(lastSeen);
+  return online
+    ? '<span title="Marcada como estoque, mas está enviando coletas agora. Se foi entregue a alguém, remova do estoque." style="display:inline-flex;align-items:center;gap:5px;color:#b45309;font-weight:600"><span style="width:8px;height:8px;border-radius:50%;background:#f59e0b;display:inline-block"></span>📦 Estoque · coletando</span>'
+    : '<span style="display:inline-flex;align-items:center;gap:5px;color:#92400e"><span style="width:8px;height:8px;border-radius:50%;background:#fbbf24;display:inline-block"></span>📦 Estoque</span>';
+}
+
+async function _supSetStock(uid, val) {
+  const u = _supUsers.find(x => x.user_id === uid);
+  const nome = (u && (u.display_name || u.user_id)) || uid;
+  const msg = val
+    ? `Marcar "${nome}" como máquina de ESTOQUE?\n\nEla sai da Visão Geral, do Tempo Ativo e dos alertas (e deixa de constar como férias, se estiver).`
+    : `Remover "${nome}" do estoque? Ela volta a contar normalmente.`;
+  if (!confirm(msg)) return;
+  try {
+    await apiFetch('PATCH',
+      '/v1/users/' + encodeURIComponent(uid) + '?tenant=' + encodeURIComponent(state.tenant),
+      { in_stock: !!val });
+    if (u) { u.in_stock = !!val; if (val) u.on_vacation = false; }
+    markVacation(_supUsers);
+    toast(val ? 'Marcada como estoque.' : 'Removida do estoque.');
+    _supRender();
+    _supSelect(uid);
+  } catch (e) { toast('Erro: ' + e.message); }
+}
+
+// Excluir o colaborador e liberar a máquina p/ estoque (Suporte + Admin Master).
+// O agente segue ativo; apaga coletas e dados da pessoa; máquina fica "📦 Estoque".
+async function _supReleaseToStock(uid) {
+  const u = _supUsers.find(x => x.user_id === uid);
+  const nome = (u && (u.display_name || u.user_id)) || uid;
+  const maq  = (typeof cleanUserId === 'function') ? cleanUserId(uid) : uid;
+  const typed = prompt(
+    `Excluir o colaborador "${nome}" e liberar a máquina ${maq} para ESTOQUE?\n\n` +
+    `• Apaga TODAS as coletas e os dados da pessoa (nome, e-mail, departamento).\n` +
+    `• A máquina continua cadastrada, com o agente ATIVO (não é bloqueada).\n` +
+    `• Para entregar a outra pessoa: Colaboradores → Editar → preencher os dados e Situação "Em uso".\n\n` +
+    `Digite LIBERAR para confirmar:`);
+  if ((typed || '').trim().toUpperCase() !== 'LIBERAR') {
+    if (typed !== null) toast('Confirmação não confere — nada foi alterado.');
+    return;
+  }
+  try {
+    await apiFetch('POST',
+      '/v1/users/' + encodeURIComponent(uid) + '/release-to-stock?tenant=' + encodeURIComponent(state.tenant));
+    toast('Colaborador excluído — máquina liberada para estoque.');
+    await loadSupport();
+    _supSelect(uid);
+  } catch (e) { toast('Falha ao liberar: ' + e.message); }
+}
+
 function _supRender() {
   const tbody = document.querySelector('#supTable tbody');
   if (!tbody) return;
@@ -72,7 +125,9 @@ function _supRender() {
     const name = u.display_name || u.user_id || '—';
     const safe = (u.user_id || '').replace(/'/g, "\\'");
     const sel  = (u.user_id === _supSelected) ? ' style="background:var(--bg-2)"' : '';
-    const stat = u.on_vacation
+    const stat = u.in_stock
+      ? _supStockStatus(u.last_seen)
+      : u.on_vacation
       ? '<span style="display:inline-flex;align-items:center;gap:5px;color:#0e7490"><span style="width:8px;height:8px;border-radius:50%;background:#22d3ee;display:inline-block"></span>🏖 Férias</span>'
       : _supStatus(u.last_seen);
     return `<tr${sel}>
@@ -112,10 +167,22 @@ function _supRenderDetail(d) {
       <span style="text-align:right;font-size:13px">${val}</span></div>`;
   const head = (t) => `<div style="margin:16px 0 2px;font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em">${t}</div>`;
 
+  const _su = _supUsers.find(x => x.user_id === d.user_id) || {};
+  const _inStock = !!_su.in_stock;
+  const _safeUid = String(d.user_id || '').replace(/'/g, "\\'");
+  const _stockBtn = (typeof canMarkStock === 'function' && canMarkStock() && d.user_id)
+    ? `<span style="margin-left:auto;display:inline-flex;gap:6px;flex-wrap:wrap">
+         <button class="ghost" onclick="_supSetStock('${_safeUid}', ${!_inStock})">${_inStock ? '↩ Remover do estoque' : '📦 Marcar como estoque'}</button>
+         ${(_su.display_name || _su.department || !_inStock)
+           ? `<button class="btn-danger-outline" title="Apaga coletas e dados da pessoa; a máquina fica em estoque com o agente ativo" onclick="_supReleaseToStock('${_safeUid}')">🗑 Excluir e liberar p/ estoque</button>`
+           : ''}
+       </span>`
+    : '';
   box.innerHTML = `
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap">
       <h3 style="margin:0">${escHtml(d.display_name || d.user_id)}</h3>
-      ${_supStatus(d.last_seen)}
+      ${_inStock ? _supStockStatus(d.last_seen) : _supStatus(d.last_seen)}
+      ${_stockBtn}
     </div>
     ${row('Colaborador', escHtml(d.display_name || d.user_id || '—'))}
     ${row('Departamento', escHtml(d.department || '—'))}

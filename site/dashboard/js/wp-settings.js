@@ -629,8 +629,17 @@ function editUser(uid) {
   document.getElementById('collabEmail').value   = user.email || '';
   document.getElementById('collabDept').value    = user.department || '';
   document.getElementById('collabRole').value    = user.role || '';
-  const _vac = document.getElementById('collabVacation');
-  if (_vac) _vac.checked = !!user.on_vacation;
+  // Situação: Em uso / Férias / Estoque (exclusivas). Estoque só p/ Suporte e Admin Master.
+  const _sit = document.getElementById('collabSituacao');
+  if (_sit) {
+    _sit.value = user.in_stock ? 'estoque' : (user.on_vacation ? 'ferias' : 'em_uso');
+    const _optStock = _sit.querySelector('option[value="estoque"]');
+    const canStock = (typeof canMarkStock === 'function') && canMarkStock();
+    if (_optStock) _optStock.disabled = !canStock;
+    // Sem permissão e a máquina já está em estoque → não deixa tirar.
+    _sit.disabled = !canStock && !!user.in_stock;
+    _sit.title = _sit.disabled ? 'Somente Suporte ou Admin Master podem alterar o Estoque.' : '';
+  }
   _updateDeptDatalist();
 
   const form = document.getElementById('collabForm');
@@ -650,10 +659,13 @@ async function saveUser() {
     role:         document.getElementById('collabRole').value.trim()  || null,
   };
   Object.keys(body).forEach(k => { if (!body[k]) delete body[k]; });
-  // on_vacation é booleano: adicionado APÓS o filtro (senão 'false' seria descartado
-  // e nunca daria pra DESLIGAR as férias). Sempre enviado.
-  const _vac = document.getElementById('collabVacation');
-  if (_vac) body.on_vacation = _vac.checked;
+  // on_vacation / in_stock são booleanos: adicionados APÓS o filtro (senão 'false' seria
+  // descartado e nunca daria pra DESLIGAR). Sempre enviados (exceto select travado).
+  const _sit = document.getElementById('collabSituacao');
+  if (_sit && !_sit.disabled) {
+    body.on_vacation = _sit.value === 'ferias';
+    body.in_stock    = _sit.value === 'estoque';
+  }
   if (!Object.keys(body).length) { toast('Nada para salvar.'); return; }
   try {
     // apiFetch envia o cookie de sessão (credentials:'include') — necessário no

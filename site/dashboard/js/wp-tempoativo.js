@@ -17,7 +17,9 @@ async function loadTempoAtivo() {
     const { since, until } = wpDP.getRange('taDays');
     const qs = `tenant=${encodeURIComponent(state.tenant)}&since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`;
     const data = await api(`/v1/team/summary?${qs}`);
-    _taUsers = data.users || [];
+    // Máquinas de ESTOQUE não entram no Tempo Ativo (férias continuam: o período
+    // pode incluir dias em que a pessoa trabalhou).
+    _taUsers = (data.users || []).filter(u => !u.in_stock);
     markVacation(_taUsers);          // atualiza state.vacation p/ o rótulo 🏖 Férias
     _taBuildDeptMenu();
     taApply();

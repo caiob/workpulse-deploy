@@ -194,7 +194,33 @@ async function duDelete(id, email) {
 }
 
 // ── Licença ──────────────────────────────────────────────────────────
+// Retenção de dados (card em Administrativo → Configurações) — 2026-11-18
+async function loadRetention() {
+  const box = document.getElementById('retBox');
+  if (!box) return;
+  try {
+    const d = await api('/v1/tenant-retention?tenant=' + encodeURIComponent(state.tenant));
+    const fmt = v => v ? new Date(v).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' }) : '—';
+    const fmtDay = v => v ? new Date(v + 'T12:00:00').toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' }) : '—';
+    let span = '';
+    if (d.oldest_event) {
+      const dias = Math.max(0, Math.round((Date.now() - new Date(d.oldest_event).getTime()) / 86400000));
+      span = `${dias} dia${dias === 1 ? '' : 's'} de histórico`;
+    }
+    const item = (label, val, sub) => `<div><div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em">${label}</div>
+      <div style="font-size:20px;font-weight:600;margin-top:2px">${val}</div>
+      ${sub ? `<div style="font-size:12px;color:var(--text-dim);margin-top:2px">${sub}</div>` : ''}</div>`;
+    box.innerHTML =
+      item('Retenção configurada', `${d.retention_days} dias`, d.is_default ? 'padrão do sistema' : 'definida para sua empresa') +
+      item('Dados detalhados desde', fmt(d.oldest_event), span) +
+      item('Resumo diário desde', fmtDay(d.oldest_summary_day), d.oldest_summary_day ? 'só tempo ativo/AFK por pessoa' : 'nenhum dado arquivado ainda');
+  } catch (e) {
+    box.innerHTML = '<span style="color:var(--text-muted)">Não foi possível carregar: ' + escHtml(e.message) + '</span>';
+  }
+}
+
 async function loadLicense() {
+  loadRetention();
   const sum      = document.getElementById('licSummary');
   const seatsBox = document.getElementById('licSeats');
   if (!sum) return;

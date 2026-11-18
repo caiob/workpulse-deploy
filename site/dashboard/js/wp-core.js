@@ -19,6 +19,7 @@ const state = {
   lastOverview: null,
   collabs:      [],
   vacation:     new Set(),   // user_ids em férias (rótulo) — preenchido por markVacation()
+  stock:        new Set(),   // user_ids de máquinas em ESTOQUE (rótulo 📦) — idem
   lunchMin:     60,          // minutos de almoço descontados do AFK por dia (config Alertas)
 };
 
@@ -146,11 +147,18 @@ function markVacation(users) {
     if (!u || !u.user_id) continue;
     if (u.on_vacation) { state.vacation.add(u.user_id); state.vacation.add(cleanUserId(u.user_id)); }
     else { state.vacation.delete(u.user_id); state.vacation.delete(cleanUserId(u.user_id)); }
+    if (u.in_stock) { state.stock.add(u.user_id); state.stock.add(cleanUserId(u.user_id)); }
+    else { state.stock.delete(u.user_id); state.stock.delete(cleanUserId(u.user_id)); }
   }
 }
 function isVacation(uid) { return !!uid && state.vacation.has(uid); }
-// Badge HTML (para listas/tabelas). Vazio quando não está de férias.
+function isStock(uid)    { return !!uid && state.stock.has(uid); }
+// Quem pode marcar/desmarcar Estoque (backend valida de novo no PATCH).
+function canMarkStock()  { return ['admin_master', 'suporte', 'wp_admin'].includes(state.role); }
+// Badge HTML (para listas/tabelas). Vazio quando não está de férias nem em estoque.
 function vacBadge(uid) {
+  if (isStock(uid))
+    return ' <span title="Máquina de estoque (sem usuário) — fora da Visão Geral, Tempo Ativo e alertas" style="display:inline-block;font-size:10px;font-weight:600;color:#92400e;background:#fef3c7;border:1px solid #fde68a;border-radius:6px;padding:1px 6px;vertical-align:middle">📦 Estoque</span>';
   return isVacation(uid)
     ? ' <span title="Em férias" style="display:inline-block;font-size:10px;font-weight:600;color:#0e7490;background:#cffafe;border:1px solid #a5f3fc;border-radius:6px;padding:1px 6px;vertical-align:middle">🏖 Férias</span>'
     : '';
@@ -172,7 +180,7 @@ async function _populateUserDropdown(selectId) {
   sorted.forEach(u => {
     const opt = document.createElement('option');
     opt.value       = cleanUserId(u.user_id);
-    opt.textContent = displayName(u) + (u.on_vacation ? ' 🏖 (Férias)' : '');
+    opt.textContent = displayName(u) + (u.in_stock ? ' 📦 (Estoque)' : (u.on_vacation ? ' 🏖 (Férias)' : ''));
     sel.appendChild(opt);
   });
 }
