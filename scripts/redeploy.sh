@@ -29,7 +29,7 @@ DEPLOY_BUCKET="workpulse-deploy-${ACCOUNT_ID}"
 echo
 echo ">> Enviando o código e reconstruindo a imagem..."
 rm -f /tmp/server-src.zip
-( cd "$SERVER_DIR" && zip -j -q /tmp/server-src.zip main.py migration.py requirements.txt Dockerfile )
+( cd "$SERVER_DIR" && zip -j -q /tmp/server-src.zip main.py behavior_analysis.py migration.py requirements.txt Dockerfile )
 aws s3 cp /tmp/server-src.zip "s3://${DEPLOY_BUCKET}/server-src.zip"
 
 BUILD_ID="$(aws codebuild start-build --project-name "$CODEBUILD_PROJECT" \

@@ -10,7 +10,7 @@
 //   status • tenant • [⚙ ▾ → Configurações / Sair]
 // =====================================================================
 
-const TABS = ['overview', 'people', 'departments', 'tempoativo', 'organograma', 'alerts', 'trends', 'events', 'internet', 'consolidado', 'jornada', 'localizacao', 'financeiro', 'admusuarios', 'admlicenca', 'admalertas', 'categorizacao', 'colaboradores', 'relatorios', 'suportetec', 'config'];
+const TABS = ['overview', 'people', 'departments', 'tempoativo', 'behavior', 'organograma', 'alerts', 'trends', 'events', 'internet', 'consolidado', 'jornada', 'localizacao', 'financeiro', 'admusuarios', 'admlicenca', 'admalertas', 'categorizacao', 'colaboradores', 'relatorios', 'suportetec', 'config'];
 
 // Mapeamento tab → grupo de dropdown (null = standalone)
 const TAB_GROUP = {
@@ -30,6 +30,7 @@ const TAB_GROUP = {
   relatorios:  'administrativo',
   suportetec:  'administrativo',
   tempoativo:  'analises',
+  behavior:    'analises',
   organograma: 'analises',
   alerts:      'analises',
   trends:      'analises',
@@ -73,6 +74,7 @@ function switchTab(name) {
     people:      loadPeople,
     departments: loadDepartments,
     tempoativo:  () => { if (typeof loadTempoAtivo === 'function') loadTempoAtivo(); },
+    behavior:    () => { if (typeof loadBehavior === 'function') loadBehavior(); },
     organograma: () => { if (typeof loadOrgChart === 'function') loadOrgChart(); },
     alerts:      loadAlerts,
     trends:      loadTrends,

@@ -48,6 +48,7 @@ COPY --from=deps --chown=workpulse:workpulse /root/.local /home/workpulse/.local
 WORKDIR /app
 COPY --chown=workpulse:workpulse main.py .
 COPY --chown=workpulse:workpulse migration.py .
+COPY --chown=workpulse:workpulse behavior_analysis.py .
 COPY --chown=workpulse:workpulse requirements.txt .
 
 USER workpulse

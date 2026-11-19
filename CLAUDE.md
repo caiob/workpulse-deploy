@@ -46,6 +46,36 @@ ECS tem **deployment circuit breaker**: deploy que sobe quebrado faz **rollback*
 - **Cache-busting do dashboard**: cada `js/wp-*.js` tem `?v=N` em `workforce.html` (fonte da verdade das versões). Bump ao alterar um JS.
 
 **Índice de features/incidentes** (detalhe no changelog ao final; mais recente primeiro):
+- 2026-11-18 — **Behavior em produção: aba "🧭 Comportamento" + PACOTE PRONTO (rapidez).**
+  Princípio: a aba NÃO consulta o banco por clique. Um job monta o pacote e o navegador baixa 1x
+  (~140 KB gzip / 15 dias, ~1,2 MB aberto) e faz filtro/gráfico/ficha tudo local (render ~0,2 s,
+  filtro ~15 ms). **Não trocar isso por consultas por interação.**
+  - `server/behavior_analysis.py` (NOVO, puro, sem banco/rede): detectores L2 + `analyze()` + `build_pack()`.
+    É a FONTE ÚNICA da análise (mesmo resultado do `behavior-lab`). Dockerfile e redeploy.ps1/.sh/2-deploy.sh
+    agora copiam/empacotam esse arquivo.
+  - `main.py` (bloco antes do `# Entry point`): tabelas `behavior_config` (enabled, interval_min=60, days=15),
+    `behavior_pack` (tenant, days 7/15/30, gz BYTEA, etag, meta, last_access), `behavior_job_lease` (trava por
+    linha com validade — NÃO segura conexão do pool). Worker `_behavior_worker` (tick 300s, env
+    `WORKPULSE_BEHAVIOR_JOB=0` desliga) remonta os pacotes vencidos dos 3 períodos (7, 15 e 30 dias — sempre prontos). Endpoints: `GET /v1/behavior/pack?tenant&days` (gzip + ETag/304; 202 `building` na 1ª vez),
+    `POST /v1/behavior/pack/rebuild` (botão "Recalcular"), `GET /v1/behavior/config`,
+    `PUT /v1/admin/behavior/config/{tenant}` (require_admin).
+  - Site: `site/dashboard/js/wp-behavior.js` + `css/wp-behavior.css`, seção `#tab-behavior` em `workforce.html`,
+    item no menu Análises com `data-role="admin"` (Líder não vê), loader em `wp-nav.js`. SVG puro, sem lib.
+  - WhatsApp: classe própria, nunca conta como não-trabalho (mesmo com regra "improdutivo"); classificação de
+    sites pelo TÍTULO DA ABA no navegador / nome do executável em apps (`_bh_target`). `_BH_HOUR_VER`/`_BH_DAY_VER`
+    forçam recálculo quando a lógica muda (regra nova de Categorização NÃO recalcula horas já fechadas →
+    use "Recalcular" ou suba a versão).
+  - Deploy: `scripts\redeploy-publicar.ps1` (backend + site).
+  - 2026-11-19 — **Montagem 1x ao dia (padrão).** `behavior_config.interval_min` default 1440 + `run_hour` (default 5h
+    local): no modo diário o pacote vai só até ONTEM (dias completos) e é montado 1x/dia após `run_hour`
+    (`_bh_due`). Intervalos menores (60–720 min) incluem o dia em andamento. Configurável no Platform Admin
+    (`site/adm`, botão "comportamento" na linha do cliente → modal `#bhcModal`; `GET|PUT /v1/admin/behavior/config/{tenant}`,
+    o PUT audita e remonta os 3 pacotes na hora). Os 3 períodos (7/15/30) ficam sempre prontos.
+  - 2026-11-19 — **Casa × escritório (híbrido).** `behavior_config.office_days` ('1,3,5' = seg/qua/sex presencial,
+    ISO 1=seg) → `analyze(..., office_days)`; por pessoa `hib_*` (média presencial × casa, dias, dif %, dia menos
+    ativo, média por dia da semana) e sinal `hybrid_gap` (baixa; ≥30% e ≥1h, ≥3 dias presenciais e ≥2 em casa;
+    vale nos dois sentidos). Seção neutra "Casa × escritório" + gráfico por dia da semana na ficha.
+    `_BH_PACK_VER` (meta.v) força o job/endpoint a remontar pacotes de versão antiga.
 - 2026-11-18 — **Behavior (Análise de Comportamento) — L1 + chave de API.** Plano em `../PLANO_BEHAVIOR.md`.
   Bloco novo antes do `# Entry point` em `main.py`: tabelas `api_keys` (chave `wpk_…`, só SHA-256 no banco,
   escopo `behavior:read`, validade, last_used/ip, revoked) e `behavior_day_cache` (tenant, dia-LOCAL, payload JSONB).

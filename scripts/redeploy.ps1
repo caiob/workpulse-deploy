@@ -42,7 +42,7 @@ $DeployBucket = "workpulse-deploy-$AccountId"
 Write-Host "`n>> Empacotando e enviando o codigo do servidor..."
 $Zip = Join-Path $env:TEMP "server-src.zip"
 if (Test-Path $Zip) { Remove-Item $Zip -Force }
-$Files = @("main.py","migration.py","requirements.txt","Dockerfile") |
+$Files = @("main.py","behavior_analysis.py","migration.py","requirements.txt","Dockerfile") |
          ForEach-Object { Join-Path $ServerDir $_ }
 foreach ($f in $Files) { if (-not (Test-Path $f)) { Write-Error "Arquivo nao encontrado: $f"; exit 1 } }
 Compress-Archive -Path $Files -DestinationPath $Zip -Force

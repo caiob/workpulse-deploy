@@ -58,6 +58,37 @@
   </div>
 </div>
 
+<!-- MODAL: Comportamento (Análise de Comportamento) do cliente -->
+<div id="bhcModal" class="login-shade hide">
+  <div class="login-box">
+    <div class="crumb">comportamento <span class="sep">·</span> <span id="bhcTenant" class="mono"></span></div>
+    <h2>Análise de Comportamento</h2>
+    <label style="display:flex;gap:8px;align-items:center;margin-top:6px"><input type="checkbox" id="bhcEnabled"> Ativa para este cliente</label>
+    <label>Frequência da montagem</label>
+    <select id="bhcInterval" class="fld" onchange="bhcToggleHour()">
+      <option value="1440">1x ao dia (recomendado)</option>
+      <option value="720">A cada 12 horas</option>
+      <option value="360">A cada 6 horas</option>
+      <option value="240">A cada 4 horas</option>
+      <option value="120">A cada 2 horas</option>
+      <option value="60">A cada 1 hora</option>
+    </select>
+    <div id="bhcHourWrap"><label>Horário da montagem diária (hora local)</label>
+      <select id="bhcHour" class="fld"></select></div>
+    <label>Período padrão ao abrir a aba</label>
+    <select id="bhcDays" class="fld"><option value="7">7 dias</option><option value="15">15 dias</option><option value="30">30 dias</option></select>
+    <label>Dias presenciais (o resto conta como “em casa”)</label>
+    <div id="bhcOffice" style="display:flex;gap:12px;flex-wrap:wrap;margin:4px 0 8px"></div>
+    <p style="font-size:11px;color:var(--text-muted);margin:6px 0 0">1x ao dia monta os pacotes de 7, 15 e 30 dias com os dias completos (até ontem). Mais vezes ao dia inclui o dia em andamento, mas consome mais banco. Ao salvar, os pacotes são remontados na hora.</p>
+    <div id="bhcPacks" style="font-size:11px;color:var(--text-dim);margin-top:8px"></div>
+    <div id="bhcError" class="login-error"></div>
+    <div style="display:flex;gap:8px;margin-top:14px">
+      <button class="primary" onclick="bhcSave()">Salvar</button>
+      <button class="ghost" onclick="bhcClose()">Fechar</button>
+    </div>
+  </div>
+</div>
+
 <!-- MODAL: Financeiro do cliente -->
 <div id="finModal" class="login-shade hide">
   <div class="login-box" style="max-width:600px">
@@ -629,6 +660,6 @@
 
 <div id="toast" class="toast hide"></div>
 
-<script src="js/admin.js?v=22"></script>
+<script src="js/admin.js?v=23"></script>
 </body>
 </html>

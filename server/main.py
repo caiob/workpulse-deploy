@@ -1465,6 +1465,7 @@ async def lifespan(app: FastAPI):
     task_dedup     = asyncio.create_task(_event_id_dedup_watcher())
     task_ihbf      = asyncio.create_task(_ingest_hour_backfill_task())
     task_dirsync   = asyncio.create_task(_directory_sync_worker())
+    task_behavior  = asyncio.create_task(_behavior_worker())
     yield
     task_retention.cancel()
     task_reports.cancel()
@@ -1473,7 +1474,8 @@ async def lifespan(app: FastAPI):
     task_dedup.cancel()
     task_ihbf.cancel()
     task_dirsync.cancel()
-    for t in (task_retention, task_reports, task_alerts, task_rollup, task_dedup, task_ihbf, task_dirsync):
+    task_behavior.cancel()
+    for t in (task_retention, task_reports, task_alerts, task_rollup, task_dedup, task_ihbf, task_dirsync, task_behavior):
         try:
             await t
         except asyncio.CancelledError:
@@ -9187,6 +9189,320 @@ def revoke_api_key(key_id: int, request: Request):
 
 
 # ---------------------------------------------------------------------------
+
+# =============================================================================
+# Behavior — PACOTE PRONTO (gerado por job; o navegador baixa uma vez e faz tudo local)
+# =============================================================================
+# O painel de Comportamento NÃO consulta o banco a cada clique: um job monta, a cada
+# interval_min, as 4 tabelas do painel (pessoas, sinais, dias, segurança) por tenant e
+# período e grava comprimidas (gzip) em behavior_pack. GET /v1/behavior/pack devolve
+# os bytes prontos com ETag (304 quando nada mudou). ~150 KB por tenant/15 dias.
+import gzip as _gzip
+from fastapi.responses import JSONResponse as _JSONResponse
+
+
+def _bh_log(msg: str, *a) -> None:
+    print("[behavior] " + (msg % a if a else msg), file=sys.stderr, flush=True)
+
+try:
+    import behavior_analysis as _BA
+except Exception as _e:  # pragma: no cover
+    _BA = None
+    _bh_log("behavior_analysis indisponível: %s", _e)
+
+_SCHEMA_STMTS.extend([
+    """
+    CREATE TABLE IF NOT EXISTS behavior_config (
+        tenant_id    TEXT PRIMARY KEY,
+        enabled      BOOLEAN NOT NULL DEFAULT TRUE,
+        interval_min INTEGER NOT NULL DEFAULT 1440,
+        days         INTEGER NOT NULL DEFAULT 15,
+        updated_at   TEXT,
+        updated_by   TEXT
+    )
+    """,
+    "ALTER TABLE behavior_config ADD COLUMN IF NOT EXISTS office_days TEXT DEFAULT '1,3,5'",
+    "ALTER TABLE behavior_config ADD COLUMN IF NOT EXISTS run_hour INTEGER DEFAULT 5",
+    """
+    CREATE TABLE IF NOT EXISTS behavior_job_lease (
+        id      INTEGER PRIMARY KEY,
+        holder  TEXT,
+        until   TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS behavior_pack (
+        tenant_id   TEXT NOT NULL,
+        days        INTEGER NOT NULL,
+        built_at    TEXT NOT NULL,
+        etag        TEXT NOT NULL,
+        gz          BYTEA NOT NULL,
+        meta        JSONB,
+        build_ms    INTEGER,
+        last_access TEXT,
+        PRIMARY KEY (tenant_id, days)
+    )
+    """,
+])
+
+BEHAVIOR_PACK_TICK = int(os.getenv("WORKPULSE_BEHAVIOR_TICK_SEC", "300"))
+_BH_PACK_DAYS = (7, 15, 30)
+_BH_PACK_VER = 2   # bump ao mudar behavior_analysis/campos do pacote -> job e endpoint remontam
+_BH_BUILDING: set = set()
+_BH_BUILDING_LOCK = threading.Lock()
+
+
+def _bh_cfg(c, tenant: str) -> dict:
+    r = c.execute("SELECT enabled, interval_min, days, office_days, run_hour FROM behavior_config WHERE tenant_id=%s",
+                  (tenant,)).fetchone()
+    d = dict(r) if r else {"enabled": True, "interval_min": 1440, "days": 15, "office_days": "1,3,5", "run_hour": 5}
+    d["office_days"] = d.get("office_days") or "1,3,5"
+    d["run_hour"] = 5 if d.get("run_hour") is None else int(d["run_hour"])
+    d["interval_min"] = int(d.get("interval_min") or 1440)
+    return d
+
+
+def _bh_daily(cfg: dict) -> bool:
+    """Modo diário (padrão): 1 montagem por dia, no run_hour local, com os dias FECHADOS (até ontem)."""
+    return int(cfg.get("interval_min") or 1440) >= 1440
+
+
+def _bh_due(cfg: dict, row: dict | None, now: dt.datetime) -> bool:
+    if not row:
+        return True
+    if ((row.get("meta") or {}).get("v")) != _BH_PACK_VER:
+        return True
+    built = dt.datetime.fromisoformat(row["built_at"])
+    if _bh_daily(cfg):
+        tz = _bh_tz()
+        nl, bl = now.astimezone(tz), built.astimezone(tz)
+        if nl.hour < int(cfg["run_hour"]):
+            return False                                   # ainda não deu o horário de hoje
+        return bl.date() < nl.date() or bl.hour < int(cfg["run_hour"])
+    return (now - built).total_seconds() >= int(cfg["interval_min"]) * 60
+
+
+def _bh_office(cfg: dict) -> list:
+    """'1,3,5' (ISO: 1=seg ... 5=sex) -> [0,2,4] (weekday do Python). Vazio/'-' = sem dias presenciais."""
+    out = []
+    for x in str(cfg.get("office_days") or "").split(","):
+        x = x.strip()
+        if x.isdigit() and 1 <= int(x) <= 7:
+            out.append(int(x) - 1)
+    return sorted(set(out))
+
+
+def _bh_build_pack(tenant: str, days: int) -> dict:
+    """Monta o pacote do período [hoje-days+1 .. hoje] e grava em behavior_pack."""
+    if _BA is None:
+        raise RuntimeError("behavior_analysis indisponível")
+    t0 = time.monotonic()
+    tz = _bh_tz()
+    today = dt.datetime.now(dt.timezone.utc).astimezone(tz).date()
+    with db() as c:
+        _cfg = _bh_cfg(c, tenant)
+    if _bh_daily(_cfg):
+        today = today - dt.timedelta(days=1)      # modo diário: só dias completos (até ontem)
+    payloads = {}
+    for i in range(days - 1, -1, -1):
+        d = (today - dt.timedelta(days=i)).isoformat()
+        for _ in range(40):                       # continua de onde parou até completar o dia
+            r = behavior_day(tenant, d, False, 50)
+            if not r.get("pending"):
+                payloads[d] = r
+                break
+        else:
+            raise RuntimeError(f"dia {d} não completou")
+    people = behavior_people(tenant)["people"]
+    office = _bh_office(_cfg)
+    dash = _BA.analyze(tenant, people, payloads, office_days=office)
+    pack = _BA.build_pack(dash)
+    pack["meta"]["gerado_em"] = dt.datetime.now(dt.timezone.utc).isoformat()
+    pack["meta"]["dias"] = days
+    pack["meta"]["v"] = _BH_PACK_VER
+    raw = json.dumps(pack, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
+    gz = _gzip.compress(raw, 6)
+    etag = '"' + _hashlib.sha1(raw).hexdigest()[:20] + '"'
+    ms = int((time.monotonic() - t0) * 1000)
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
+    with db() as c:
+        c.execute(
+            """INSERT INTO behavior_pack (tenant_id, days, built_at, etag, gz, meta, build_ms, last_access)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+               ON CONFLICT (tenant_id, days) DO UPDATE SET built_at=EXCLUDED.built_at, etag=EXCLUDED.etag,
+                   gz=EXCLUDED.gz, meta=EXCLUDED.meta, build_ms=EXCLUDED.build_ms""",
+            (tenant, days, now, etag, psycopg2.Binary(gz), psycopg2.extras.Json(pack["meta"]), ms, now))
+    _bh_log("behavior pack %s/%sd: %d bytes gz, %d ms", tenant, days, len(gz), ms)
+    return {"tenant": tenant, "days": days, "bytes_gz": len(gz), "build_ms": ms, "etag": etag}
+
+
+def _bh_build_async(tenant: str, days: int) -> bool:
+    key = (tenant, days)
+    with _BH_BUILDING_LOCK:
+        if key in _BH_BUILDING:
+            return False
+        _BH_BUILDING.add(key)
+
+    def run():
+        try:
+            _bh_build_pack(tenant, days)
+        except Exception as e:
+            _bh_log("behavior pack %s/%s falhou: %s", tenant, days, e)
+        finally:
+            with _BH_BUILDING_LOCK:
+                _BH_BUILDING.discard(key)
+    threading.Thread(target=run, daemon=True).start()
+    return True
+
+
+_BH_HOLDER = f"{os.getpid()}-{secrets.token_hex(4)}"
+
+
+def _bh_lease(minutes: int = 20) -> bool:
+    """Trava do job por LINHA com validade (não segura conexão do pool durante a montagem,
+    ao contrário de um advisory lock de sessão). Só 1 processo/task monta por vez."""
+    now = dt.datetime.now(dt.timezone.utc)
+    with db() as c:
+        c.execute("INSERT INTO behavior_job_lease (id, holder, until) VALUES (1, NULL, %s) ON CONFLICT (id) DO NOTHING",
+                  (now.isoformat(),))
+        r = c.execute(
+            """UPDATE behavior_job_lease SET holder=%s, until=%s
+               WHERE id=1 AND (holder IS NULL OR holder=%s OR until < %s) RETURNING holder""",
+            (_BH_HOLDER, (now + dt.timedelta(minutes=minutes)).isoformat(), _BH_HOLDER, now.isoformat())).fetchone()
+    return bool(r)
+
+
+def _bh_unlease() -> None:
+    with db() as c:
+        c.execute("UPDATE behavior_job_lease SET holder=NULL WHERE id=1 AND holder=%s", (_BH_HOLDER,))
+
+
+def _do_behavior_packs() -> None:
+    """Ciclo do job: para cada tenant ativo com behavior ligado, reconstrói os pacotes vencidos
+    dos 3 períodos (7, 15 e 30 dias)."""
+    if os.getenv("WORKPULSE_BEHAVIOR_JOB", "1") != "1" or _BA is None:
+        return
+    if not _bh_lease():
+        return
+    try:
+        now = dt.datetime.now(dt.timezone.utc)
+        with db() as c:
+            tenants = [r["id"] for r in c.execute("SELECT id FROM tenants WHERE status='active'").fetchall()]
+        for tid in tenants:
+            try:
+                with db() as c:
+                    cfg = _bh_cfg(c, tid)
+                    rows = {r["days"]: dict(r) for r in c.execute(
+                        "SELECT days, built_at, last_access, meta FROM behavior_pack WHERE tenant_id=%s", (tid,)).fetchall()}
+                if not cfg["enabled"]:
+                    continue
+                # os 3 períodos ficam SEMPRE prontos (a aba nunca espera ao trocar 7/15/30 dias);
+                # o padrão do tenant primeiro. Dias passados vêm do cache -> remontar é barato (~1-3 s).
+                want = [int(cfg["days"])] + [d for d in _BH_PACK_DAYS if d != int(cfg["days"])]
+                for dd in want:
+                    if _bh_due(cfg, rows.get(dd), now):
+                        _bh_lease()                      # renova a validade entre montagens
+                        _bh_build_pack(tid, dd)
+            except Exception as e:
+                _bh_log("behavior job tenant %s: %s", tid, e)
+    finally:
+        _bh_unlease()
+
+
+async def _behavior_worker() -> None:
+    await asyncio.sleep(90)   # deixa o boot respirar
+    while True:
+        try:
+            await asyncio.get_event_loop().run_in_executor(None, _do_behavior_packs)
+        except Exception:
+            pass
+        await asyncio.sleep(BEHAVIOR_PACK_TICK)
+
+
+@app.get("/v1/behavior/pack", dependencies=[Depends(require_behavior_read)])
+def behavior_pack(tenant: str, request: Request, days: int = 15):
+    """Pacote pronto do painel de Comportamento (gzip + ETag). 202 enquanto é montado pela 1ª vez."""
+    if days not in _BH_PACK_DAYS:
+        raise HTTPException(status_code=400, detail="days deve ser 7, 15 ou 30")
+    with db() as c:
+        r = c.execute("SELECT etag, gz, built_at, build_ms, meta FROM behavior_pack WHERE tenant_id=%s AND days=%s",
+                      (tenant, days)).fetchone()
+        if r:
+            c.execute("UPDATE behavior_pack SET last_access=%s WHERE tenant_id=%s AND days=%s",
+                      (dt.datetime.now(dt.timezone.utc).isoformat(), tenant, days))
+    if not r:
+        _bh_build_async(tenant, days)
+        return _JSONResponse({"building": True, "retry_after_sec": 15}, status_code=202,
+                            headers={"Retry-After": "15", "Cache-Control": "no-store"})
+    if ((r.get("meta") or {}).get("v")) != _BH_PACK_VER:
+        _bh_build_async(tenant, days)          # serve o antigo agora; o novo fica pronto em instantes
+    hdr = {"ETag": r["etag"], "Cache-Control": "private, no-cache", "X-Built-At": r["built_at"],
+           "Vary": "Cookie, X-Api-Key, Accept-Encoding"}
+    if request.headers.get("if-none-match") == r["etag"]:
+        return Response(status_code=304, headers=hdr)
+    body = bytes(r["gz"])
+    if "gzip" in (request.headers.get("accept-encoding") or "").lower():
+        return Response(content=body, media_type="application/json", headers={**hdr, "Content-Encoding": "gzip"})
+    return Response(content=_gzip.decompress(body), media_type="application/json", headers=hdr)
+
+
+@app.post("/v1/behavior/pack/rebuild", dependencies=[Depends(require_behavior_read)])
+def behavior_pack_rebuild(tenant: str, days: int = 15, x_api_key: Annotated[str | None, Header()] = None):
+    """Força remontar o pacote agora (ex.: após mudar regras). Volta na hora; o painel faz polling."""
+    if x_api_key:
+        raise HTTPException(status_code=403, detail="use a sessão de admin")
+    if days not in _BH_PACK_DAYS:
+        raise HTTPException(status_code=400, detail="days deve ser 7, 15 ou 30")
+    started = _bh_build_async(tenant, days)
+    return {"started": started, "building": True}
+
+
+class BehaviorConfigIn(BaseModel):
+    enabled: bool = True
+    interval_min: int = Field(1440, ge=60, le=1440)   # 1440 = 1x ao dia (padrão)
+    run_hour: int = Field(5, ge=0, le=23)              # hora local da montagem diária
+    days: int = 15
+    office_days: str = "1,3,5"      # dias presenciais (1=seg ... 5=sex); "" = todo mundo remoto
+
+
+@app.get("/v1/behavior/config", dependencies=[Depends(require_behavior_read)])
+def behavior_config_get(tenant: str):
+    with db() as c:
+        cfg = _bh_cfg(c, tenant)
+        packs = [dict(r) for r in c.execute(
+            "SELECT days, built_at, build_ms, meta, last_access FROM behavior_pack WHERE tenant_id=%s ORDER BY days",
+            (tenant,)).fetchall()]
+    return {"tenant": tenant, **cfg, "packs": packs}
+
+
+@app.get("/v1/admin/behavior/config/{tenant_id}", dependencies=[Depends(require_admin)])
+def behavior_config_admin_get(tenant_id: str):
+    return behavior_config_get(tenant_id)
+
+
+@app.put("/v1/admin/behavior/config/{tenant_id}", dependencies=[Depends(require_admin)])
+def behavior_config_put(tenant_id: str, body: BehaviorConfigIn):
+    if body.days not in _BH_PACK_DAYS:
+        raise HTTPException(status_code=400, detail="days deve ser 7, 15 ou 30")
+    with db() as c:
+        c.execute(
+            """INSERT INTO behavior_config (tenant_id, enabled, interval_min, run_hour, days, office_days, updated_at, updated_by)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,'platform-admin')
+               ON CONFLICT (tenant_id) DO UPDATE SET enabled=EXCLUDED.enabled, interval_min=EXCLUDED.interval_min,
+                   run_hour=EXCLUDED.run_hour, days=EXCLUDED.days, office_days=EXCLUDED.office_days,
+                   updated_at=EXCLUDED.updated_at, updated_by=EXCLUDED.updated_by""",
+            (tenant_id, body.enabled, body.interval_min, body.run_hour, body.days,
+             ",".join(str(i + 1) for i in _bh_office({"office_days": body.office_days})),
+             dt.datetime.now(dt.timezone.utc).isoformat()))
+    try:
+        audit("admin", "behavior.config", target=tenant_id, detail=json.dumps(body.model_dump()))
+    except Exception:
+        pass
+    for d in _BH_PACK_DAYS:                      # aplica já (ex.: mudou os dias presenciais)
+        _bh_build_async(tenant_id, d)
+    return {"ok": True, "tenant": tenant_id, **body.model_dump()}
+
+
 # Entry point
 # ---------------------------------------------------------------------------
 def serve() -> None:

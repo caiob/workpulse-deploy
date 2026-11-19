@@ -432,7 +432,7 @@ function renderTenantsLicenses() {
           <div style="color:var(--text-muted);font-size:10px" title="Evento detalhado mais antigo disponível no banco">${t.oldest_event ? 'desde ' + new Date(t.oldest_event).toLocaleDateString('pt-BR') : 'sem dados'}</div>
           <button class="ghost" style="margin-left:4px;font-size:11px;padding:2px 6px" onclick="setRetention('${t.id}', ${t.retention_days || 90})">✎</button>
         </td>
-        <td onclick="event.stopPropagation()" style="white-space:nowrap"><button class="ghost" onclick="genTenantAccess('${t.id}')">gerar acesso</button> <button class="ghost" onclick="finOpen('${t.id}')">financeiro</button></td>
+        <td onclick="event.stopPropagation()" style="white-space:nowrap"><button class="ghost" onclick="genTenantAccess('${t.id}')">gerar acesso</button> <button class="ghost" onclick="finOpen('${t.id}')">financeiro</button> <button class="ghost" onclick="bhcOpen('${t.id}')">comportamento</button></td>
       </tr>
       ${detail}`;
   }).join('') : `<tr><td colspan="12" class="empty">Nenhuma empresa encontrada.</td></tr>`;
@@ -1284,4 +1284,53 @@ async function dbTerminate(pid) {
   try { await api('/v1/admin/db-activity/' + pid + '/terminate', { method: 'POST' }); }
   catch (e) { alert('Falha: ' + e.message); }
   loadDbActivity();
+}
+
+
+// ---------- Comportamento (Análise de Comportamento) por cliente ----------
+let _bhcTenant = null;
+const _BHC_DOW = [['1','Seg'],['2','Ter'],['3','Qua'],['4','Qui'],['5','Sex'],['6','Sáb'],['7','Dom']];
+function bhcToggleHour() {
+  document.getElementById('bhcHourWrap').style.display = document.getElementById('bhcInterval').value === '1440' ? '' : 'none';
+}
+async function bhcOpen(tenantId) {
+  _bhcTenant = tenantId;
+  document.getElementById('bhcTenant').textContent = tenantId;
+  document.getElementById('bhcError').textContent = '';
+  const hs = document.getElementById('bhcHour');
+  if (!hs.options.length) for (let h = 0; h < 24; h++) hs.appendChild(new Option(String(h).padStart(2, '0') + ':00', h));
+  try {
+    const c = await api('/v1/admin/behavior/config/' + encodeURIComponent(tenantId));
+    document.getElementById('bhcEnabled').checked = !!c.enabled;
+    const iv = document.getElementById('bhcInterval');
+    iv.value = String(c.interval_min || 1440); if (!iv.value) iv.value = '1440';
+    hs.value = String(c.run_hour == null ? 5 : c.run_hour);
+    document.getElementById('bhcDays').value = String(c.days || 15);
+    const sel = new Set(String(c.office_days || '1,3,5').split(',').map(x => x.trim()));
+    const box = document.getElementById('bhcOffice'); box.innerHTML = '';
+    _BHC_DOW.forEach(([v, l]) => {
+      const lb = document.createElement('label'); lb.style.cssText = 'display:inline-flex;gap:4px;align-items:center;margin:0';
+      lb.innerHTML = `<input type="checkbox" value="${v}" ${sel.has(v) ? 'checked' : ''}> ${l}`; box.appendChild(lb);
+    });
+    const packs = (c.packs || []).map(p => `${p.days} dias: ${p.built_at ? new Date(p.built_at).toLocaleString('pt-BR') : '—'} (${p.build_ms != null ? (p.build_ms / 1000).toFixed(1) + ' s' : '—'})`);
+    document.getElementById('bhcPacks').textContent = packs.length ? 'Última montagem — ' + packs.join(' · ') : 'Ainda não há pacotes montados.';
+    bhcToggleHour();
+    document.getElementById('bhcModal').classList.remove('hide');
+  } catch (e) { toast('Erro: ' + e.message); }
+}
+function bhcClose() { document.getElementById('bhcModal').classList.add('hide'); }
+async function bhcSave() {
+  const office = [...document.querySelectorAll('#bhcOffice input:checked')].map(i => i.value).join(',');
+  const body = {
+    enabled: document.getElementById('bhcEnabled').checked,
+    interval_min: parseInt(document.getElementById('bhcInterval').value, 10),
+    run_hour: parseInt(document.getElementById('bhcHour').value, 10),
+    days: parseInt(document.getElementById('bhcDays').value, 10),
+    office_days: office,
+  };
+  try {
+    await api('/v1/admin/behavior/config/' + encodeURIComponent(_bhcTenant), { method: 'PUT', body: JSON.stringify(body) });
+    toast('Configuração salva. Pacotes sendo remontados.');
+    bhcClose();
+  } catch (e) { document.getElementById('bhcError').textContent = 'Erro: ' + e.message; }
 }

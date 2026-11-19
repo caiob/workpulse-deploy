@@ -12,6 +12,7 @@
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <link rel="stylesheet" href="css/workforce.css?v=36">
+<link rel="stylesheet" href="css/wp-behavior.css?v=4">
 <link rel="icon" type="image/jpeg" href="../assets/logo-workpulse.jpeg">
 </head>
 <body>
@@ -168,6 +169,7 @@
       </button>
       <div class="nav-dropdown-menu">
         <button data-tab="tempoativo">⏳ Tempo Ativo</button>
+        <button data-tab="behavior" data-role="admin">🧭 Comportamento</button>
         <button data-tab="organograma">🧬 Organograma</button>
         <button data-tab="alerts">🔔 Alertas</button>
         <button data-tab="trends">📈 Tendências</button>
@@ -509,6 +511,213 @@
         </div>
       </div>
     </div>
+  </section>
+
+  <!-- ── COMPORTAMENTO (Análise de Comportamento) ── -->
+  <section id="tab-behavior" class="hide">
+    <h1 class="page-title">Análise de <span class="em">comportamento</span>.</h1>
+    <p class="page-sub">Padrões de trabalho da equipe de <span id="bhPeriodo">—</span>. Sinais são pontos de partida para conversa, não veredito.</p>
+
+    <div class="toolbar">
+      <div class="bh-days" role="group" aria-label="Período">
+        <button type="button" data-days="7">7 dias</button>
+        <button type="button" data-days="15" class="on">15 dias</button>
+        <button type="button" data-days="30">30 dias</button>
+      </div>
+      <select id="bhDept" aria-label="Departamento"></select>
+      <span class="bh-status" id="bhStatus"></span>
+      <span class="spacer"></span>
+      <button class="ghost" id="bhRebuild" title="Recalcula agora com os dados e as regras de produtividade atuais">↻ Recalcular</button>
+    </div>
+
+    <p class="bh-take"><b data-bh-kpi="pessoas_baixa">—</b> pessoas ficam logadas bem abaixo do normal do próprio departamento e <b data-bh-kpi="risco_medio">—</b> têm índice de risco de segurança médio ou alto pelos sites e ferramentas que acessam. A equipe fica ativa em média <b data-bh-kpi="ativo_medio">—</b> por dia útil, com <b data-bh-kpi="nao_trabalho">—</b> do tempo em vídeo, notícias, redes sociais, compras ou jogos.</p>
+
+    <div class="grid">
+      <div class="card span-2 bh-kpi"><h3>Colaboradores</h3><div class="stat" data-bh-kpi="colaboradores">—</div><div class="stat-trend">analisados no período</div></div>
+      <div class="card span-2 bh-kpi bh-kpi-bad"><h3>Pouco tempo logado</h3><div class="stat" data-bh-kpi="pessoas_baixa">—</div><div class="stat-trend">baixa atividade vs. depto</div></div>
+      <div class="card span-2 bh-kpi bh-kpi-warn"><h3>Presentes, pouco ativos</h3><div class="stat" data-bh-kpi="pessoas_pouco_ativo">—</div><div class="stat-trend">em 2 dias ou mais</div></div>
+      <div class="card span-2 bh-kpi bh-kpi-bad"><h3>Risco alto</h3><div class="stat" data-bh-kpi="risco_alto">—</div><div class="stat-trend">índice de segurança 50+</div></div>
+      <div class="card span-2 bh-kpi bh-kpi-warn"><h3>Redes sociais</h3><div class="stat" data-bh-kpi="social_30">—</div><div class="stat-trend">30+ min por dia útil</div></div>
+      <div class="card span-2 bh-kpi"><h3>Férias, mas ativos</h3><div class="stat" data-bh-kpi="pessoas_ferias">—</div><div class="stat-trend">marcação a revisar</div></div>
+    </div>
+
+    <!-- Pouco tempo logado -->
+    <div class="bh-block" id="bhEngajamento">
+      <div class="bh-block-h"><span class="pill bh-tag-pri">Prioridade</span><h2>Pouco tempo logado</h2></div>
+      <p class="bh-note">Índice = tempo ativo médio por dia útil dividido pela mediana do próprio departamento (100% = típico do time). Gráfico e tabela mostram as mesmas pessoas (abaixo de 70%), na mesma ordem: o gráfico dá a visão rápida, a tabela o detalhe. Abaixo de 60% merece atenção; abaixo de 45%, alta. Clique para abrir a ficha.</p>
+      <div class="grid bh-pair">
+        <div class="card span-5 no-bar"><h3>Abaixo de 70% do departamento</h3><div class="bh-chart" id="bhEngChart"></div></div>
+        <div class="span-7"><div class="bh-tablewrap" style="max-height:560px"><table>
+          <thead><tr><th>Colaborador</th><th>Departamento</th><th class="bh-n">Ativo/dia</th><th class="bh-n">Mediana depto</th><th class="bh-n">Índice</th><th class="bh-n">Dias pouco ativo</th><th class="bh-n">Dias sem atividade</th></tr></thead>
+          <tbody id="bhEngTab"></tbody></table></div></div>
+      </div>
+    </div>
+
+    <!-- Presente mas pouco ativo -->
+    <div class="bh-block" id="bhPoucoAtivo">
+      <div class="bh-block-h"><span class="pill bh-tag-pri">Prioridade</span><h2>Presente mas pouco ativo</h2></div>
+      <p class="bh-note">Quem fica com o expediente aberto (do início ao fim do dia) mas usa pouco dele. Barra = % do expediente realmente ativo na média dos dias úteis; a mediana da empresa é <b id="bhHolMed">—</b>. Gráfico e tabela mostram as mesmas pessoas: quem teve 2 ou mais dias úteis com 8h+ de expediente e menos de 27% ativo. Reuniões fora do computador e trabalho em papel também aparecem como pouco ativo — confira antes de concluir. Clique para abrir a ficha.</p>
+      <div class="grid bh-pair">
+        <div class="card span-5 no-bar"><h3>% do expediente realmente ativo</h3><div class="bh-chart" id="bhHolChart"></div></div>
+        <div class="span-7"><div class="bh-tablewrap" style="max-height:560px"><table>
+          <thead><tr><th>Colaborador</th><th>Departamento</th><th class="bh-n">Expediente médio</th><th class="bh-n">Ativo médio</th><th class="bh-n">% ativo</th><th class="bh-n">Dias pouco ativo</th><th>Pior dia</th></tr></thead>
+          <tbody id="bhHolTab"></tbody></table></div></div>
+      </div>
+    </div>
+
+    <!-- Muito tempo parado na mesma janela -->
+    <div class="bh-block" id="bhParado">
+      <div class="bh-block-h"><span class="pill bh-tag-warn">Atenção</span><h2>Muito tempo parado na mesma janela</h2></div>
+      <p class="bh-note">Blocos de 1h ou mais no mesmo app e mesmo título, sem trocar de janela e sem ficar AFK. Barra = maior bloco da pessoa no período; o número ao lado, quantos blocos assim ela teve. Pode ser concentração legítima (um documento longo, uma sessão de IA, um vídeo de treinamento) ou janela aberta com a máquina mantida ativa — o app e o horário ajudam a separar. Reuniões não entram. Gráfico e tabela mostram as mesmas pessoas (2 ou mais blocos).</p>
+      <div class="grid bh-pair">
+        <div class="card span-5 no-bar"><h3>Maior bloco sem trocar de janela</h3><div class="bh-chart" id="bhStaChart"></div></div>
+        <div class="span-7"><div class="bh-tablewrap" style="max-height:560px"><table>
+          <thead><tr><th>Colaborador</th><th>Departamento</th><th class="bh-n">Blocos 1h+</th><th class="bh-n">Maior bloco</th><th class="bh-n">Total</th><th>App mais comum</th><th>Quando (maior)</th></tr></thead>
+          <tbody id="bhStaTab"></tbody></table></div></div>
+      </div>
+    </div>
+
+    <!-- Atividade de madrugada -->
+    <div class="bh-block" id="bhMadrugada">
+      <div class="bh-block-h"><span class="pill bh-tag-warn">Atenção</span><h2>Atividade de madrugada</h2></div>
+      <p class="bh-note">Quem teve 2 ou mais noites com 30+ min de atividade entre 00h e 05h. Barra = total de horas na madrugada no período. Em vermelho, quem teve noite de atividade <b>contínua</b> (3h ou mais seguidas com o computador ativo quase o tempo todo) — padrão que costuma indicar processo rodando ou máquina mantida acordada, e não uma pessoa trabalhando. Pode ser plantão ou entrega urgente: vale conversar.</p>
+      <div class="grid bh-pair">
+        <div class="card span-5 no-bar"><h3>Horas ativas entre 00h e 05h</h3><div class="bh-chart" id="bhNigChart"></div>
+          <div class="bh-status" id="bhNigPont" style="margin-top:6px"></div>
+          <div class="bh-legend"><span><i class="bh-dot" style="background:var(--danger)"></i>Com noite contínua</span><span><i class="bh-dot" style="background:var(--warn)"></i>3+ noites</span><span><i class="bh-dot" style="background:var(--primary)"></i>2 noites</span></div></div>
+        <div class="span-7"><div class="bh-tablewrap" style="max-height:560px"><table>
+          <thead><tr><th>Colaborador</th><th>Departamento</th><th class="bh-n">Noites</th><th class="bh-n">Total</th><th class="bh-n">Média/noite</th><th class="bh-n">Contínuas</th><th>Última</th></tr></thead>
+          <tbody id="bhNigTab"></tbody></table></div></div>
+      </div>
+    </div>
+
+    <!-- Segurança -->
+    <div class="bh-block" id="bhSeguranca">
+      <div class="bh-block-h"><span class="pill bh-tag-pri">Segurança</span><h2>Risco pelos sites e ferramentas acessados</h2></div>
+      <p class="bh-note">Índice 0–100 por pessoa, ponderado pela gravidade da categoria, pelo tempo e pelo número de dias: VPN/Tor/proxy, torrent/pirataria e a lista de sites perigosos (Alertas) pesam mais; compartilhamento de arquivos, acesso remoto e apostas, médio; IA externa e e-mail pessoal, pouco. A detecção usa o título da aba ativa do navegador ou o nome do app — leia os exemplos antes de concluir.</p>
+      <div class="grid bh-pair">
+        <div class="card span-5 no-bar"><h3>Pessoas por categoria de risco</h3><div class="bh-chart" id="bhSecChart"></div></div>
+        <div class="span-7"><div class="bh-tablewrap" style="max-height:440px"><table>
+          <thead><tr><th>Colaborador</th><th>Departamento</th><th class="bh-n">Índice</th><th>Categorias (tempo total)</th><th>Exemplos de janelas</th></tr></thead>
+          <tbody id="bhSecTab"></tbody></table></div></div>
+      </div>
+    </div>
+
+    <!-- Redes sociais e WhatsApp -->
+    <div class="bh-block" id="bhRedes">
+      <div class="bh-block-h"><span class="pill bh-tag-info">Uso</span><h2>Redes sociais e WhatsApp</h2></div>
+      <p class="bh-note">Redes sociais = Instagram, Facebook, TikTok, X/Twitter, Reddit, Pinterest, Threads, Kwai e Snapchat, pelo título da aba ativa do navegador ou pelo app instalado (busca no Google com o nome do site não conta). O WhatsApp é produtivo e fica fora dessa conta: aparece só como métrica informativa, para o gestor julgar.</p>
+      <div class="grid bh-pair">
+        <div class="card span-6 no-bar"><h3>Redes sociais — minutos por dia útil</h3><div class="bh-chart" id="bhSocChart"></div>
+          <div class="bh-legend"><span><i class="bh-dot" style="background:var(--danger)"></i>60+ min</span><span><i class="bh-dot" style="background:var(--warn)"></i>30–59 min</span></div></div>
+        <div class="span-6"><div class="bh-tablewrap" style="max-height:460px"><table>
+          <thead><tr><th>Colaborador</th><th>Departamento</th><th class="bh-n">WhatsApp min/dia</th><th class="bh-n">% do ativo</th><th>Onde (aba/app)</th></tr></thead>
+          <tbody id="bhWaTab"></tbody></table></div></div>
+      </div>
+    </div>
+
+    <!-- Casa × escritório -->
+    <div class="bh-block" id="bhHibrido">
+      <div class="bh-block-h"><span class="pill bh-tag-info">Ritmo</span><h2>Casa × escritório</h2></div>
+      <p class="bh-note">Tempo ativo médio nos dias presenciais e nos dias em casa. Diferença de ritmo é comum e muitas vezes tem motivo legítimo — reuniões presenciais, deslocamento, tarefas que pedem concentração — então isto serve para entender o padrão de cada um, não para cobrar. A lista mostra só quem tem 20%+ de diferença (e 45+ min), com pelo menos 3 dias presenciais e 2 em casa no período.</p>
+      <div class="grid bh-pair">
+        <div class="card span-5 no-bar"><h3>Equipe por dia da semana</h3><div class="bh-chart" id="bhHibChart"></div>
+          <div class="bh-legend"><span><i class="bh-dot" style="background:var(--primary)"></i>Presencial</span><span><i class="bh-dot" style="background:var(--violet, #a78bfa)"></i>Em casa</span></div></div>
+        <div class="span-7"><div class="bh-status" id="bhHibCount" style="margin:0 0 6px"></div><div class="bh-tablewrap" style="max-height:420px"><table>
+          <thead><tr><th>Colaborador</th><th>Departamento</th><th class="bh-n">Presencial</th><th class="bh-n">Em casa</th><th class="bh-n">Diferença</th><th>Dia menos ativo</th></tr></thead>
+          <tbody id="bhHibTab"></tbody></table></div></div>
+      </div>
+    </div>
+
+    <div class="grid bh-block">
+      <div class="card span-6 no-bar"><h3>Onde estão os sinais</h3>
+        <p class="bh-note">Ocorrências por tipo e severidade. Clique numa barra para ver os sinais daquele tipo.</p>
+        <div class="bh-chart" id="bhTipos"></div>
+        <div class="bh-legend"><span><i class="bh-dot" style="background:var(--danger)"></i>Alta</span><span><i class="bh-dot" style="background:var(--warn)"></i>Média</span><span><i class="bh-dot" style="background:var(--text-muted)"></i>Baixa</span></div>
+      </div>
+      <div class="card span-6 no-bar"><h3>Quando a equipe trabalha</h3>
+        <p class="bh-note">Minutos por pessoa em cada hora, média dos dias com atividade, por dia da semana.</p>
+        <div class="bh-seg"><button type="button" class="bh-heat-btn on" data-mode="ativo">Tempo ativo</button><button type="button" class="bh-heat-btn" data-mode="nw">Não-trabalho</button></div>
+        <div class="bh-chart" id="bhHeat"></div>
+      </div>
+    </div>
+
+    <div class="card no-bar bh-block"><h3>Início × fim do expediente</h3>
+      <p class="bh-note">Cada ponto é uma pessoa (horários medianos dos dias úteis). Tamanho = pontos de atenção; vermelho = tem sinal de alta severidade. Clique para abrir a ficha.</p>
+      <div class="bh-chart" id="bhScatter" style="min-height:330px"></div>
+    </div>
+
+    <div class="bh-block" id="bhRank">
+      <div class="bh-block-h"><h2>Todos os colaboradores por pontos de atenção</h2></div>
+      <p class="bh-note">Ordenado por pontos (alta = 3, média = 2, baixa = 1). Clique numa linha para abrir a ficha.</p>
+      <div class="toolbar" style="margin-bottom:12px">
+        <input id="bhSearch" type="search" placeholder="Buscar nome, cargo ou depto…" style="width:280px">
+        <label style="display:inline-flex;gap:6px;align-items:center"><input type="checkbox" id="bhOnlyHigh"> Só com sinal de alta severidade</label>
+        <span class="bh-status" id="bhRankCount"></span>
+      </div>
+      <div class="bh-tablewrap"><table>
+        <thead><tr><th>Colaborador</th><th>Departamento</th><th class="bh-n">Pontos</th><th class="bh-n">Alta</th><th class="bh-n">Média</th><th class="bh-n">Baixa</th><th>Principais sinais</th><th class="bh-n">Início</th><th class="bh-n">Fim</th><th class="bh-n">Ativo/dia</th><th class="bh-n">Não-trab.</th></tr></thead>
+        <tbody id="bhRanking"></tbody></table></div>
+    </div>
+
+    <div class="card no-bar bh-block" id="bhPessoa">
+      <h3>Ficha comportamental</h3>
+      <h2 class="bh-pname" id="bhPNome">—</h2>
+      <p class="bh-pinfo" id="bhPInfo">—</p>
+      <div class="bh-badges" id="bhPBadges"></div>
+      <div class="bh-extra" id="bhPExtra"></div>
+      <div class="bh-resumo"><span class="bh-resumo-l">Resumo automático (por regras — prévia do resumo por IA)</span><span id="bhPResumo">—</span></div>
+      <div class="bh-sub-h">Por dia da semana</div>
+      <p class="bh-note" id="bhPDowTxt"></p>
+      <div class="bh-chart" id="bhPDow" style="min-height:150px;max-width:620px"></div>
+      <div class="bh-sub-h">Dia a dia, hora a hora</div>
+      <p class="bh-note">Cada linha é um dia; cada célula, uma hora. Azul = ativo, laranja = maior parte não-trabalho. Fim de semana e feriado marcados com ◦.</p>
+      <div class="bh-chart" id="bhPHeat"></div>
+      <div class="bh-sub-h">Sinais da pessoa</div>
+      <div class="bh-tablewrap" style="max-height:360px"><table>
+        <thead><tr><th>Dia</th><th>Sev.</th><th>Sinal</th><th>O que aconteceu</th><th>Evidência</th></tr></thead>
+        <tbody id="bhPSinais"></tbody></table></div>
+      <div class="bh-sub-h">Detalhe diário</div>
+      <div class="bh-tablewrap" style="max-height:420px"><table>
+        <thead><tr><th>Dia</th><th>1ª atividade</th><th>Início</th><th>Início efetivo</th><th>Fim</th><th class="bh-n">Ativo</th><th class="bh-n">Maior pausa</th><th class="bh-n">Não-trab.</th><th>Maior bloco sem trocar</th><th>Apps mais usados</th></tr></thead>
+        <tbody id="bhPDias"></tbody></table></div>
+    </div>
+
+    <div class="bh-block" id="bhTodos">
+      <div class="bh-block-h"><h2>Todos os sinais</h2></div>
+      <p class="bh-note">Ordenados por severidade e intensidade. Mostra até 300 linhas; use os filtros para refinar.</p>
+      <div class="toolbar" style="margin-bottom:12px">
+        <select id="bhSigTipo" aria-label="Tipo de sinal"></select>
+        <select id="bhSigSev" aria-label="Severidade"><option value="">Todas as severidades</option><option value="alta">Alta</option><option value="media">Média</option><option value="baixa">Baixa</option></select>
+        <span class="bh-status" id="bhSigCount"></span>
+      </div>
+      <div class="bh-tablewrap"><table>
+        <thead><tr><th>Sev.</th><th>Colaborador</th><th>Departamento</th><th>Dia</th><th>Sinal</th><th>O que aconteceu</th></tr></thead>
+        <tbody id="bhSinais"></tbody></table></div>
+    </div>
+
+    <details class="card no-bar bh-foot bh-block">
+      <summary>Como ler esta análise — definições e método</summary>
+      <dl>
+        <dt>Pouco tempo logado</dt><dd>Média de tempo ativo por dia útil abaixo de 60% da mediana do departamento (ou abaixo de 3h). Abaixo de 45% (ou 2h30) é severidade alta. Departamentos com menos de 3 pessoas usam a mediana da empresa.</dd>
+        <dt>Presente mas pouco ativo</dt><dd>Dia útil com expediente de 8h+ e tempo ativo abaixo de 27% dele. Severidade sempre média.</dd>
+        <dt>Dias úteis sem atividade</dt><dd>Dias úteis sem nenhuma atividade entre o primeiro e o último dia ativo da pessoa no período, sem férias marcadas.</dd>
+        <dt>Risco de segurança</dt><dd>Índice 0–100 a partir de janelas que indicam compartilhamento de arquivos, acesso remoto, VPN/Tor/proxy, torrent/pirataria, apostas, sites de paste, ferramentas ofensivas, e-mail pessoal, IA externa e a lista de sites perigosos do cliente. O tempo pesa mais que a repetição.</dd>
+        <dt>Uso de redes sociais</dt><dd>Em dia útil, 45 min+ em redes sociais, ou 20 min+ representando 15% do tempo ativo. 90 min+ é alta. WhatsApp não conta.</dd>
+        <dt>Ritmo diferente casa × escritório</dt><dd>Sinal de severidade baixa, só quando a diferença é grande e consistente: 30%+ e 1h+ entre a média dos dias presenciais (Seg, Qua, Sex) e dos dias em casa, com 3+ dias presenciais e 2+ em casa. Vale nos dois sentidos e pode ter motivo legítimo.</dd>
+        <dt>WhatsApp fora do padrão</dt><dd>WhatsApp é produtivo e nunca entra em não-trabalho. Este sinal (baixa) só aponta desvio da própria pessoa: dia útil com 1h+ e mais que o dobro do normal dela, ou 45 min+ em fim de semana/feriado.</dd>
+        <dt>Vídeo, notícias, compras ou jogos</dt><dd>Em dia útil, 20% ou mais do tempo ativo (ou 60+ min) nessas categorias ou em apps marcados como improdutivos na Categorização.</dd>
+        <dt>Horário fora do padrão</dt><dd>Início ou fim do expediente pelo menos 90 min (e 3× a variação típica) diferente do padrão da própria pessoa.</dd>
+        <dt>Começa tarde após ligar</dt><dd>Atividade na máquina cedo, mas o primeiro bloco de 15 min com 70% de trabalho só acontece 60+ min depois — e bem acima do normal da pessoa.</dd>
+        <dt>Atividade de madrugada</dt><dd>30 min ou mais de atividade entre 00h e 05h.</dd>
+        <dt>Muito tempo parado numa janela</dt><dd>60 min ou mais no mesmo app e título, sem trocar e sem AFK. Reuniões excluídas; sessões longas em IA aparecem como baixa.</dd>
+        <dt>Trabalho fora do horário</dt><dd>2h ou mais fora das 08h–18h em dia útil, ou 1h+ em fim de semana/feriado.</dd>
+        <dt>Sobrecarga sustentada</dt><dd>3 ou mais dias com 9h+ realmente ativas. Severidade baixa: excesso de trabalho não é o foco.</dd>
+        <dt>Ativo durante férias</dt><dd>Marcado de férias no WorkPulse com atividade registrada (ou a marcação está desatualizada).</dd>
+      </dl>
+      <p>Método: um job no servidor monta esta análise periodicamente a partir dos dados coletados (cálculo por hora, com as regras de Categorização do cliente). A página baixa o resultado pronto uma única vez e faz filtros, gráficos e fichas no navegador. Se mudar regras de Categorização, use “Recalcular”.</p>
+      <p>Privacidade: contém dados pessoais de colaboradores; visível só para Admin e Admin Master. Use os sinais para conversas e revisão humana, não como decisão automática.</p>
+    </details>
   </section>
 
   <!-- ── ORGANOGRAMA ── -->
@@ -1795,7 +2004,8 @@ allan.assis@empresa.com ; https://s3.amazonaws.com/.../photo_680202048.png"
 <script src="js/wp-users.js?v=33" defer></script>
 <script src="js/wp-support.js?v=7" defer></script>
 <script src="js/wp-reports.js?v=20" defer></script>
-<script src="js/wp-nav.js?v=34" defer></script>
+<script src="js/wp-behavior.js?v=5" defer></script>
+<script src="js/wp-nav.js?v=35" defer></script>
 <script src="js/wp-auth.js?v=23" defer></script>
 
 </body>

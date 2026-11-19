@@ -1,0 +1,68 @@
+/* =====================================================================
+   wp-behavior.css — Aba "Comportamento" (usa as variáveis do tema do site)
+   ===================================================================== */
+#tab-behavior .bh-take { font-size: 16px; line-height: 1.55; color: var(--text-dim); margin: 0 0 22px; max-width: 980px; }
+#tab-behavior .bh-take b { color: var(--text); font-weight: 600; }
+#tab-behavior .bh-days { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+#tab-behavior .bh-days button { background: transparent; border: 0; color: var(--text-dim); padding: 7px 13px; font-size: 13px; cursor: pointer; }
+#tab-behavior .bh-days button.on { background: var(--primary); color: #fff; font-weight: 600; }
+#tab-behavior .bh-status { font-size: 12px; color: var(--text-muted); }
+#tab-behavior .bh-kpi-bad .stat { color: var(--danger); }
+#tab-behavior .bh-kpi-warn .stat { color: var(--warn); }
+#tab-behavior .bh-block { margin: 30px 0 8px; }
+#tab-behavior .bh-block-h { display: flex; align-items: center; gap: 10px; margin: 0 0 4px; }
+#tab-behavior .bh-block-h h2 { font-family: var(--serif); font-weight: 600; font-size: 22px; margin: 0; letter-spacing: -0.01em; }
+#tab-behavior .bh-note { color: var(--text-dim); font-size: 13px; line-height: 1.5; margin: 0 0 14px; max-width: 1100px; }
+#tab-behavior .bh-chart { position: relative; min-height: 120px; }
+#tab-behavior .bh-chart svg { display: block; overflow: visible; }
+#tab-behavior .bh-lbl { fill: var(--text-muted); font-size: 11px; font-family: var(--sans); }
+#tab-behavior .bh-lbl-strong { fill: var(--text); font-size: 12px; font-weight: 500; font-family: var(--sans); }
+#tab-behavior .bh-click { cursor: pointer; }
+#tab-behavior .bh-tablewrap { overflow: auto; max-height: 520px; border: 1px solid var(--border-soft); border-radius: 12px; background: var(--panel); }
+#tab-behavior .bh-tablewrap table th { position: sticky; top: 0; z-index: 1; background: var(--panel-2); white-space: nowrap; }
+#tab-behavior .bh-tablewrap table td { vertical-align: top; }
+#tab-behavior tr.bh-click:hover td { background: var(--panel-soft); }
+#tab-behavior tr.bh-on td { background: var(--panel-soft); }
+#tab-behavior tr.bh-on td:first-child { box-shadow: inset 3px 0 0 var(--primary); }
+#tab-behavior .bh-n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+#tab-behavior .bh-nowrap { white-space: nowrap; }
+#tab-behavior .bh-small { color: var(--text-dim); font-size: 12px; }
+#tab-behavior .bh-name { font-weight: 500; }
+#tab-behavior .bh-ex { max-width: 420px; word-break: break-word; }
+#tab-behavior .bh-empty { color: var(--text-muted); padding: 22px; text-align: center; font-size: 13px; }
+#tab-behavior .pill.bh-sev-alta  { background: rgba(239,68,68,.16);  color: var(--danger); border-color: rgba(239,68,68,.35); }
+#tab-behavior .pill.bh-sev-media { background: rgba(245,158,11,.16); color: var(--warn);   border-color: rgba(245,158,11,.35); }
+#tab-behavior .pill.bh-sev-baixa { background: rgba(148,163,184,.14); color: var(--text-dim); border-color: rgba(148,163,184,.3); }
+#tab-behavior .pill.bh-tag-pri { background: rgba(239,68,68,.16); color: var(--danger); border-color: rgba(239,68,68,.35); font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
+#tab-behavior .pill.bh-tag-info { background: rgba(148,163,184,.14); color: var(--text-dim); border-color: rgba(148,163,184,.3); font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
+#tab-behavior .bh-legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: var(--text-dim); margin-top: 8px; }
+#tab-behavior .bh-dot { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
+#tab-behavior .bh-seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin: 6px 0 10px; }
+#tab-behavior .bh-seg button { background: transparent; border: 0; color: var(--text-dim); padding: 5px 12px; font-size: 12px; cursor: pointer; }
+#tab-behavior .bh-seg button.on { background: var(--panel-soft); color: var(--text); font-weight: 600; }
+#tab-behavior .bh-pname { font-family: var(--serif); font-weight: 600; font-size: 26px; margin: 0; }
+#tab-behavior .bh-pinfo { color: var(--text-dim); margin: 4px 0 0; font-size: 13px; }
+#tab-behavior .bh-badges { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; align-items: center; }
+#tab-behavior .bh-prof { padding: 4px 10px; font-size: 12px; margin-left: auto; }
+#tab-behavior .bh-extra { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-top: 14px; }
+#tab-behavior .bh-mini { border: 1px solid var(--border-soft); border-radius: 10px; padding: 9px 12px; background: var(--bg-2); }
+#tab-behavior .bh-mini-l { display: block; font-size: 11px; color: var(--text-muted); }
+#tab-behavior .bh-mini-v { font-size: 19px; font-variant-numeric: tabular-nums; font-weight: 600; }
+#tab-behavior .bh-mini-alta { color: var(--danger); }
+#tab-behavior .bh-mini-media { color: var(--warn); }
+#tab-behavior .bh-mini-ex { grid-column: 1 / -1; line-height: 1.45; }
+#tab-behavior .bh-resumo { border-left: 3px solid var(--primary); background: var(--bg-2); padding: 12px 14px; border-radius: 0 10px 10px 0; line-height: 1.55; font-size: 14px; margin: 16px 0; }
+#tab-behavior .bh-resumo-l { display: block; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--text-muted); margin-bottom: 4px; }
+#tab-behavior .bh-sub-h { font-size: 13px; color: var(--text-dim); font-weight: 600; text-transform: uppercase; letter-spacing: .05em; margin: 20px 0 8px; }
+#tab-behavior details.bh-foot summary { cursor: pointer; font-weight: 600; }
+#tab-behavior details.bh-foot dl { display: grid; grid-template-columns: minmax(180px, 240px) 1fr; gap: 8px 16px; font-size: 13px; line-height: 1.45; }
+#tab-behavior details.bh-foot dt { font-weight: 600; }
+#tab-behavior details.bh-foot dd { margin: 0; color: var(--text-dim); }
+#tab-behavior details.bh-foot p { font-size: 13px; line-height: 1.5; color: var(--text-dim); }
+@media (max-width: 700px) { #tab-behavior details.bh-foot dl { grid-template-columns: 1fr; } }
+.bh-tip { position: fixed; pointer-events: none; z-index: 10000; background: var(--panel-2); border: 1px solid var(--border); box-shadow: var(--shadow); border-radius: 8px; padding: 7px 10px; font-size: 12px; line-height: 1.45; opacity: 0; max-width: 320px; color: var(--text); transition: opacity .08s; }
+.bh-tip .bh-tip-sub { color: var(--text-dim); }
+#tab-behavior .span-2 { grid-column: span 2; }
+@media (max-width: 1300px) { #tab-behavior .span-2 { grid-column: span 4; } }
+@media (max-width: 700px)  { #tab-behavior .span-2 { grid-column: span 12; } }
+#tab-behavior .pill.bh-tag-warn { background: rgba(245,158,11,.16); color: var(--warn); border-color: rgba(245,158,11,.35); font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
